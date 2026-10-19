@@ -20,6 +20,12 @@ they decide -
   (B4e #739). This is the only place the raw product ledger is ever read, once a
   night, one day at a time - so the reads that answer a long window are served from
   these aggregates rather than from thirty days of deliveries;
+* ``observability_product_actor_daily``: the per-``(actor, day)`` daily product
+  aggregate, recomputed from that SAME single ledger read (B4g #742). It exists
+  because the step grain above cannot answer a retention cohort: ``actor_count`` is a
+  distinct count, and distinctness does not survive being stored, so "did the people
+  new on day D come back on day D+7" is answerable only from a row per person per
+  day. The cohort read joins this table to itself and never touches the ledger;
 * ``observability_alert_events``: the threshold alerts from the minimum alert set,
   including the ``cost_outlier`` rule that compares one actor's day against that
   SAME actor's trailing seven-day average rather than against any rupee amount
@@ -68,8 +74,10 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from modules.observability.domain.consumer import AI_JOB_SPEND_STATUS_FAILED, AlertRow
 from modules.observability.domain.product import (
+    ProductActorDaily,
     ProductDaily,
     ProductEventFact,
+    build_product_actor_daily,
     build_product_daily,
 )
 from modules.observability.domain.rollup import (
@@ -121,6 +129,7 @@ from modules.observability.schema.models import (
     observability_business_daily,
     observability_care_attribution_edges,
     observability_http_minute,
+    observability_product_actor_daily,
     observability_product_daily,
     observability_product_events,
     observability_rollup_runs,
@@ -154,6 +163,7 @@ class RollupReport:
     metric_rows: int
     attribution_rows: int
     product_rows: int
+    product_actor_rows: int
     budget_snapshots: int
     alerts_raised: int
     alerts_resolved: int
@@ -765,6 +775,35 @@ async def _upsert_product_daily(
     await connection.execute(statement)
 
 
+async def _upsert_product_actor_daily(
+    connection: AsyncConnection, target_date: date, row: ProductActorDaily
+) -> None:
+    """Write one actor's day row of ``observability_product_actor_daily``, recomputed whole.
+
+    B4g (#742), decision 22. The actor-grain companion to
+    :func:`_upsert_product_daily`, written from the SAME read of the ledger and with
+    the same recompute-in-full rule on the table's own UNIQUE key - so the two daily
+    aggregates can never describe different journeys, and a rerun converges instead of
+    accumulating.
+
+    This is what makes a thirty-day retention cohort answerable without scanning the
+    raw ledger: the cohort read joins this table to itself, and the ledger is still
+    read exactly once a night, here.
+    """
+    values: dict[str, Any] = {
+        "event_date": target_date,
+        "actor_kind": row.actor_kind,
+        "actor_key": row.actor_key,
+        "events": row.events,
+    }
+    statement = _upsert_statement(
+        observability_product_actor_daily,
+        values,
+        ("event_date", "actor_kind", "actor_key"),
+    )
+    await connection.execute(statement)
+
+
 async def _load_product_events(
     connection: AsyncConnection, window_start: datetime, window_end: datetime
 ) -> list[ProductEventFact]:
@@ -1045,6 +1084,13 @@ async def run_rollup(
             await _upsert_product_daily(connection, target_date, product_row)
             product_rows += 1
 
+        product_actor_rows = 0
+        for product_actor_row in build_product_actor_daily(
+            events=product_events, target_date=target_date
+        ):
+            await _upsert_product_actor_daily(connection, target_date, product_actor_row)
+            product_actor_rows += 1
+
         # Read AFTER the upserts above, in the same transaction, so the day under
         # test is the aggregate this pass just wrote rather than whatever was there
         # when the pass began. The seven days behind it are earlier passes' rows, and
@@ -1153,6 +1199,7 @@ async def run_rollup(
             metric_rows=metric_rows,
             attribution_rows=attribution_rows,
             product_rows=product_rows,
+            product_actor_rows=product_actor_rows,
             budget_snapshots=snapshots,
             alerts_raised=raised,
             alerts_resolved=resolved,
@@ -1170,6 +1217,7 @@ async def run_rollup(
         report.metric_rows,
         report.attribution_rows,
         report.product_rows,
+        report.product_actor_rows,
         report.budget_snapshots,
         report.alerts_raised,
         report.alerts_resolved,

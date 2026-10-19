@@ -149,6 +149,7 @@ EXPECTED_OBSERVABILITY_TABLES = {
     "observability.observability_http_minute",
     "observability.observability_product_events",
     "observability.observability_product_daily",
+    "observability.observability_product_actor_daily",
     "observability.observability_outbox",
     "observability.consumed_events",
 }

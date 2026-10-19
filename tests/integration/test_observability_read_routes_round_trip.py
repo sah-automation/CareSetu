@@ -110,6 +110,7 @@ RELIABILITY_PATH = "/v1/operator/observability/reliability"
 BUSINESS_PATH = "/v1/operator/observability/business"
 FUNNEL_PATH = "/v1/operator/observability/product/funnel"
 ACTIVE_USERS_PATH = "/v1/operator/observability/product/active-users"
+RETENTION_PATH = "/v1/operator/observability/product/retention-cohorts"
 
 
 async def _seed(connection: AsyncConnection) -> None:
@@ -2985,4 +2986,333 @@ async def test_the_active_users_route_refuses_a_window_outside_its_bounds(
     """The window is bounded in the query parameter, so an over-wide read is a 422."""
     with _client(database_url) as client:
         response = client.get(f"{ACTIVE_USERS_PATH}?days={days}", headers=_bearer())
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------- the retention cohorts read (#742)
+
+#: The daily per-actor aggregate, seeded as the nightly rollup writes it, as days
+#: before today. Each entry is ``(days ago, patient reference, doctor reference)`` and
+#: the arithmetic every assertion rests on is written out rather than left to be
+#: derived by eye. An actor's cohort is its EARLIEST seeded day, so a return visit
+#: never opens a second cohort:
+#:
+#:   45 days ago  p1 + p2 + d1   -> cohort A of 3, the only one with BOTH horizons
+#:   38 days ago  p1 + p2 + d1   -> A at A+7: 3 of 3, perfect
+#:   15 days ago  p1 + p2 + d1   -> A at A+30: 3 of 3, perfect
+#:   31 days ago  p3 + d2        -> cohort B of 2; 31+7 is inside, 31+30 is too
+#:   24 days ago  p3            -> B at B+7: one of two, so 0.5000
+#:                                  nobody at B+30, so 0.0000 - a ZERO, measured
+#:   3 days ago   p4            -> cohort C of 1, past neither horizon: null, null
+#:
+#: So this seed holds all three states a cohort table can be in - fully retained, half
+#: retained then lost, and too young to measure - and the third is the one that would be
+#: silently corrupted by writing zero. Cohort A's perfect retention is also the figure a
+#: product that has lost everybody would report if null and zero collapsed.
+_RETENTION_ACTOR_ROWS: tuple[tuple[int, int | None, int | None], ...] = (
+    (45, 501, None),
+    (45, 502, None),
+    (45, None, 601),
+    (38, 501, None),
+    (38, 502, None),
+    (38, None, 601),
+    (15, 501, None),
+    (15, 502, None),
+    (15, None, 601),
+    (31, 503, None),
+    (31, None, 602),
+    (24, 503, None),
+    (3, 504, None),
+)
+
+_RETENTION_ACTOR_INSERT = text(
+    "INSERT INTO observability.observability_product_actor_daily "
+    "(event_date, actor_kind, actor_key, events) VALUES (:event_date, :actor_kind, "
+    ":actor_key, :events)"
+)
+
+#: Truncating the RAW LEDGER, on purpose. This is the criterion, not a cleanup: a
+#: thirty-day retention answer that still works with the event ledger emptied is an
+#: answer that was computed from the daily aggregate. The ``clean_tables`` fixture
+#: already empties the ledger before every test, so the truncation here only makes the
+#: starting state explicit - the PROOF that the ledger is unread is
+#: :func:`test_the_cohorts_do_not_move_when_the_raw_ledger_is_filled`, which puts
+#: decoy events in and asserts the answer is byte-for-byte the same.
+_RETENTION_EMPTY_LEDGER = text("TRUNCATE observability.observability_product_events")
+
+#: Decoy ledger rows, shaped so that a read which DID consult the ledger would answer
+#: differently and obviously: eight brand-new arrivals on today with perfect retention
+#: at both horizons, none of whom exists in the daily aggregate above. ``#742``'s
+#: headline criterion is that filling the ledger changes nothing, and this is the only
+#: shape of that assertion that cannot be satisfied by accident.
+_RETENTION_DECOY_EVENTS: tuple[tuple[int, int, str], ...] = tuple(
+    (days_ago, 700_000 + index, "composer_opened") for days_ago in (30, 7, 0) for index in range(8)
+)
+
+_RETENTION_DECOY_INSERT = text(
+    "INSERT INTO observability.observability_product_events "
+    "(event_id, occurred_at, actor_kind, actor_key, session_key, trace_id, funnel, "
+    "step, outcome, duration_ms) VALUES "
+    "(:event_id, :occurred_at, :actor_kind, :actor_key, :session_key, :trace_id, "
+    "'intake', :step, 'completed', NULL)"
+)
+
+
+@pytest_asyncio.fixture
+async def retention_engine(engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
+    """Forty-five days of the daily actor aggregate, and an EMPTY raw ledger.
+
+    The aggregate is seeded directly rather than through forty-five rollup passes,
+    because the question here is what the READ does with long stretches of stored daily
+    aggregates - and forty-five real rollup passes would test the rollup, which
+    :mod:`test_observability_rollup_round_trip` already owns.
+    """
+    today = datetime.now(UTC).date()
+
+    rows: list[dict[str, Any]] = []
+    for days_ago, patient_ref, doctor_ref in _RETENTION_ACTOR_ROWS:
+        kind = ACTOR_KIND_PATIENT if patient_ref is not None else ACTOR_KIND_DOCTOR
+        rows.append(
+            {
+                "event_date": today - timedelta(days=days_ago),
+                "actor_kind": kind,
+                "actor_key": actor_key(
+                    kind,
+                    patient_ref if patient_ref is not None else doctor_ref,  # type: ignore[arg-type]
+                ),
+                "events": 1,
+            }
+        )
+    async with engine.begin() as connection:
+        await connection.execute(_RETENTION_ACTOR_INSERT, rows)
+        await connection.execute(_RETENTION_EMPTY_LEDGER)
+    yield engine
+
+
+def _retention_body(database_url: str, query: str = "") -> dict[str, Any]:
+    path = RETENTION_PATH if not query else f"{RETENTION_PATH}?{query}"
+    with _client(database_url) as client:
+        return client.get(path, headers=_bearer()).json()
+
+
+def _cohort_rows(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["cohort_date"]: row for row in body["cohorts"]}
+
+
+async def test_cohorts_are_read_from_the_daily_aggregate_with_the_ledger_empty(
+    retention_engine: AsyncEngine, database_url: str, db_engine: AsyncEngine
+) -> None:
+    """AC1 + AC3: the figures, computed from stored daily aggregates alone.
+
+    Forty-five days of the daily aggregate are in place and
+    ``observability_product_events`` has been TRUNCATED. Every figure below is
+    therefore computed from stored daily aggregates, and it outlives the free vendor
+    tier's fourteen-day retention because the system of record is what still holds it.
+    That the ledger is never CONSULTED is proved separately, by filling it and showing
+    the answer does not move.
+    """
+    del retention_engine
+    async with db_engine.connect() as db:
+        ledger_rows = int(
+            await db.scalar(text("SELECT COUNT(*) FROM observability.observability_product_events"))
+        )
+    assert ledger_rows == 0, "the ledger must be empty for this test to mean anything"
+
+    body = _retention_body(database_url)
+    rows = _cohort_rows(body)
+    today = datetime.now(UTC).date()
+
+    arrived = rows[str(today - timedelta(days=45))]
+    assert arrived["cohort_size"] == 3
+    assert arrived["retained_7d"] == 3
+    assert arrived["retained_30d"] == 3
+    assert arrived["retention_7d"] == "1.0000"
+    assert arrived["retention_30d"] == "1.0000"
+
+
+async def test_the_cohorts_do_not_move_when_the_raw_ledger_is_filled(
+    retention_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC2: the headline criterion, stated so that it cannot be satisfied by accident.
+
+    Twenty-four decoy ledger events land - eight people arriving today, thirty days
+    ago and seven days ago, each with perfect retention at both horizons. A read that
+    consulted the ledger would show them: today's cohort would jump from 0 to 8, the
+    31-day-old cohort from 2 to 10, and the 45-day-old one - the only figure the
+    response holds at thirty days with real arrivals in it - would not move at all,
+    which is exactly the kind of partial agreement a field-by-field check would miss.
+    The response is compared WHOLE instead.
+
+    This is the assertion that actually proves AC2. Asserting "the ledger is empty and
+    the answer is right" cannot prove it - the fixture empties the ledger for every
+    test, so an implementation that scanned the ledger would pass that too.
+    """
+    before = _retention_body(database_url)
+    today = datetime.now(UTC).date()
+    assert _cohort_rows(before)[str(today)]["cohort_size"] == 0
+    assert _cohort_rows(before)[str(today - timedelta(days=3))]["cohort_size"] == 1
+
+    rows = [
+        {
+            "event_id": uuid.uuid4(),
+            "occurred_at": datetime.combine(
+                today - timedelta(days=days_ago), time(12, 0), tzinfo=UTC
+            ),
+            "actor_kind": ACTOR_KIND_PATIENT,
+            "actor_key": actor_key(ACTOR_KIND_PATIENT, patient_ref),
+            "session_key": f"decoy-{days_ago}-{patient_ref}",
+            "trace_id": f"decoy-{days_ago}-{patient_ref}",
+            "step": step,
+        }
+        for days_ago, patient_ref, step in _RETENTION_DECOY_EVENTS
+    ]
+    async with retention_engine.begin() as connection:
+        await connection.execute(_RETENTION_DECOY_INSERT, rows)
+
+    after = _retention_body(database_url)
+
+    assert after == before
+
+
+async def test_a_cohort_that_came_back_for_a_week_and_then_left_reads_as_zero_at_thirty(
+    retention_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC4: each rate is its OWN cohort's retained over its OWN cohort's size.
+
+    Cohort B is two people, one of whom came back at seven days and neither of whom
+    came back at thirty. A denominator borrowed from the window, or from a neighbouring
+    cohort, would turn the half that returned into a different number - and a zero at
+    thirty days is a measurement, which is why it must not be confused with a horizon
+    that has not arrived.
+    """
+    del retention_engine
+    body = _retention_body(database_url)
+    rows = _cohort_rows(body)
+    today = datetime.now(UTC).date()
+
+    cohort_b = rows[str(today - timedelta(days=31))]
+    assert cohort_b["cohort_size"] == 2
+    assert cohort_b["retained_7d"] == 1
+    assert cohort_b["retention_7d"] == "0.5000"
+    assert cohort_b["retained_30d"] == 0
+    assert cohort_b["retention_30d"] == "0.0000"
+
+
+async def test_a_cohort_that_has_not_reached_its_horizon_reports_null_not_zero(
+    retention_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC1: ``null`` is a horizon nobody has lived through; zero is a lost cohort.
+
+    Both are in this seed. Writing zero into cohort C would put a fabricated 100% drop
+    at the right-hand end of the chart, where a real decline would have to compete with
+    it - and it is the one error on this read that no downstream consumer can detect.
+    """
+    del retention_engine
+    body = _retention_body(database_url)
+    rows = _cohort_rows(body)
+    today = datetime.now(UTC).date()
+
+    young = rows[str(today - timedelta(days=3))]
+    assert young["cohort_size"] == 1
+    assert young["retained_7d"] is None
+    assert young["retention_7d"] is None
+    assert young["retained_30d"] is None
+    assert young["retention_30d"] is None
+
+
+async def test_a_return_visit_does_not_open_a_second_cohort(
+    retention_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC4: a cohort is an arrival date, so coming back is not arriving again.
+
+    The seed returns every one of cohort A's members twice inside its own lifetime. A
+    read that counted each actor-day as an arrival would report three fresh cohorts of
+    three at the 38- and 15-day marks and describe a product acquiring nine people who
+    never existed.
+    """
+    del retention_engine
+    body = _retention_body(database_url)
+    rows = _cohort_rows(body)
+    today = datetime.now(UTC).date()
+
+    assert rows[str(today - timedelta(days=38))]["cohort_size"] == 0
+    assert rows[str(today - timedelta(days=15))]["cohort_size"] == 0
+    assert rows[str(today - timedelta(days=24))]["cohort_size"] == 0
+
+
+async def test_a_short_window_still_measures_the_full_thirty_day_horizon(
+    retention_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC4: ``days`` counts arrival dates and never truncates either horizon.
+
+    Forty dates end today. Cohort B arrived thirty-one days ago, so its thirty-day
+    horizon is YESTERDAY - a date that is itself nobody's arrival day, three weeks
+    after the cohort it belongs to. A query that read only the arrival dates it
+    returns would find no cohort there and report nothing at all; a query that did find
+    one would report zero, because nobody arrived then either. The figure belongs to the
+    cohort thirty-one days back.
+    """
+    del retention_engine
+    body = _retention_body(database_url, "days=40")
+    rows = _cohort_rows(body)
+    today = datetime.now(UTC).date()
+
+    assert len(body["cohorts"]) == 40
+    assert rows[str(today - timedelta(days=31))]["retention_30d"] == "0.0000"
+    # The horizon date is inside the window and is nobody's arrival day.
+    assert rows[str(today - timedelta(days=1))]["cohort_size"] == 0
+    # And the newest cohort in the same window has not reached thirty days at all.
+    assert rows[str(today - timedelta(days=9))]["retention_30d"] is None
+
+
+async def test_every_arrival_date_in_the_window_gets_a_row(
+    retention_engine: AsyncEngine, database_url: str
+) -> None:
+    """A gap in arrivals is a row with nothing in it, not a date missing from the table."""
+    del retention_engine
+    body = _retention_body(database_url, "days=40")
+    today = datetime.now(UTC).date()
+
+    assert body["from_date"] == str(today - timedelta(days=39))
+    assert body["to_date"] == str(today)
+    assert [row["cohort_date"] for row in body["cohorts"]] == [
+        str(today - timedelta(days=39 - index)) for index in range(40)
+    ]
+    empty = _cohort_rows(body)[str(today - timedelta(days=20))]
+    assert empty["cohort_size"] == 0
+    assert empty["retained_7d"] is None
+    assert empty["retention_7d"] is None
+
+
+async def test_the_retention_response_says_what_it_measured(
+    retention_engine: AsyncEngine, database_url: str
+) -> None:
+    """AC4/AC5: the horizons, and the four conventions a quoted rate needs."""
+    del retention_engine
+    body = _retention_body(database_url)
+
+    assert body["horizons"] == [7, 30]
+    assert body["days"] == 60
+    assert "cohort_size" in body["window_convention"]
+    assert "not zero" in body["maturity_convention"].lower()
+    assert "observability_product_actor_daily" in body["source_convention"]
+    assert "raw ledger is never scanned" in body["source_convention"]
+    assert "login" in body["actor_convention"]
+
+
+async def test_the_retention_route_refuses_anonymous_and_non_operator_callers(
+    database_url: str,
+) -> None:
+    """AC5: the same flat operator requirement as every other read in the module."""
+    assert _client(database_url).get(RETENTION_PATH).status_code == 401
+    forbidden = _client(database_url).get(RETENTION_PATH, headers=_bearer("patient"))
+    assert forbidden.status_code == 403
+
+
+@pytest.mark.parametrize("days", [0, 366])
+async def test_the_retention_route_refuses_a_window_outside_its_bounds(
+    database_url: str, days: int
+) -> None:
+    with _client(database_url) as client:
+        response = client.get(f"{RETENTION_PATH}?days={days}", headers=_bearer())
     assert response.status_code == 422

@@ -11,21 +11,30 @@ table:
   rollup are generic over the registry, which is what makes that true rather than
   aspirational: nothing anywhere enumerates the steps.
 
-* **The daily rollup's pure core.** :func:`build_product_daily` recomputes one day's
-  aggregates from that day's ledger rows, in full, so the adapter can upsert rather
-  than increment.
+* **The daily rollups' pure core.** :func:`build_product_daily` recomputes one day's
+  per-step aggregates from that day's ledger rows, and :func:`build_product_actor_daily`
+  recomputes the same day's per-ACTOR aggregates, both in full, so the adapter can
+  upsert rather than increment.
 
-**Why the rollup exists at all.** The free Grafana tier keeps fourteen days, so a
+**Why the rollups exist at all.** The free Grafana tier keeps fourteen days, so a
 monthly active-user figure or a thirty-day retention cohort is not a query a vendor
 can answer - the data is gone before the question is asked. Those numbers have to
 live in the system of record, and they cannot live in the raw ledger either: a
 thirty-day window over a per-event table scans thirty days of events. So the ledger
-is the append-only record and the daily aggregate is what a long window reads. The
-grain is per ``(funnel, step, outcome)`` because that is the shape both long windows
-need: it answers "which step loses people", and because ``#726`` gave the row an
-``actor_count`` of the distinct pseudonymous actors behind it, it also answers "is
-adoption sticking" without a second table and without touching the ledger (decisions
-22, 24-26).
+is the append-only record and the daily aggregates are what a long window reads
+(decisions 22, 24-26).
+
+**Two grains, because distinctness dies at the first one.** The per-step grain -
+``(funnel, step, outcome)`` - answers "which step loses people", and its
+``actor_count`` answers "how many distinct people were behind this step today".
+Neither can answer "did the people who arrived on day D come back on day D+7",
+because a retention cohort is a question about IDENTITIES spanning two days and a
+stored distinct count has already thrown the identities away: the only way back is
+to sum, and summing double-counts exactly the people who got furthest. So the second
+grain is per ``(actor_kind, actor_key)`` and per day (B4g #742), one row for each
+person who did a qualifying clinical action that day, and the cohort figures are
+derived from that row SET at read time rather than stored - a stored retention rate
+would be a second source of truth that goes stale the moment a day is recomputed.
 
 **The outcome vocabulary is closed.** ``completed``, ``abandoned``, ``errored`` and
 ``re_recorded``, spelled as a ``Literal`` so a fourth state is a type error at the
@@ -522,6 +531,70 @@ def build_product_daily(
             duration_samples=total.duration_samples,
         )
         for scope, total in sorted(totals.items())
+    )
+
+
+@dataclass(frozen=True)
+class ProductActorDaily:
+    """One recomputed per-actor day row of ``observability_product_actor_daily``.
+
+    The table's UNIQUE key is ``(event_date, actor_kind, actor_key)``; ``event_date``
+    is supplied by the adapter, so this value carries the other two plus the counter.
+
+    **Presence is the whole payload.** A cohort read asks whether this person was
+    here on some later day, and the answer is the existence of this row - so
+    ``events`` is carried for context and nothing divides by it. It is the count of
+    qualifying clinical actions the actor performed that day, which is not the same
+    number as ``1``: a patient who opened the composer and then submitted is two
+    events and still one cohort member.
+
+    ``actor_kind`` and ``actor_key`` are NOT nullable here, unlike
+    :class:`ProductEventFact`: this grain exists to hold people, so a fact with no
+    actor behind it is not a smaller row here, it is no row at all.
+    """
+
+    actor_kind: ActorKind
+    actor_key: str
+    events: int
+
+
+def build_product_actor_daily(
+    *, events: Sequence[ProductEventFact], target_date: date
+) -> tuple[ProductActorDaily, ...]:
+    """Recompute one day's per-actor aggregate from that day's ledger rows (B4g #742).
+
+    The actor-grain companion to :func:`build_product_daily`, and the table a
+    seven- and thirty-day retention cohort is derived from at read time. Same input,
+    same recompute-in-full contract: every returned row is the WHOLE figure for its
+    actor on its day, the adapter upserts on the table's UNIQUE key, and a second pass
+    over the same rows lands on the identical row instead of adding to it.
+
+    **Only the registry's qualifying clinical steps reach this table, and that is
+    what keeps one number's cohorts and another's DAU describing the same people.**
+    The set comes from :func:`active_actor_step_names` rather than from a list
+    written here, so it is the same definition ``/product/active-users`` counts over
+    (decision 26). A step a machine finished records no actor and is dropped by the
+    ``actor_kind``/``actor_key`` pair check rather than by a step-name filter, so a
+    machine row can never enter a cohort under some other name.
+
+    Output is sorted by ``(actor_kind, actor_key)`` for the same reason
+    :func:`build_product_daily` sorts: a recompute that produced its rows in planner
+    order would not be verifiable across two passes.
+    """
+    qualifying = active_actor_step_names()
+    counts: dict[tuple[ActorKind, str], int] = {}
+    for fact in _facts_on(events, target_date):
+        if fact.step not in qualifying:
+            continue
+        if fact.actor_kind is None or fact.actor_key is None:
+            # Both or neither, mirroring the ledger's own CHECK and the actor set's
+            # definition: a machine step contributes no person.
+            continue
+        key = (fact.actor_kind, fact.actor_key)
+        counts[key] = counts.get(key, 0) + 1
+    return tuple(
+        ProductActorDaily(actor_kind=kind, actor_key=actor_key, events=events_seen)
+        for (kind, actor_key), events_seen in sorted(counts.items())
     )
 
 

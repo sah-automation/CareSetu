@@ -49,6 +49,10 @@ from modules.observability.facade import (
     GAP_BASIS_ACTOR,
     GAP_BASIS_NO_PREDECESSOR,
     REQUESTS_PER_ACTIVE_USER_CONVENTION,
+    RETENTION_ACTOR_CONVENTION,
+    RETENTION_MATURITY_CONVENTION,
+    RETENTION_SOURCE_CONVENTION,
+    RETENTION_WINDOW_CONVENTION,
     STICKINESS_CONVENTION,
     ActiveUsersDayPoint,
     ActiveUsersRead,
@@ -90,6 +94,8 @@ from modules.observability.facade import (
     QualityReport,
     QueueDepthRow,
     ReliabilityReport,
+    RetentionCohortDay,
+    RetentionCohortsRead,
     RouteThroughputRow,
     SystemHealth,
     TaskTypeSpend,
@@ -122,6 +128,7 @@ DEEPLINKS_PATH = "/v1/operator/observability/deeplinks"
 BUSINESS_PATH = "/v1/operator/observability/business"
 FUNNEL_PATH = "/v1/operator/observability/product/funnel"
 ACTIVE_USERS_PATH = "/v1/operator/observability/product/active-users"
+RETENTION_PATH = "/v1/operator/observability/product/retention-cohorts"
 
 _ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
@@ -681,6 +688,7 @@ class StubObservabilityFacade:
         self.business_periods: list[str] = []
         self.funnel_calls: list[tuple[int, str | None]] = []
         self.active_user_days: list[int] = []
+        self.retention_days: list[int] = []
 
     async def get_cost_summary(self) -> CostSummary:
         self.summary_calls += 1
@@ -772,6 +780,10 @@ class StubObservabilityFacade:
     async def get_active_users(self, *, days: int) -> ActiveUsersRead:
         self.active_user_days.append(days)
         return _ACTIVE_USERS.model_copy(update={"days": days})
+
+    async def get_retention_cohorts(self, *, days: int) -> RetentionCohortsRead:
+        self.retention_days.append(days)
+        return _RETENTION.model_copy(update={"days": days})
 
     def get_deeplinks(
         self,
@@ -2127,6 +2139,142 @@ def test_the_active_users_read_carries_no_login_or_session_event() -> None:
     assert offenders == []
 
 
+# --------------------------------------------------------- retention cohorts (#742)
+
+#: A cohort that has lived through both horizons, one that has lived through its week
+#: but not its month, and today - which has lived through neither. A stub built out of
+#: only mature cohorts could not tell a correct route from one that dropped the
+#: immature rows, which is the half of the table that decides the difference.
+_RETENTION = RetentionCohortsRead(
+    days=60,
+    from_date=_TODAY - timedelta(days=59),
+    to_date=_TODAY,
+    horizons=(7, 30),
+    cohorts=[
+        RetentionCohortDay(
+            cohort_date=_TODAY - timedelta(days=30),
+            cohort_size=100,
+            retained_7d=40,
+            retention_7d=Decimal("0.4000"),
+            retained_30d=25,
+            retention_30d=Decimal("0.2500"),
+        ),
+        RetentionCohortDay(
+            cohort_date=_TODAY - timedelta(days=7),
+            cohort_size=120,
+            retained_7d=48,
+            retention_7d=Decimal("0.4000"),
+            retained_30d=None,
+            retention_30d=None,
+        ),
+        RetentionCohortDay(
+            cohort_date=_TODAY,
+            cohort_size=9,
+            retained_7d=None,
+            retention_7d=None,
+            retained_30d=None,
+            retention_30d=None,
+        ),
+    ],
+    window_convention=RETENTION_WINDOW_CONVENTION,
+    maturity_convention=RETENTION_MATURITY_CONVENTION,
+    source_convention=RETENTION_SOURCE_CONVENTION,
+    actor_convention=RETENTION_ACTOR_CONVENTION,
+)
+
+
+def test_the_retention_route_defaults_to_a_window_that_has_mature_cohorts() -> None:
+    """AC1: the default has to leave the thirty-day column something to say.
+
+    Not thirty dates like the other reads: the newest cohort measurable at thirty days
+    is thirty days old, so a thirty-date default returns a thirty-day column that is
+    null on every row - honest, and a page with nothing on it.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(RETENTION_PATH, headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.retention_days == [60]
+
+
+def test_the_retention_route_passes_the_requested_window_through() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{RETENTION_PATH}?days=14", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.retention_days == [14]
+
+
+@pytest.mark.parametrize("days", [0, 366])
+def test_the_retention_route_refuses_a_window_outside_the_shared_bounds(days: int) -> None:
+    """Same bounds as every other windowed read - one place decides what is valid."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    assert client.get(f"{RETENTION_PATH}?days={days}", headers=_bearer(_token())).status_code == 422
+    assert facade.retention_days == []
+
+
+def test_the_retention_route_returns_one_row_per_arrival_day() -> None:
+    """AC1: a cohort is a group by arrival date, and each carries its own size."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(RETENTION_PATH, headers=_bearer(_token())).json()
+
+    assert body["horizons"] == [7, 30]
+    assert body["cohorts"] == [
+        {
+            "cohort_date": str(_TODAY - timedelta(days=30)),
+            "cohort_size": 100,
+            "retained_7d": 40,
+            "retention_7d": "0.4000",
+            "retained_30d": 25,
+            "retention_30d": "0.2500",
+        },
+        {
+            "cohort_date": str(_TODAY - timedelta(days=7)),
+            "cohort_size": 120,
+            "retained_7d": 48,
+            "retention_7d": "0.4000",
+            "retained_30d": None,
+            "retention_30d": None,
+        },
+        {
+            "cohort_date": str(_TODAY),
+            "cohort_size": 9,
+            "retained_7d": None,
+            "retention_7d": None,
+            "retained_30d": None,
+            "retention_30d": None,
+        },
+    ]
+
+
+def test_the_retention_route_quotes_rates_not_floating_point() -> None:
+    """AC4: a rate is a 4dp quoted decimal, like every other rate this API returns."""
+    body = _client(StubObservabilityFacade()).get(RETENTION_PATH, headers=_bearer(_token())).json()
+
+    assert isinstance(body["cohorts"][0]["retention_30d"], str)
+    assert body["cohorts"][0]["retention_7d"] == "0.4000"
+
+
+def test_the_retention_route_rides_its_four_conventions() -> None:
+    """AC4/AC5: what was measured, what a null means, where it came from, who counts."""
+    body = _client(StubObservabilityFacade()).get(RETENTION_PATH, headers=_bearer(_token())).json()
+
+    assert body["window_convention"] == RETENTION_WINDOW_CONVENTION
+    assert body["maturity_convention"] == RETENTION_MATURITY_CONVENTION
+    assert body["source_convention"] == RETENTION_SOURCE_CONVENTION
+    assert body["actor_convention"] == RETENTION_ACTOR_CONVENTION
+    # AC2, stated on the wire rather than only in a docstring.
+    assert "raw ledger is never scanned" in body["source_convention"]
+
+
 # ------------------------------------------------------------------ refuses
 
 
@@ -2147,6 +2295,7 @@ _ALL_PATHS = [
     BUSINESS_PATH,
     FUNNEL_PATH,
     ACTIVE_USERS_PATH,
+    RETENTION_PATH,
 ]
 
 

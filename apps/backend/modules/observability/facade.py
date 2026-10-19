@@ -100,9 +100,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, model_validator
 from sqlalchemy import (
+    CTE,
     ColumnElement,
     Date,
     Integer,
+    Table,
+    and_,
     cast,
     delete,
     distinct,
@@ -213,6 +216,7 @@ from modules.observability.schema.models import (
     observability_consumed_events,
     observability_error_events,
     observability_http_minute,
+    observability_product_actor_daily,
     observability_product_events,
     observability_rollup_runs,
 )
@@ -2306,6 +2310,157 @@ class ActiveUsersRead(BaseModel):
     requests_per_active_user_convention: str
 
 
+# ----------------------------------------------------- the retention cohorts read (#742)
+
+#: The two horizons "seven- and thirty-day retention" names, in DAYS. Seven is the
+#: habit question - did the person come back next week - and thirty is the adoption
+#: question - did they become a monthly user. Spelled as constants because they are a
+#: stated convention (:data:`RETENTION_WINDOW_CONVENTION`) rather than a literal at the
+#: call site, and because both horizons are applied by the SAME query with only this
+#: number changing.
+RETENTION_WEEK_WINDOW = 7
+RETENTION_MONTH_WINDOW = 30
+
+#: The horizons, in the order they are queried and reported. One constant rather than
+#: the pair written at both use sites, so a third horizon could not be queried and left
+#: out of the response - or reported without ever being measured.
+_RETENTION_HORIZONS: tuple[int, ...] = (RETENTION_WEEK_WINDOW, RETENTION_MONTH_WINDOW)
+
+#: The ``/product/retention-cohorts`` default, in COHORT DATES. It carries its own
+#: default rather than borrowing :data:`DEFAULT_WINDOW_DAYS` for the same reason
+#: ``_MinuteWindow`` carries its own ceiling: the two windows are not the same shape.
+#: ``DEFAULT_WINDOW_DAYS`` counts days of SERIES ending today, and on this read the
+#: right-hand end of the series is where nothing can be measured yet - the newest
+#: cohort whose thirty-day horizon has arrived sits thirty days back. A thirty-date
+#: window therefore returns thirty rows whose thirty-day figures are ALL null, which
+#: is the honest answer and a useless default: the half of the table a product manager
+#: opens the page for would be empty. Sixty dates buys thirty fully-mature cohorts and
+#: thirty that are still filling in, which is the shape a cohort table is read in.
+RETENTION_DEFAULT_COHORT_DAYS = RETENTION_MONTH_WINDOW * 2
+
+#: What a cohort IS, and what the window it travels over covers. A retention figure is
+#: meaningless without its denominator - "40% retained" is a triumph or a disaster
+#: depending on whether the cohort was nine people or nine thousand - so every row
+#: carries the cohort size beside the rate and every rate is a fraction, not a
+#: percentage.
+RETENTION_WINDOW_CONVENTION = (
+    "a cohort is the set of actors whose FIRST EVER recorded qualifying clinical action "
+    "falls on cohort_date - not their first action inside this window, so a patient who "
+    "arrived last year and came back on Tuesday joins no cohort today. The two horizons "
+    "are cohort_date + 7 days and cohort_date + 30 days, measured on that EXACT day (the "
+    "classic day-N retention), and reported at 4dp as retained / cohort_size: a cohort that "
+    "came back on day nine and never again is not a day-30 cohort. cohort_size travels with "
+    "every rate because '40% retained' means nothing without its denominator. days governs "
+    "how many consecutive cohort DATES are reported, ending on to_date, and is not a "
+    "truncation of either horizon: a seven-date read still reports the full thirty-day figure "
+    "for each of its seven dates. The default is 60 dates rather than 30 precisely so the "
+    "thirty-day column has values in it - the newest cohort that can be measured at thirty "
+    "days is thirty days old"
+)
+
+#: Why a young cohort reports ``null`` rather than zero. This is the distinction the
+#: whole read turns on: a cohort three days old has not been GIVEN the chance to come
+#: back on day thirty, and writing zero for it would put a fabricated collapse at the
+#: right-hand end of every chart, where a real decline would be invisible next to it.
+RETENTION_MATURITY_CONVENTION = (
+    "a cohort whose cohort_date + 7 (or + 30) is later than to_date has not reached that "
+    "horizon yet, and reports retained and retention as null - 'not yet observed', which is "
+    "NOT zero. Zero means observed and nobody came back; null means the horizon is still in "
+    "the future. A date on which nobody arrived has cohort_size 0 and reports null for both "
+    "horizons as well: 'none of them came back' is not a measurement of an empty set, and a "
+    "chart reading it as a total retention collapse would be reading the absence of a cohort "
+    "as the loss of one. Where a rate exists it is retained over that cohort's own size, "
+    "which is never zero - there is no such thing as a rate on an empty base"
+)
+
+#: Where the cohorts come from, and the one thing they are not computed from. The daily
+#: actor aggregate is the system of record's own materialisation of the product ledger,
+#: so these figures outlive the free vendor tier's fourteen-day retention, and the raw
+#: ledger is not scanned even once to produce a thirty-day answer.
+RETENTION_SOURCE_CONVENTION = (
+    "cohorts are derived at READ time from observability_product_actor_daily, the nightly "
+    "per-actor day aggregate MOD-013 recomputes from the product event ledger - one row per "
+    "pseudonymous actor per day they did a qualifying clinical action. The raw ledger is "
+    "never scanned: it is read once a night by the rollup and never by this query, so a "
+    "thirty-day question costs thirty days of AGGREGATE rows rather than thirty days of "
+    "events. Nothing here is stored: a stored retention rate would be a second source of "
+    "truth that disagrees with the daily aggregate after any recompute. Actors are "
+    "pseudonymous keys domain-separated per kind, so no name, phone number or clinical "
+    "content reaches this response"
+)
+
+#: Which actors count. Identical to the active-users set (#741), deliberately: two
+#: adoption numbers built on two definitions would be the more confusing thing to have,
+#: and a cohort whose members are not the people the DAU counts is not a cohort of users.
+RETENTION_ACTOR_CONVENTION = (
+    "cohort membership requires a qualifying clinical action - the registry's active-actor "
+    "steps, the same set /product/active-users counts - so a machine step records no actor "
+    "and joins no cohort, and there is no login to count: the registry refuses registering "
+    "one. cohort_size counts DISTINCT actors across BOTH kinds, and patients and doctors are "
+    "disjoint sets because an actor key's preimage includes its kind"
+)
+
+
+class RetentionCohortDay(BaseModel):
+    """One arrival date's cohort and how much of it was still here later.
+
+    ``cohort_size`` is how many actors were first seen on ``cohort_date``. The two
+    ``retained`` counts are how many of exactly those people were active again at the
+    horizon, and each ``retention`` is that count over the cohort size - never over the
+    base of some other date's cohort, and never over the window's total.
+
+    ``retained_7d``/``retained_30d`` are ``None`` when the horizon is still in the
+    future, and so are the rates: see :data:`RETENTION_MATURITY_CONVENTION`. They are
+    NOT zero, and the difference is the whole reason a cohort table is worth reading.
+    """
+
+    cohort_date: date
+    cohort_size: int
+    retained_7d: int | None
+    retention_7d: Decimal | None
+    retained_30d: int | None
+    retention_30d: Decimal | None
+
+
+class RetentionCohortsRead(BaseModel):
+    """Does adoption stick? - seven- and thirty-day retention, one row per arrival day.
+
+    **Active users answer "is adoption growing" and this answers "does it stay."** A
+    product can add a thousand people a week and lose every one of them inside a
+    fortnight, and DAU/WAU/MAU alone will not show it: the rolling windows are
+    computed from the same arrivals, so churn and acquisition cancel.
+
+    A cohort is a GROUP rather than a window for that reason. Everyone who arrived on
+    one date is held together and asked what happened to them later, so a falling
+    retention figure means the product lost people, not that it stopped acquiring them
+    at exactly the right moment.
+
+    **Derived at read time from the daily aggregate, never stored.** The figures are
+    divisions over rows the nightly rollup already wrote, so there is exactly one
+    source of truth: a recompute of any day moves this response with it and nothing
+    else has to be kept in step. See :data:`RETENTION_SOURCE_CONVENTION`.
+
+    **A thirty-day question never scans the raw ledger.** The query below touches one
+    table - ``observability_product_actor_daily`` - and joins it to itself. The ledger
+    is read once a night by the rollup and by nothing else, which is what lets these
+    numbers outlive the free vendor tier's fourteen-day retention.
+
+    Every cohort date in ``[from_date, to_date]`` is listed, including one with nobody
+    in it, so a gap in the series is a real absence of arrivals rather than a row the
+    chart quietly dropped.
+    """
+
+    days: int
+    from_date: date
+    to_date: date
+    horizons: tuple[int, int]
+    cohorts: list[RetentionCohortDay]
+    window_convention: str
+    maturity_convention: str
+    source_convention: str
+    actor_convention: str
+
+
 class GrafanaDeeplinks(BaseModel):
     """The Grafana views, each already narrowed (#736).
 
@@ -3787,6 +3942,228 @@ async def query_active_users(
     )
 
 
+# --------------------------------------- the retention cohorts read's SQL pieces (#742)
+
+
+def _cohort_arrivals(actors: Table, *, from_date: date, to_date: date) -> CTE:
+    """The CTE naming each actor's FIRST EVER active day, narrowed to the window.
+
+    Two stages, and the inner one has no date filter at all - which is the whole
+    correctness of the read. A person who arrived ninety days ago and came back on
+    Tuesday has NOT arrived on Tuesday, and a ``min`` bounded to the window would say
+    they had: the oldest cohorts in the response, which are the only ones carrying a
+    matured thirty-day figure, would have returning veterans inflating their own
+    denominators and every rate dragged down with them. It would also make the same
+    actor a different person depending on ``days`` - a cohort of Monday's under
+    ``days=7`` and absent from it under ``days=60``.
+
+    So the inner aggregate takes ``min(event_date)`` per ``(actor_kind, actor_key)``
+    across the WHOLE aggregate and the outer one filters that arrival date into the
+    window. The inner scan is unbounded and that is the price of the truth in it; it is
+    still the daily aggregate rather than the per-event ledger, which is the bound this
+    read exists to keep. ``ix_observability_product_actor_daily_actor`` leads with the
+    actor pair, so it is a per-actor minimum along an index rather than a table walk.
+
+    It is a CTE rather than a subquery so the cohort-size query and BOTH horizon
+    queries below share one definition of "when this person arrived" - two copies of a
+    first-seen rule are two places for a cohort to be measured from a different arrival
+    date depending on which horizon you asked about.
+    """
+    first_ever = (
+        select(
+            actors.c.actor_kind,
+            actors.c.actor_key,
+            func.min(actors.c.event_date).label("first_date"),
+        )
+        .group_by(actors.c.actor_kind, actors.c.actor_key)
+        .cte("first_ever")
+    )
+    return (
+        select(
+            first_ever.c.actor_kind,
+            first_ever.c.actor_key,
+            first_ever.c.first_date,
+        )
+        .where(first_ever.c.first_date >= from_date, first_ever.c.first_date <= to_date)
+        .cte("first_seen")
+    )
+
+
+def _retained_by_cohort(
+    actors: Table,
+    first_seen: CTE,
+    *,
+    horizon: int,
+    to_date: date,
+) -> Any:
+    """One horizon's retention statement: how many of each cohort came back at it.
+
+    A self-join of the daily aggregate, never a second table. The join predicate is
+    ``event_date = first_date + horizon`` rather than a range, so the answer is "was
+    this exact person here on exactly that day" - the classic day-N retention a product
+    manager means by "seven-day retention". A cohort that returned on day nine and
+    never again is not a retained cohort, and a range would quietly report it as one.
+
+    Cohorts whose horizon falls after ``to_date`` are excluded by the ``where`` rather
+    than counted as zero retained: the question has not been answerable yet.
+    """
+    return (
+        select(
+            first_seen.c.first_date.label("cohort_date"),
+            func.count().label("retained"),
+        )
+        .select_from(
+            first_seen.join(
+                actors,
+                and_(
+                    actors.c.actor_kind == first_seen.c.actor_kind,
+                    actors.c.actor_key == first_seen.c.actor_key,
+                    actors.c.event_date == first_seen.c.first_date + horizon,
+                ),
+            )
+        )
+        .where(first_seen.c.first_date <= to_date - timedelta(days=horizon))
+        .group_by(first_seen.c.first_date)
+    )
+
+
+def _retained_or_none(
+    cohort_date: date,
+    horizon: int,
+    to_date: date,
+    retained: dict[int, dict[date, int]],
+    *,
+    cohort_size: int,
+) -> int | None:
+    """A cohort's retained count at ``horizon``, or ``None`` when there is nothing to say.
+
+    ``None`` and ``0`` are different answers and the whole maturity convention rests on
+    keeping them apart: ``None`` is a horizon nobody has lived through yet, ``0`` is a
+    horizon that arrived and nobody came back to it.
+
+    An EMPTY cohort is the third case and gets ``None`` too, not ``0``. Nobody arrived
+    on this date, so "zero of them came back on day thirty" is not a measurement of
+    anybody - it is a claim about an empty set, and a chart reading it as a full
+    retention collapse would be reading the absence of a cohort as the loss of one.
+    """
+    if cohort_size == 0 or cohort_date + timedelta(days=horizon) > to_date:
+        return None
+    return retained.get(horizon, {}).get(cohort_date, 0)
+
+
+async def query_retention_cohorts(
+    connection: AsyncConnection, *, days: int, now: datetime
+) -> RetentionCohortsRead:
+    """Read seven- and thirty-day retention per arrival day (``/product/retention-cohorts``).
+
+    **Served from the daily actor aggregate, and the ledger is never touched.** The one
+    table this query names is ``observability_product_actor_daily``, which the nightly
+    rollup writes from the product event ledger - one row per pseudonymous actor per day
+    they did a qualifying clinical action. The raw ledger is read once a night by that
+    rollup and by nothing else, so a thirty-day question costs thirty days of aggregate
+    rows rather than thirty days of events, and the answer outlives the free vendor
+    tier's fourteen-day retention because the system of record holds it.
+
+    **Why not the step-grain rollup, and why not the ledger.** ``observability_product_daily``
+    stores ``actor_count``, a distinct count, and distinctness does not survive being
+    stored: the only way to get a distinct actor back out of it is to SUM, and summing
+    double-counts precisely the people who got furthest - one patient who opened the
+    composer and then submitted is two step rows and one person. #741 hit the same wall
+    and read the ledger instead, which is right for a one- or thirty-day ACTIVE-USER
+    count and wrong for a cohort, because a cohort is a question about identities
+    spanning two days and the ledger is the only table that still has them. This is the
+    table that keeps them without the ledger.
+
+    **Three statements, one first-seen rule.** The cohort sizes and each horizon's
+    retained counts both build on :func:`_cohort_arrivals`, so both horizons measure
+    arrival on the same day. The two horizon statements differ only in the constant
+    added to it, which is why the horizon is a named constant rather than a literal in
+    a WHERE clause.
+
+    ``days`` counts COHORT DATES and is not a truncation of either horizon: a
+    ``days=7`` request still measures day-30 retention for each of its seven dates,
+    which is the point of computing in Postgres rather than asking a vendor.
+
+    **What "first" costs.** :func:`_cohort_arrivals` reaches the WHOLE aggregate to
+    find each actor's earliest day, because a window-bounded minimum would report a
+    returning patient as a new arrival and inflate exactly the oldest cohorts - the ones
+    carrying the matured thirty-day figures. The scan stays inside this module's own
+    daily aggregate and never touches the per-event ledger, which is the bound that
+    matters here; what it does give up is an unbounded lower date.
+
+    ``days`` is validated here rather than at the route, for the same reason every
+    other windowed read validates here: every path into this read goes through here.
+    """
+    if days < 1:
+        raise ValueError("days must be positive")
+
+    actors = observability_product_actor_daily
+    to_date = now.date()
+    from_date = to_date - timedelta(days=days - 1)
+    first_seen = _cohort_arrivals(actors, from_date=from_date, to_date=to_date)
+
+    size_rows = await connection.execute(
+        select(
+            first_seen.c.first_date.label("cohort_date"),
+            func.count().label("cohort_size"),
+        )
+        .select_from(first_seen)
+        .group_by(first_seen.c.first_date)
+        .order_by(first_seen.c.first_date)
+    )
+    cohort_sizes: dict[date, int] = {}
+    for entry in size_rows.mappings():
+        cohort_sizes[_row_day(entry["cohort_date"])] = int(entry["cohort_size"])
+
+    retained: dict[int, dict[date, int]] = {}
+    for horizon in _RETENTION_HORIZONS:
+        rows = await connection.execute(
+            _retained_by_cohort(actors, first_seen, horizon=horizon, to_date=to_date)
+        )
+        retained[horizon] = {
+            _row_day(entry["cohort_date"]): int(entry["retained"]) for entry in rows.mappings()
+        }
+
+    cohorts: list[RetentionCohortDay] = []
+    for offset in range(days):
+        cohort_date = from_date + timedelta(days=offset)
+        size = cohort_sizes.get(cohort_date, 0)
+        retained_7d = _retained_or_none(
+            cohort_date, RETENTION_WEEK_WINDOW, to_date, retained, cohort_size=size
+        )
+        retained_30d = _retained_or_none(
+            cohort_date, RETENTION_MONTH_WINDOW, to_date, retained, cohort_size=size
+        )
+        cohorts.append(
+            RetentionCohortDay(
+                cohort_date=cohort_date,
+                cohort_size=size,
+                retained_7d=retained_7d,
+                # ``ratio`` returns None for an empty cohort, which is 'no base to
+                # divide by' rather than a measured absence of retention - and it is
+                # the same helper every other rate in this facade uses, so a retention
+                # figure renders at the same 4dp as a stickiness figure or an
+                # abandonment rate. A horizon still in the future short-circuits to
+                # None without a division at all.
+                retention_7d=None if retained_7d is None else ratio(retained_7d, size),
+                retained_30d=retained_30d,
+                retention_30d=None if retained_30d is None else ratio(retained_30d, size),
+            )
+        )
+
+    return RetentionCohortsRead(
+        days=days,
+        from_date=from_date,
+        to_date=to_date,
+        horizons=_RETENTION_HORIZONS,
+        cohorts=cohorts,
+        window_convention=RETENTION_WINDOW_CONVENTION,
+        maturity_convention=RETENTION_MATURITY_CONVENTION,
+        source_convention=RETENTION_SOURCE_CONVENTION,
+        actor_convention=RETENTION_ACTOR_CONVENTION,
+    )
+
+
 class ProjectionBasis(BaseModel):
     """The assumption a projected month-end burn was computed from.
 
@@ -5123,6 +5500,31 @@ class ObservabilityFacade:
         to_ts = now if now is not None else datetime.now(UTC)
         async with self._engine.begin() as connection:
             return await query_active_users(connection, days=days, now=to_ts)
+
+    async def get_retention_cohorts(
+        self, *, days: int, now: datetime | None = None
+    ) -> RetentionCohortsRead:
+        """Read seven- and thirty-day retention per arrival day (``/product/retention-cohorts``).
+
+        B4g (#742). "Does adoption stick?", answered from the daily per-actor product
+        aggregate the nightly rollup writes from the product event ledger - so the
+        answer outlives the free vendor tier's fourteen-day retention, and a thirty-day
+        question never scans the raw ledger.
+
+        The clock is resolved HERE for the same reason every other windowed read
+        resolves its own: the route owns the default and the facade owns the clock, so
+        a test can pin ``now`` and get the identical cohort dates production would
+        have taken at that instant. Both horizons are measured against that ONE
+        ``now``, so a cohort cannot be mature against the week and immature against
+        the month.
+
+        ``days`` is NOT validated here: :func:`query_retention_cohorts` owns that
+        check and every path into this read goes through it, so a second copy would
+        only be a second place for the two to disagree about what a valid window is.
+        """
+        to_ts = now if now is not None else datetime.now(UTC)
+        async with self._engine.begin() as connection:
+            return await query_retention_cohorts(connection, days=days, now=to_ts)
 
     async def get_business(
         self, *, period: BusinessPeriod, today: date | None = None

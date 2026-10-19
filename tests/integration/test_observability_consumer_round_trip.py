@@ -277,6 +277,7 @@ async def _row_counts(connection: AsyncConnection) -> dict[str, int]:
         "observability.observability_attribution_daily",
         "observability.observability_product_events",
         "observability.observability_product_daily",
+        "observability.observability_product_actor_daily",
         "observability.consumed_events",
     ):
         counts[table] = int(await connection.scalar(text(f"SELECT COUNT(*) FROM {table}")))
@@ -494,6 +495,7 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
             "observability.observability_attribution_daily": 0,
             "observability.observability_product_events": 0,
             "observability.observability_product_daily": 0,
+            "observability.observability_product_actor_daily": 0,
             "observability.consumed_events": 4,
         }
     finally:
@@ -1199,6 +1201,8 @@ async def _product_table_text(connection: AsyncConnection) -> str:
             "SELECT to_jsonb(e)::text AS row FROM observability.observability_product_events e "
             "UNION ALL "
             "SELECT to_jsonb(d)::text FROM observability.observability_product_daily d "
+            "UNION ALL "
+            "SELECT to_jsonb(a)::text FROM observability.observability_product_actor_daily a"
         )
     )
     return " ".join(str(row[0]) for row in rows.all())
@@ -1320,14 +1324,20 @@ async def test_the_composers_entry_step_lands_in_the_ledger_and_replay_changes_n
 async def test_the_daily_rollup_turns_the_ledger_into_two_grains_and_survives_a_rerun(
     database_url: str, clean_tables: None
 ) -> None:
-    """AC (#739): the daily rollup is what a long window reads, and it recomputes whole.
+    """AC (#739, widened by #742): the daily rollups are what a long window reads.
 
-    The ledger is the append-only record; these two daily tables are the answer. They
-    the day is derived from ONE read of the ledger, not from per-grain queries:
+    The ledger is the append-only record; these daily tables are the answer. They are
+    derived from ONE read of the ledger, not from per-grain queries, and there are two
+    grains because a cohort cannot be answered by the other:
 
     * ``observability_product_daily`` - per ``(funnel, step, outcome)``, carrying a
       DISTINCT actor count beside the event count. One actor who opens the composer
       and then captures is two events and one active actor.
+    * ``observability_product_actor_daily`` - per ``(actor, day)``, the identity-grain
+      companion #742 adds. The step grain stores a distinct COUNT, and distinctness
+      does not survive being stored: "of the people new on day D, how many came back
+      on D+7" is a question about identities, and the only way back to them from a
+      count is to sum - which double-counts precisely the people who got furthest.
 
     Re-running the pass must land on the identical rows rather than adding to them,
     which is the property a step that arrives after the day's first pass depends on.
@@ -1398,6 +1408,11 @@ async def test_the_daily_rollup_turns_the_ledger_into_two_grains_and_survives_a_
         first = await run_rollup(engine, _NOW.date(), thresholds=_THRESHOLDS)
         # One row per (funnel, step, outcome) scope: four steps, four scopes.
         assert first.product_rows == 4
+        # The actor grain is derived from the SAME read of the SAME day, so it is
+        # three rows: the doctor who completed the consult, the patient who opened the
+        # composer and captured an intake (two events, one person), and the second
+        # patient. The re-record records no actor and so has no row here at all.
+        assert first.product_actor_rows == 3
 
         async with engine.connect() as connection:
             daily = (
@@ -1414,6 +1429,42 @@ async def test_the_daily_rollup_turns_the_ledger_into_two_grains_and_survives_a_
                 .mappings()
                 .all()
             )
+            actor_daily = (
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT actor_kind, actor_key, events "
+                            "FROM observability.observability_product_actor_daily "
+                            "WHERE event_date = :day "
+                            "ORDER BY actor_kind, actor_key"
+                        ),
+                        {"day": _NOW.date()},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+        assert [dict(row) for row in actor_daily] == [
+            {
+                "actor_kind": ACTOR_KIND_DOCTOR,
+                "actor_key": actor_key(ACTOR_KIND_DOCTOR, doctor_ref),
+                "events": 1,
+            },
+            {
+                "actor_kind": ACTOR_KIND_PATIENT,
+                "actor_key": actor_key(ACTOR_KIND_PATIENT, patient_ref),
+                # Composer-opened AND captured: two clinical actions, one cohort member.
+                # Counting this row twice is how a cohort double-counts everyone who
+                # got past the first step.
+                "events": 2,
+            },
+            {
+                "actor_kind": ACTOR_KIND_PATIENT,
+                "actor_key": actor_key(ACTOR_KIND_PATIENT, other_patient_ref),
+                "events": 1,
+            },
+        ]
 
         assert [dict(row) for row in daily] == [
             {
@@ -1455,11 +1506,16 @@ async def test_the_daily_rollup_turns_the_ledger_into_two_grains_and_survives_a_
         # added to.
         second = await run_rollup(engine, _NOW.date(), thresholds=_THRESHOLDS)
         assert second.product_rows == first.product_rows
+        assert second.product_actor_rows == first.product_actor_rows
         async with engine.connect() as connection:
             rerun_daily = await connection.scalar(
                 text("SELECT COUNT(*) FROM observability.observability_product_daily")
             )
+            rerun_actor_daily = await connection.scalar(
+                text("SELECT COUNT(*) FROM observability.observability_product_actor_daily")
+            )
         assert rerun_daily == 4
+        assert rerun_actor_daily == 3
     finally:
         await engine.dispose()
 

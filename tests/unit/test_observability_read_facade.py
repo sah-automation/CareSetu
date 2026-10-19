@@ -47,12 +47,15 @@ from modules.observability.facade import (
     GAP_BASIS_NO_PREDECESSOR,
     GAP_BASIS_UNAVAILABLE,
     MAX_BUSINESS_TOP_ACTORS,
+    RETENTION_DEFAULT_COHORT_DAYS,
     UNAVAILABLE_REASONS,
     UNAVAILABLE_REVENUE_NOT_CAPTURED,
     UNAVAILABLE_REVENUE_ZERO,
     BusinessCountView,
     MarginPercent,
     ObservabilityFacade,
+    RetentionCohortDay,
+    RetentionCohortsRead,
     acknowledge_alert,
     build_deeplinks,
     error_status,
@@ -70,6 +73,7 @@ from modules.observability.facade import (
     query_provider_board,
     query_quality,
     query_reliability,
+    query_retention_cohorts,
     query_throughput,
     query_usage,
     window_for,
@@ -3436,6 +3440,319 @@ async def test_active_users_resolve_the_window_against_a_pinned_instant() -> Non
     facade = ObservabilityFacade(_engine(_active_users_connection()))
 
     view = await facade.get_active_users(days=7, now=_ACTIVE_NOW)
+
+    assert view.days == 7
+    assert view.to_date == _TODAY
+    assert view.from_date == _TODAY - timedelta(days=6)
+
+
+# ------------------------------------------------- retention cohorts (#742)
+
+#: An instant ON ``_TODAY`` again, so a cohort's maturity is about the read's
+#: arithmetic rather than about the day the suite happens to run on.
+_RETENTION_NOW = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
+
+#: Inside a sixty-date window: the newest cohort whose day-thirty horizon has already
+#: arrived, and the newest whose day-seven horizon has. Everything newer than these is
+#: a cohort nobody can measure yet, which is what the null-versus-zero rule is about.
+_MATURE_30 = _TODAY - timedelta(days=30)
+_MATURE_7 = _TODAY - timedelta(days=7)
+
+
+def _cohort_connection(
+    *,
+    sizes: list[dict[str, object]] | None = None,
+    week: list[dict[str, object]] | None = None,
+    month: list[dict[str, object]] | None = None,
+) -> AsyncMock:
+    """The three results ``query_retention_cohorts`` issues, in the order it issues them.
+
+    Cohort sizes first, then the seven-day horizon, then the thirty-day one - the
+    order the query builds them in, so a test reads like the query does.
+    """
+    return _connection(
+        sizes if sizes is not None else [],
+        week if week is not None else [],
+        month if month is not None else [],
+    )
+
+
+def _cohort_by_date(view: RetentionCohortsRead) -> dict[date, RetentionCohortDay]:
+    return {row.cohort_date: row for row in view.cohorts}
+
+
+async def test_cohorts_report_the_share_of_each_arrival_day_that_came_back() -> None:
+    """AC1: one row per cohort date, its size, and both horizons' retained counts."""
+    connection = _cohort_connection(
+        sizes=[
+            {"cohort_date": _MATURE_30, "cohort_size": 4},
+            {"cohort_date": _MATURE_7, "cohort_size": 10},
+        ],
+        week=[
+            {"cohort_date": _MATURE_30, "retained": 1},
+            {"cohort_date": _MATURE_7, "retained": 5},
+        ],
+        month=[{"cohort_date": _MATURE_30, "retained": 1}],
+    )
+
+    view = await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    rows = _cohort_by_date(view)
+    assert rows[_MATURE_30].cohort_size == 4
+    assert rows[_MATURE_30].retained_7d == 1
+    assert rows[_MATURE_30].retained_30d == 1
+    assert rows[_MATURE_30].retention_7d == Decimal("0.2500")
+    assert rows[_MATURE_30].retention_30d == Decimal("0.2500")
+    assert rows[_MATURE_7].cohort_size == 10
+    assert rows[_MATURE_7].retention_7d == Decimal("0.5000")
+
+
+async def test_a_rate_is_its_own_cohorts_size_not_the_windows_total() -> None:
+    """AC4: the denominator travels with every figure, and it is the cohort's own.
+
+    Dividing by the window's arrivals instead would let a big cohort's rate shrink as
+    unrelated cohorts grow, so a cohort that held every single person would read as
+    falling retention.
+    """
+    connection = _cohort_connection(
+        sizes=[
+            {"cohort_date": _MATURE_30, "cohort_size": 1},
+            {"cohort_date": _MATURE_7, "cohort_size": 99},
+        ],
+        month=[{"cohort_date": _MATURE_30, "retained": 1}],
+    )
+
+    view = await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    rows = _cohort_by_date(view)
+    # One person retained out of one, while the window holds a hundred arrivals the
+    # same day-adjacent cohorts brought in: 1.0000, not 0.0101.
+    assert rows[_MATURE_30].retention_30d == Decimal("1.0000")
+    assert rows[_MATURE_7].cohort_size == 99
+    assert rows[_MATURE_7].retained_30d is None
+
+
+async def test_a_cohort_too_young_for_a_horizon_reports_null_not_zero() -> None:
+    """AC1: ``null`` is "not observed yet" and ``0`` is "nobody came back".
+
+    Writing zero for a horizon nobody has lived through puts a fabricated collapse at
+    the right-hand end of every chart, right where a real decline would be read.
+    """
+    connection = _cohort_connection(
+        sizes=[{"cohort_date": _TODAY, "cohort_size": 6}],
+    )
+
+    view = await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    freshest = _cohort_by_date(view)[_TODAY]
+    assert freshest.cohort_size == 6
+    assert freshest.retained_7d is None
+    assert freshest.retention_7d is None
+    assert freshest.retained_30d is None
+    assert freshest.retention_30d is None
+
+
+async def test_the_two_horizons_mature_independently() -> None:
+    """A cohort can have lived through its week and not yet through its month."""
+    connection = _cohort_connection(
+        sizes=[{"cohort_date": _MATURE_7, "cohort_size": 8}],
+        week=[{"cohort_date": _MATURE_7, "retained": 2}],
+    )
+
+    view = await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    row = _cohort_by_date(view)[_MATURE_7]
+    assert row.retained_7d == 2
+    assert row.retention_7d == Decimal("0.2500")
+    assert row.retained_30d is None
+    assert row.retention_30d is None
+
+
+async def test_a_mature_cohort_nobody_returned_to_is_zero_rather_than_null() -> None:
+    """The other half of the maturity rule, and the half a cohort table is for."""
+    connection = _cohort_connection(
+        sizes=[{"cohort_date": _MATURE_30, "cohort_size": 5}],
+        week=[],
+        month=[],
+    )
+
+    view = await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    row = _cohort_by_date(view)[_MATURE_30]
+    assert (row.retained_7d, row.retention_7d) == (0, Decimal("0.0000"))
+    assert (row.retained_30d, row.retention_30d) == (0, Decimal("0.0000"))
+
+
+async def test_a_day_with_nobody_new_is_listed_as_an_empty_cohort() -> None:
+    """Every date in the window is a row, so a gap in arrivals is visible as one.
+
+    Dropping the empty dates would make a quiet week look like a week that was never
+    measured, and the chart would close the gap without saying why.
+    """
+    connection = _cohort_connection(sizes=[{"cohort_date": _MATURE_30, "cohort_size": 3}])
+
+    view = await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    assert len(view.cohorts) == 60
+    assert view.cohorts[0].cohort_date == view.from_date
+    assert view.cohorts[-1].cohort_date == view.to_date
+    empty = _cohort_by_date(view)[_MATURE_30 - timedelta(days=5)]
+    assert empty.cohort_size == 0
+    assert empty.retained_30d is None
+    assert empty.retention_30d is None
+
+
+async def test_the_response_carries_what_its_rates_mean() -> None:
+    """A cohort table is quotable out of context, so it says what it measured."""
+    connection = _cohort_connection()
+
+    view = await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    assert view.horizons == (7, 30)
+    assert "cohort_size" in view.window_convention
+    assert "FIRST EVER" in view.window_convention
+    assert "not zero" in view.maturity_convention.lower()
+    assert "nobody arrived" in view.maturity_convention
+    assert "observability_product_actor_daily" in view.source_convention
+    assert "never scanned" in view.source_convention
+    assert "login" in view.actor_convention
+
+
+async def test_the_cohort_read_names_only_the_daily_aggregate_and_never_the_ledger() -> None:
+    """AC2: the headline criterion - a thirty-day query never scans the raw ledger.
+
+    Stated as an ABSENCE over every statement this read issues, because one statement
+    quietly joining ``observability_product_events`` would put the thirty days back on
+    the per-event table while the response still looked correct.
+    """
+    connection = _cohort_connection()
+
+    await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    assert connection.execute.await_count == 3
+    for call_index in range(3):
+        assert (
+            _from_target(connection, call_index)
+            == "observability.observability_product_actor_daily"
+        )
+        assert "observability_product_events" not in _compiled(connection, call_index)
+
+
+async def test_both_horizons_are_measured_from_the_same_arrival_date() -> None:
+    """One first-seen rule feeds both statements, or a cohort has two arrival dates.
+
+    The join predicate is an EXACT date rather than a range: a cohort that returned on
+    day nine and never again is not retained at thirty days, and an ``>=`` would say it
+    was.
+    """
+    connection = _cohort_connection()
+
+    await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    for horizon_index, horizon in ((1, 7), (2, 30)):
+        compiled = " ".join(_compiled(connection, horizon_index).split())
+        assert "first_seen" in compiled
+        assert f"first_date + {horizon}" in compiled
+        assert f"<= '{_TODAY - timedelta(days=horizon)}'" in compiled
+
+
+async def test_an_arrival_is_when_somebody_first_ever_arrived_not_when_they_came_back() -> None:
+    """The oldest cohorts must not be inflated by people who had been here before.
+
+    This is the one that is easy to get wrong and expensive to notice: take
+    ``min(event_date)`` inside the window and a patient who arrived last year and came
+    back on Tuesday joins Tuesday's cohort as a newcomer. The damage lands on the OLDEST
+    cohorts - the only ones carrying a matured thirty-day figure - and it makes the same
+    person a different person depending on ``days``.
+
+    So the arrival minimum is taken across the WHOLE aggregate and the window filter
+    sits outside it. Asserted over the compiled SQL because the defect is an absence of
+    a predicate rather than a wrong result the fake connection could show.
+    """
+    connection = _cohort_connection()
+
+    await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    compiled = " ".join(_compiled(connection, 0).split())
+    inner, _, window_filter = compiled.partition("first_ever")
+    # The inner minimum carries no date bound at all...
+    assert "event_date >=" not in inner
+    # ...and the window is applied to the RESULTING arrival date, not to the rows.
+    assert f"first_date >= '{_TODAY - timedelta(days=59)}'" in window_filter
+    assert f"first_date <= '{_TODAY}'" in window_filter
+
+
+async def test_a_date_nobody_arrived_on_reports_no_measurement_rather_than_a_zero() -> None:
+    """An empty cohort is not a cohort that lost everybody.
+
+    ``cohort_size`` 0 with ``retained_7d`` 0 would read as "none of zero people came
+    back", and a chart would draw that as a total retention collapse on a day the
+    product simply saw nobody new.
+    """
+    connection = _cohort_connection()
+
+    view = await query_retention_cohorts(connection, days=60, now=_RETENTION_NOW)
+
+    empty = _cohort_by_date(view)[_MATURE_30]
+    assert empty.cohort_size == 0
+    assert empty.retained_7d is None
+    assert empty.retention_7d is None
+    assert empty.retained_30d is None
+    assert empty.retention_30d is None
+
+
+async def test_the_cohort_window_is_days_arrival_dates_not_a_horizon_length() -> None:
+    """AC4: ``days=7`` still measures day-thirty retention for each of its dates.
+
+    Truncating the horizon to the requested window is the exact truncation this read
+    exists to prevent - and it is what a vendor's fourteen-day window would silently do.
+    """
+    connection = _cohort_connection()
+
+    view = await query_retention_cohorts(connection, days=7, now=_RETENTION_NOW)
+
+    assert len(view.cohorts) == 7
+    assert view.days == 7
+    assert view.from_date == _TODAY - timedelta(days=6)
+    compiled = " ".join(_compiled(connection, 2).split())
+    assert f"<= '{_TODAY - timedelta(days=30)}'" in compiled
+
+
+async def test_the_default_window_leaves_the_thirty_day_column_something_to_say() -> None:
+    """Why this read's default is 60 dates rather than the shared 30.
+
+    The newest cohort that can be measured at thirty days is thirty days old, so a
+    thirty-date window puts every one of its thirty rows inside the unmatured tail and
+    returns a thirty-day column that is null throughout - honest, and useless.
+    """
+    connection = _cohort_connection()
+
+    view = await query_retention_cohorts(
+        connection, days=RETENTION_DEFAULT_COHORT_DAYS, now=_RETENTION_NOW
+    )
+
+    assert view.days == 60
+    assert len(view.cohorts) == 60
+    # The oldest reported cohort date is old enough to have lived through both
+    # horizons, which is the whole reason the default is not 30.
+    assert view.from_date <= _MATURE_30
+
+
+@pytest.mark.parametrize("days", [0, -1])
+async def test_the_cohort_read_refuses_a_non_positive_span(days: int) -> None:
+    with pytest.raises(ValueError, match="days must be positive"):
+        await query_retention_cohorts(_cohort_connection(), days=days, now=_RETENTION_NOW)
+
+
+async def test_retention_cohorts_resolve_the_window_against_a_pinned_instant() -> None:
+    """The route owns the default; the facade owns the clock.
+
+    Both horizons read that one instant, so a cohort cannot be mature against the week
+    and immature against the month because two clocks were consulted.
+    """
+    facade = ObservabilityFacade(_engine(_cohort_connection()))
+
+    view = await facade.get_retention_cohorts(days=7, now=_RETENTION_NOW)
 
     assert view.days == 7
     assert view.to_date == _TODAY

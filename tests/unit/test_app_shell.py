@@ -249,6 +249,11 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # requests per active user and a daily load trend, all computed in Postgres
         # because the free metrics tier's fourteen-day retention cannot answer a month.
         "/v1/operator/observability/product/active-users",
+        # PHASE-14A B4g (#742): the stickiness read - what share of each arrival day
+        # came back at seven and thirty days, derived at read time from the daily
+        # per-actor product aggregate so a thirty-day question never scans the raw
+        # event ledger.
+        "/v1/operator/observability/product/retention-cohorts",
         # PHASE-14A B5 (#735): the one operator WRITE in the module - the
         # acknowledgement that fills the alert row's acked_by/acked_at columns.
         "/v1/operator/observability/alerts/{alert_id}/acknowledge",

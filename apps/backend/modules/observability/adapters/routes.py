@@ -41,6 +41,13 @@ B4f (#741) adds ``/product/active-users``, the adoption read - DAU, WAU, MAU, th
 stickiness between them and the load per head - which is the one read whose figures
 cannot come from a vendor at all, because the free metrics tier's fourteen-day
 retention makes a monthly active user structurally impossible there.
+B4g (#742) adds ``/product/retention-cohorts``, the stickiness read - what share of
+each arrival day came back at seven and at thirty days. It is the question DAU/WAU/MAU
+cannot answer, because a product that acquires and churns in equal measure leaves those
+three windows looking healthy. It is also the first of these reads to be served from a
+DAILY aggregate rather than the ledger: a cohort is a question about identities spanning
+two days, and only a per-actor day row still has them - so the thirty-day answer never
+scans the raw ledger and outlives the vendor's fourteen-day retention on its own.
 """
 
 from __future__ import annotations
@@ -78,6 +85,7 @@ from modules.observability.facade import (
     MAX_ERROR_PAGE_SIZE,
     MAX_ERROR_WINDOW_MINUTES,
     MAX_THROUGHPUT_WINDOW_MINUTES,
+    RETENTION_DEFAULT_COHORT_DAYS,
     ActiveUsersRead,
     AlertAcknowledgement,
     AlertPage,
@@ -93,6 +101,7 @@ from modules.observability.facade import (
     ProviderBoardReport,
     QualityReport,
     ReliabilityReport,
+    RetentionCohortsRead,
     SystemHealth,
     ThroughputReport,
     UsageReport,
@@ -707,6 +716,50 @@ async def read_active_users(
     """
     del principal
     return await _facade(request).get_active_users(days=days)
+
+
+@router.get(
+    "/v1/operator/observability/product/retention-cohorts",
+    response_model=RetentionCohortsRead,
+    status_code=status.HTTP_200_OK,
+    summary="Read seven- and thirty-day retention for each arrival day",
+)
+async def read_retention_cohorts(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    days: _Window = RETENTION_DEFAULT_COHORT_DAYS,
+) -> RetentionCohortsRead:
+    """Does adoption stick? - the share of each arrival day that came back later.
+
+    ``/product/active-users`` answers "is adoption growing". This answers the question
+    that one cannot: a product can add a thousand people a week and lose every one of
+    them inside a fortnight, and the rolling windows are computed from the same
+    arrivals, so that churn and that acquisition cancel out of a DAU/MAU pair.
+
+    **A cohort is a GROUP, not a window.** Everyone who arrived on one date is held
+    together and asked what became of them, so a falling figure here means the product
+    lost people rather than that it stopped acquiring them at a convenient moment.
+
+    **Served from the daily aggregate, and the raw ledger is never scanned for it.**
+    The response is derived at read time from the nightly per-actor day aggregate
+    MOD-013 writes from the product event ledger, so a thirty-day question costs thirty
+    days of aggregate rows and the numbers outlive the free metrics tier's fourteen-day
+    retention - the system of record holds them, the vendor no longer does.
+
+    ``days`` counts ARRIVAL DATES, ending today, and deliberately does NOT shorten
+    either horizon: a ``days=7`` request still measures day-30 retention for each of
+    its seven dates. Truncating the horizon to the requested window is the exact
+    truncation this read exists to prevent. Its default is 60 dates rather than the
+    other reads' 30, because the newest cohort that can be measured at thirty days is
+    itself thirty days old - a 30-date default would return a thirty-day column that is
+    null on every row.
+
+    A cohort too young to have reached a horizon reports ``null`` there, never zero -
+    a horizon nobody has lived through yet is not the same as one that arrived and
+    nobody came back to, and only the first of those is a fact about the product.
+    """
+    del principal
+    return await _facade(request).get_retention_cohorts(days=days)
 
 
 @router.get(

@@ -470,3 +470,46 @@ observability_product_daily = Table(
     ),
     Index("ix_observability_product_daily_date_funnel", "event_date", "funnel"),
 )
+
+
+observability_product_actor_daily = Table(
+    "observability_product_actor_daily",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # The SAME UTC day grain ``observability_product_daily`` carries, so the two
+    # aggregates describe the same journeys.
+    Column("event_date", Date, nullable=False),
+    # NOT NULL together, unlike the ledger's nullable pair: this table only ever
+    # holds actors a person performed a qualifying clinical action behind, and a row
+    # whose kind and key disagree would be counted twice by a reader grouping by
+    # kind.
+    Column("actor_kind", String(20), nullable=False),
+    # A one-way domain-separated hash of the identity reference
+    # (domain.pseudonym.actor_key), never the raw reference.
+    Column("actor_key", String(64), nullable=False),
+    # The actor's qualifying clinical actions that day - the registry's
+    # active-actor steps, the set ``/product/active-users`` counts too (#741).
+    # Carried for context: no retention figure divides by it, because a retention
+    # figure divides by the COHORT SIZE and dividing by one person's activity would
+    # be a different metric wearing its name. Recomputed whole each pass, exactly as
+    # ``observability_product_daily.events`` is (decision 6).
+    Column("events", BigInteger, nullable=False, server_default=text("0")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint(
+        "event_date",
+        "actor_kind",
+        "actor_key",
+        name="uq_observability_product_actor_daily_scope",
+    ),
+    # The cohort read opens on its window's oldest day, so the date leads.
+    Index("ix_observability_product_actor_daily_date", "event_date"),
+    # Retention asks whether ONE cohort member came back on a later day, which is a
+    # lookup by actor across dates rather than by date.
+    Index(
+        "ix_observability_product_actor_daily_actor",
+        "actor_kind",
+        "actor_key",
+        "event_date",
+    ),
+)

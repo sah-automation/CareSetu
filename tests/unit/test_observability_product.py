@@ -45,11 +45,13 @@ from modules.observability.domain.product import (
     PRODUCT_OUTCOME_ERRORED,
     PRODUCT_OUTCOME_RE_RECORDED,
     PRODUCT_OUTCOMES,
+    ProductActorDaily,
     ProductEventFact,
     ProductStep,
     ProductStepPayload,
     active_actor_step_names,
     active_actor_steps,
+    build_product_actor_daily,
     build_product_daily,
     derived_step_key,
     duration_ms_of,
@@ -589,6 +591,103 @@ def test_a_late_arriving_step_is_picked_up_by_the_next_pass() -> None:
 def test_an_empty_day_produces_no_rows_rather_than_zeroed_ones() -> None:
     """An absent row is evidence; a row of zeroes would be a second way of saying it."""
     assert build_product_daily(events=[], target_date=_DAY) == ()
+
+
+# ------------------------------------------------ the actor-grain daily rollup (#742)
+
+
+def test_one_actor_at_three_steps_is_ONE_cohort_member() -> None:
+    """The whole reason this grain exists: presence is one row per actor per day.
+
+    The step grain above reports three events for this person, which is right for a
+    funnel and useless for a cohort - "of the people new on day D, how many came back
+    on D+7" cannot be answered by counting a person's activity, only by asking whether
+    they were here at all.
+    """
+    events = [
+        _fact(step="composer_opened", actor_key_value="a" * 64),
+        _fact(step="intake_captured", actor_key_value="a" * 64),
+        _fact(step="consult_complete", actor_key_value="a" * 64),
+    ]
+    rows = build_product_actor_daily(events=events, target_date=_DAY)
+
+    assert rows == (ProductActorDaily(actor_kind=ACTOR_KIND_PATIENT, actor_key="a" * 64, events=3),)
+
+
+def test_two_kinds_are_two_members_because_their_keys_are_disjoint() -> None:
+    """A doctor and a patient are two people even at one identity reference."""
+    events = [
+        _fact(step="consult_complete", actor_kind=ACTOR_KIND_PATIENT, actor_key_value="a" * 64),
+        _fact(step="consult_complete", actor_kind=ACTOR_KIND_DOCTOR, actor_key_value="a" * 64),
+    ]
+    rows = build_product_actor_daily(events=events, target_date=_DAY)
+
+    assert [(row.actor_kind, row.actor_key) for row in rows] == [
+        (ACTOR_KIND_DOCTOR, "a" * 64),
+        (ACTOR_KIND_PATIENT, "a" * 64),
+    ]
+
+
+def test_a_machine_step_reaches_no_cohort_even_when_it_records_an_actor() -> None:
+    """A row is dropped by its OWN actor pair, not by a step-name filter.
+
+    The filter is the registry's qualifying set, but the drop here is the
+    ``actor_kind``/``actor_key`` check - so a future step that names no actor cannot
+    leak into a cohort under any name the registry happens to give it.
+    """
+    events = [
+        _fact(step=_RE_RECORDED, outcome=PRODUCT_OUTCOME_RE_RECORDED, actor_kind=None),
+        _fact(step=_RE_RECORDED, outcome=PRODUCT_OUTCOME_RE_RECORDED, actor_kind=None),
+    ]
+    assert build_product_actor_daily(events=events, target_date=_DAY) == ()
+
+
+def test_a_key_with_no_kind_behind_it_joins_no_cohort() -> None:
+    """Both or neither, mirroring the ledger's own CHECK."""
+    events = [_fact(step="composer_opened", actor_kind=None, actor_key_value=None)]
+    assert build_product_actor_daily(events=events, target_date=_DAY) == ()
+
+
+def test_the_actor_aggregate_is_recomputed_whole_on_a_rerun() -> None:
+    """Full recompute, never accumulate - the property the adapter's upsert needs.
+
+    The late-arrival case the rule exists for is a step written after the day's first
+    pass: an incrementing rollup would carry the day's earlier count and add to it,
+    and the actor's row would then describe more activity than the ledger holds.
+    """
+    first = [_fact(step="composer_opened")]
+    later = [*first, _fact(step="intake_captured")]
+
+    assert build_product_actor_daily(events=first, target_date=_DAY) == build_product_actor_daily(
+        events=first, target_date=_DAY
+    )
+    (before,) = build_product_actor_daily(events=first, target_date=_DAY)
+    (after,) = build_product_actor_daily(events=later, target_date=_DAY)
+    assert (before.events, after.events) == (1, 2)
+
+
+def test_a_row_filed_on_another_day_joins_no_cohort_on_this_one() -> None:
+    """Same guard as the step grain: the day is the key, so a pass cannot disagree."""
+    events = [_fact(), _fact(day=date(2026, 10, 14))]
+    (row,) = build_product_actor_daily(events=events, target_date=_DAY)
+    assert row.events == 1
+
+
+def test_the_cohort_and_the_daily_active_user_count_the_same_people() -> None:
+    """Two adoption numbers built on two definitions would be the confusing thing.
+
+    The cohort read and ``/product/active-users`` both answer "was this person here",
+    so they read the SAME set off the registry rather than each naming steps.
+    """
+    events = [
+        _fact(step="composer_opened", actor_key_value="a" * 64),
+        _fact(step="prescription_approved", actor_kind=ACTOR_KIND_DOCTOR, actor_key_value="d" * 64),
+        _fact(step=_RE_RECORDED, outcome=PRODUCT_OUTCOME_RE_RECORDED, actor_kind=None),
+    ]
+    rows = build_product_actor_daily(events=events, target_date=_DAY)
+
+    assert {row.step for row in active_actor_steps()} == set(active_actor_step_names())
+    assert len(rows) == 2
 
 
 def test_every_consumed_event_type_is_a_registered_funnel_step() -> None:
