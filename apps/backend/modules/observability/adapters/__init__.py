@@ -42,6 +42,14 @@ events it does not own (``partner.activated`` / ``partner.rejected``). The same
 holds for the other owned families; MOD-013 registers a mirror ONLY for the
 events no module has claimed (``partner.verification_started``,
 ``partner.selected``).
+
+T3.5 (#752) adds the annotation-queue effect to the doctor review OUTCOMES -
+``prescription.approved`` (whose seat already existed as a funnel step, so it
+now carries two effects) and ``prescription.rejected`` (a new seat, one effect).
+The queue is the ``source = 'human'`` half of ``observability_evaluation_scores``
+(see ``domain.annotation``); it is fed here through the bus like every other
+subscription, and the outcome CLASS is all a seat ever reads - the doctor's
+free-text rationale is dropped by the rejected mirror before this file runs.
 """
 
 from __future__ import annotations
@@ -77,7 +85,9 @@ from bus.events import (
 )
 from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
+from modules.observability.domain.annotation import annotation_trace_id
 from modules.observability.domain.consumer import (
+    ANNOTATION_EVENT_MIRRORS,
     BUSINESS_EVENT_METRICS,
     PRODUCT_EVENT_MIRRORS,
     AiEgressRecordedTelemetryPayload,
@@ -113,6 +123,7 @@ from modules.observability.facade import (
     record_ai_job_spend,
     record_ai_queue_open,
     record_alert_event,
+    record_annotation,
     record_care_attribution_edge,
     record_product_event,
 )
@@ -192,6 +203,11 @@ class _Seat:
     business_metric: str | None
     #: The funnel step this event is recorded as, or ``None`` when it is not a step.
     product_step: ProductStep | None
+    #: Whether this outcome becomes an annotation-queue entry (#752), the
+    #: ``source = 'human'`` row the doctor's verdict writes. True for the two
+    #: review outcomes in ``ANNOTATION_EVENT_MIRRORS``; a delivery carries it
+    #: alongside whichever of the other two effects apply, never instead.
+    annotation: bool
 
     @property
     def handler_name(self) -> str:
@@ -206,6 +222,8 @@ class _Seat:
             effects.append("business_count")
         if self.product_step is not None:
             effects.append(f"product_event_{self.product_step.funnel}_{self.product_step.step}")
+        if self.annotation:
+            effects.append("annotation")
         return "record_" + "_and_".join(effects)
 
 
@@ -217,18 +235,21 @@ def _seats() -> tuple[_Seat, ...]:
     enumerates the funnel, and a step registered tomorrow gets its seat from this
     same function with no edit to this file.
 
-    Where an event is both a business event and a funnel step
-    (``case.consult_complete`` / ``case.closed`` today) it gets ONE seat carrying
-    both effects - see :class:`_Seat`.
+    Where an event belongs to more than one registry - ``case.consult_complete`` /
+    ``case.closed`` are business events AND funnel steps, ``prescription.approved``
+    is a funnel step AND a review outcome (#752) - it gets ONE seat carrying every
+    effect that applies, because the consumed-event ledger is keyed by ``event_id``
+    alone and a second seat would be told it is a replay: see :class:`_Seat`.
     """
     steps = {step.event_type: step for step in product_steps()}
-    event_types = set(BUSINESS_EVENT_METRICS) | set(steps)
+    event_types = set(BUSINESS_EVENT_METRICS) | set(steps) | set(ANNOTATION_EVENT_MIRRORS)
     return tuple(
         _Seat(
             event_type=event_type,
             mirror=_mirror_for(event_type, steps),
             business_metric=BUSINESS_EVENT_METRICS.get(event_type),
             product_step=steps.get(event_type),
+            annotation=event_type in ANNOTATION_EVENT_MIRRORS,
         )
         for event_type in sorted(event_types)
     )
@@ -238,12 +259,17 @@ def _mirror_for(event_type: str, steps: Mapping[str, ProductStep]) -> type[BaseM
     """The mirror a seat re-validates the dispatched payload into.
 
     The product registry's mirror when the event is a funnel step - it carries the
-    identity fields the ledger row needs - and the business mirror otherwise. The
-    two registries overlap on the two ``case.*`` events, and the product mirror is
-    the wider of the two because it inherits ``ProductStepPayload``.
+    identity fields the ledger row needs, and since #752 also ``edited_yn``, which
+    the annotation effect splits the acceptance into two classes by. The annotation
+    mirror next, for an outcome with no step to its name (``prescription.rejected``),
+    and the business mirror otherwise. The registries overlap on ``prescription.
+    approved`` and the two ``case.*`` events, and the product mirror is the wider of
+    the shapes because it inherits ``ProductStepPayload``.
     """
     if event_type in steps:
         return PRODUCT_EVENT_MIRRORS[event_type]
+    if event_type in ANNOTATION_EVENT_MIRRORS:
+        return ANNOTATION_EVENT_MIRRORS[event_type]
     return _BUSINESS_EVENT_MIRRORS[event_type]
 
 
@@ -256,6 +282,7 @@ def _register_seat(registry: HandlerRegistry, seat: _Seat) -> None:
     """
     business_metric = seat.business_metric
     product_step = seat.product_step
+    annotation = seat.annotation
 
     async def handler(envelope: Envelope[BaseModel]) -> None:
         async def _impl(connection: AsyncConnection, payload: BaseModel) -> None:
@@ -267,6 +294,13 @@ def _register_seat(registry: HandlerRegistry, seat: _Seat) -> None:
                     envelope,
                     product_step,
                     cast("ProductStepPayload", payload),
+                )
+            if annotation:
+                await record_annotation(
+                    connection,
+                    payload,
+                    trace_id=annotation_trace_id(),
+                    occurred_at=envelope.occurred_at,
                 )
 
         await run_handler(

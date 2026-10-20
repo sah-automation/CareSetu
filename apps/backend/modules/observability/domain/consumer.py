@@ -22,6 +22,12 @@ B7 (#724) adds the ``intake.doctor_assigned`` mirror: the care-attribution
 edge's three references - intake, patient, doctor - and nothing else. It is the
 mirror that makes "which doctor does this intake belong to" answerable inside
 this schema without any module reading another's tables (ADR-0003).
+
+T3.5 (#752) adds the two review-outcome mirrors and the
+:data:`ANNOTATION_EVENT_MIRRORS` registry that feeds the annotation queue: the
+queue is fed by doctor review EVENTS (never by reading MOD-006's tables), and
+the mirrors are where "outcome class only, never the free-text rationale" is
+enforced - the rejected mirror does not declare the producer's ``reason``.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ from bus.events import (
     EVENT_PRE_SUMMARY_READY,
     EVENT_PRESCRIPTION_APPROVED,
     EVENT_PRESCRIPTION_DRAFT_CREATED,
+    EVENT_PRESCRIPTION_REJECTED,
     EVENT_RECORD_ACCESSED,
 )
 from modules.observability.domain.product import ProductStepPayload
@@ -490,7 +497,33 @@ class PrescriptionDraftCreatedTelemetryPayload(ProductStepPayload):
 
 
 class PrescriptionApprovedTelemetryPayload(ProductStepPayload):
-    """MOD-013's mirror of MOD-006's ``prescription.approved`` payload (B4e #739)."""
+    """MOD-013's mirror of MOD-006's ``prescription.approved`` payload (B4e #739).
+
+    ``edited_yn`` is the one field the annotation queue (#752) reads beyond the
+    identity the ledger row needs: the doctor's approved revision differed from
+    the stored draft snapshot, which is what splits an acceptance into the
+    unchanged and the edited class. The producer derives it against its own
+    immutable snapshot and never ships the snapshot itself, so the boolean is
+    all that travels.
+    """
+
+    case_id: int
+    prescription_id: int
+    patient_id: int
+    doctor_id: int
+    edited_yn: bool
+
+
+class PrescriptionRejectedTelemetryPayload(BaseModel):
+    """MOD-013's mirror of MOD-006's ``prescription.rejected`` payload (#752).
+
+    The annotation queue's rejection seat reads the four references and nothing
+    else: the producer's free-text ``reason`` is deliberately NOT mirrored, so
+    a doctor's rationale cannot reach ``observability_evaluation_scores``. What
+    the queue records is the CLASSIFICATION (rejected), never the prose that
+    came with it - the handoff note's rule, enforced at the mirror rather than
+    trusted to the builder.
+    """
 
     case_id: int
     prescription_id: int
@@ -536,6 +569,20 @@ PRODUCT_EVENT_MIRRORS: dict[str, type[ProductStepPayload]] = {
     EVENT_CASE_CLOSED: CaseClosedTelemetryPayload,
     EVENT_PRESCRIPTION_DRAFT_CREATED: PrescriptionDraftCreatedTelemetryPayload,
     EVENT_PRESCRIPTION_APPROVED: PrescriptionApprovedTelemetryPayload,
+}
+
+#: Registry: the doctor review OUTCOMES that become annotation-queue entries
+#: (#752), each mapped to the mirror the queue reads its verdict-bearing fields
+#: from. The key set is the terminal outcomes of the doctor's review - approved
+#: (split into the unchanged and edited classes by ``edited_yn``) and rejected.
+#: ``prescription.reviewed`` is deliberately absent: it announces that an edit
+#: was SAVED, carries no outcome to classify, and is not terminal - accepting it
+#: would label a draft that may never be approved or rejected. MOD-013 also has
+#: a funnel-step seat for ``prescription.approved``; the registries overlap
+#: there on purpose, and the ONE seat carries both effects.
+ANNOTATION_EVENT_MIRRORS: dict[str, type[BaseModel]] = {
+    EVENT_PRESCRIPTION_APPROVED: PrescriptionApprovedTelemetryPayload,
+    EVENT_PRESCRIPTION_REJECTED: PrescriptionRejectedTelemetryPayload,
 }
 
 #: Alert severities (``obs_alert_events.severity``) - low-cardinality vocabulary

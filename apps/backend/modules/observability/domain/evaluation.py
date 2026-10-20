@@ -61,15 +61,17 @@ from observability.langfuse_span import build_span_metadata
 DATA_TYPE_NUMERIC = "NUMERIC"
 DATA_TYPE_BOOLEAN = "BOOLEAN"
 
-#: ``source`` values. ``human`` exists so #752 can record annotations in the
-#: same rows this module writes; nothing here produces it yet.
+#: ``source`` values. ``human`` is #752's annotation queue: the doctor review
+#: outcomes recorded through :mod:`modules.observability.domain.annotation`.
+#: This module produces ``code`` only.
 SOURCE_CODE = "code"
 SOURCE_HUMAN = "human"
 
-#: ``observation_kind`` values: a real AI job's telemetry versus a golden
-#: dataset example.
+#: ``observation_kind`` values: a real AI job's telemetry, a golden dataset
+#: example, and - since #752 - a prescription a doctor reviewed.
 OBSERVATION_KIND_AI_JOB = "ai_job"
 OBSERVATION_KIND_GOLDEN = "golden"
+OBSERVATION_KIND_PRESCRIPTION = "prescription"
 
 EVAL_JOB_SUCCEEDED = "job_succeeded"
 EVAL_TRANSCRIPTION_WER = "transcription_wer"
@@ -78,7 +80,10 @@ EVAL_STRUCTURING_FIELD_ACCURACY = "structuring_field_accuracy"
 EVAL_STRUCTURING_CONFIDENCE_MET = "structuring_confidence_met"
 
 #: The evaluator vocabulary this module produces (the golden dataset's
-#: declared expectations are asserted against it in the unit suite).
+#: declared expectations are asserted against it in the unit suite). The
+#: annotation queue's human evaluators (#752) are deliberately absent: they
+#: are declared in ``domain.annotation``, because these are the CODE
+#: evaluators and the two vocabularies are asserted separately.
 EVALUATOR_NAMES: frozenset[str] = frozenset(
     {
         EVAL_JOB_SUCCEEDED,
@@ -89,7 +94,9 @@ EVALUATOR_NAMES: frozenset[str] = frozenset(
     }
 )
 
-OBSERVATION_KINDS: frozenset[str] = frozenset({OBSERVATION_KIND_AI_JOB, OBSERVATION_KIND_GOLDEN})
+OBSERVATION_KINDS: frozenset[str] = frozenset(
+    {OBSERVATION_KIND_AI_JOB, OBSERVATION_KIND_GOLDEN, OBSERVATION_KIND_PRESCRIPTION}
+)
 DATA_TYPES: frozenset[str] = frozenset({DATA_TYPE_NUMERIC, DATA_TYPE_BOOLEAN})
 SOURCES: frozenset[str] = frozenset({SOURCE_CODE, SOURCE_HUMAN})
 
@@ -423,6 +430,7 @@ __all__ = [
     "OBSERVATION_KINDS",
     "OBSERVATION_KIND_AI_JOB",
     "OBSERVATION_KIND_GOLDEN",
+    "OBSERVATION_KIND_PRESCRIPTION",
     "SOURCES",
     "SOURCE_CODE",
     "SOURCE_HUMAN",

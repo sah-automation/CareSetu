@@ -1,4 +1,4 @@
-"""B4a #702, B4 #722, B6 #723, B7 #724: MOD-013 consumer round trip vs real PostgreSQL.
+"""B4a #702, B4 #722, B6 #723, B7 #724, T3.5 #752: MOD-013 consumer round trip vs real PostgreSQL.
 
 The phase-spec integration test: ``ai_job.completed`` / ``ai_job.failed``
 events are published into the ``intake.intake_outbox`` exactly as the MOD-005
@@ -20,6 +20,13 @@ B7 (#724) adds the fourth subscription, ``intake.doctor_assigned``: the
 care-attribution edge. Its round trip proves the edge exists only because the
 event said so, that replaying it writes nothing, and that an intake's spend
 resolves to exactly one doctor through it.
+
+T3.5 (#752) adds the annotation queue: a doctor review OUTCOME becomes one
+``source = 'human'`` row of ``observability_evaluation_scores``. Its round trip
+proves the queue is fed by events (never by a read of MOD-006's tables), that
+the rejected outcome's free-text rationale never reaches storage, that the
+approval rides its existing funnel-step seat rather than a second one, and that
+a delivery nobody traced leaves the queue's trace id NULL.
 
 The ``draft`` case is different in kind: it drives the REAL
 ``IntakeFacade.request_rx_draft`` so the prescription-drafting leg's metering is
@@ -70,6 +77,12 @@ from bus.events import (
 )
 from bus.outbox_writer import write_outbox
 from bus.registry import HandlerRegistry
+from modules.care.adapters import register_handlers as register_care_handlers
+from modules.care.domain.events import (
+    prescription_approved_envelope,
+    prescription_rejected_envelope,
+)
+from modules.care.outbox import CARE_OUTBOX_TABLE
 from modules.intake.adapters import register_handlers as register_intake_handlers
 from modules.intake.adapters.ai_gateway import Ext002CallError
 from modules.intake.adapters.ai_provider_mock import (
@@ -89,6 +102,11 @@ from modules.intake.facade import IntakeFacade
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 from modules.observability.adapters import (
     register_handlers as register_observability_handlers,
+)
+from modules.observability.domain.annotation import (
+    ANNOTATION_EVALUATOR_ACCEPTED_EDITED,
+    ANNOTATION_EVALUATOR_ACCEPTED_UNCHANGED,
+    ANNOTATION_EVALUATOR_REJECTED,
 )
 from modules.observability.domain.consumer import (
     MAX_FAILURE_REASON_CHARS,
@@ -114,6 +132,7 @@ from modules.observability.domain.pseudonym import (
 )
 from modules.observability.domain.rollup import RollupThresholds
 from modules.observability.facade import run_rollup
+from observability.logging import reset_trace_id, set_trace_id
 
 _NOW = datetime(2026, 10, 13, 8, 15, 0, tzinfo=UTC)
 
@@ -278,6 +297,7 @@ async def _row_counts(connection: AsyncConnection) -> dict[str, int]:
         "observability.observability_product_events",
         "observability.observability_product_daily",
         "observability.observability_product_actor_daily",
+        "observability.observability_evaluation_scores",
         "observability.consumed_events",
     ):
         counts[table] = int(await connection.scalar(text(f"SELECT COUNT(*) FROM {table}")))
@@ -496,6 +516,7 @@ async def test_ai_job_events_round_trip_accumulate_and_dedupe_on_replay(
             "observability.observability_product_events": 0,
             "observability.observability_product_daily": 0,
             "observability.observability_product_actor_daily": 0,
+            "observability.observability_evaluation_scores": 0,
             "observability.consumed_events": 4,
         }
     finally:
@@ -1588,5 +1609,163 @@ async def test_a_step_added_to_the_registry_lands_with_no_migration(
             PRODUCT_EVENT_MIRRORS.pop(EVENT_PRESCRIPTION_REVIEWED, None)
             product_module.PRODUCT_STEP_REGISTRY.pop((FUNNEL_INTAKE, step.step), None)
             product_module._EVENT_STEP_INDEX.pop(EVENT_PRESCRIPTION_REVIEWED, None)
+    finally:
+        await engine.dispose()
+
+
+# ------------------------------------------------- T3.5 #752: the annotation queue
+
+
+async def _annotation_rows(connection: AsyncConnection) -> list[dict[str, object]]:
+    result = await connection.execute(
+        text(
+            "SELECT score_date, source, observation_kind, observation_ref, trace_id, "
+            "evaluator, data_type, value FROM "
+            "observability.observability_evaluation_scores ORDER BY evaluator"
+        )
+    )
+    return [dict(mapping) for mapping in result.mappings().all()]
+
+
+async def _annotation_table_text(connection: AsyncConnection) -> str:
+    """Every stored value of the queue, flattened to one string.
+
+    The rules being proven are ABSENCES - no free-text rationale, no raw identity
+    reference - so they are asserted over the whole table rather than over the
+    columns one read happens to select, matching the product-ledger test above.
+    """
+    rows = await connection.execute(
+        text(
+            "SELECT to_jsonb(score)::text AS row FROM "
+            "observability.observability_evaluation_scores score"
+        )
+    )
+    return " ".join(str(row[0]) for row in rows.all())
+
+
+@pytest.mark.asyncio
+async def test_doctor_review_outcomes_land_in_the_annotation_queue_replay_safe(
+    database_url: str, clean_tables: None
+) -> None:
+    """AC (#752): the queue is fed by review outcomes, PHI-free, carrying the trace.
+
+    1. An approval (unchanged) and a rejection, published through the CARE outbox
+       under a bound request trace, become two ``source = 'human'`` score rows -
+       the queue is fed by EVENTS, never by a read of MOD-006's tables (ADR-0003).
+    2. The approval rides its existing funnel-step seat, so one delivery writes
+       the ledger row AND the queue entry; a second seat for it would have been
+       told it is a replay and written nothing.
+    3. The rejection's free-text rationale never reaches storage.
+    4. Replaying both event_ids changes no row count anywhere.
+    5. A later outcome delivered with no request trace leaves its queue row's
+       trace id NULL rather than substituting a synthetic one.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    patient_ref = 700_000_051
+    doctor_ref = 900_000_051
+    prescription_ref = 800_000_011
+    try:
+        approved = _at(
+            prescription_approved_envelope(
+                case_id=1,
+                prescription_id=prescription_ref,
+                patient_id=patient_ref,
+                doctor_id=doctor_ref,
+                edited_yn=False,
+            ),
+            _NOW,
+        )
+        rejected = _at(
+            prescription_rejected_envelope(
+                case_id=1,
+                prescription_id=prescription_ref,
+                patient_id=patient_ref,
+                doctor_id=doctor_ref,
+                reason="dose looks wrong for this patient",
+            ),
+            _NOW,
+        )
+
+        # Published exactly as the producer publishes: inside the transaction, with
+        # the request's trace bound, so the outbox row carries the real traceparent.
+        async with engine.begin() as connection:
+            token = set_trace_id(_TRACE_ID)
+            try:
+                await write_outbox(connection, "care", CARE_OUTBOX_TABLE, approved)
+                await write_outbox(connection, "care", CARE_OUTBOX_TABLE, rejected)
+            finally:
+                reset_trace_id(token)
+
+        registry = _registry()
+        # The producer owns its payload models, so the care subscriptions have to be
+        # registered for the dispatcher to reconstruct a claimed ``care_outbox`` row
+        # - exactly as the composition root does in the worker.
+        register_care_handlers(registry)
+        async with engine.connect() as connection:
+            tables = await discover_outbox_tables(connection, ("care",))
+        for table in tables:
+            await process_outbox_table(engine, table, registry, DEFAULT_DISPATCHER_CONFIG)
+
+        async with engine.connect() as connection:
+            queue = await _annotation_rows(connection)
+            product = await _product_rows(connection)
+
+        assert [(row["evaluator"], row["observation_ref"]) for row in queue] == [
+            (ANNOTATION_EVALUATOR_ACCEPTED_UNCHANGED, str(prescription_ref)),
+            (ANNOTATION_EVALUATOR_REJECTED, str(prescription_ref)),
+        ]
+        for row in queue:
+            assert row["source"] == "human"
+            assert row["observation_kind"] == "prescription"
+            assert row["data_type"] == "BOOLEAN"
+            assert row["value"] == Decimal("1")
+            assert row["score_date"] == _NOW.date()
+            assert row["trace_id"] == _TRACE_ID
+
+        # The approval's funnel step landed from the SAME delivery.
+        assert [row["step"] for row in product] == ["prescription_approved"]
+
+        async with engine.connect() as connection:
+            stored = await _annotation_table_text(connection)
+        assert "dose looks wrong" not in stored
+        assert str(patient_ref) not in stored
+        assert str(doctor_ref) not in stored
+
+        # Replay BOTH event_ids: the ledger conflict swallows the delivery and no
+        # row count anywhere moves.
+        before_replay: dict[str, int] = {}
+        async with engine.connect() as connection:
+            before_replay = await _row_counts(connection)
+        await dispatch(registry, approved)
+        await dispatch(registry, rejected)
+        async with engine.connect() as connection:
+            after_replay = await _row_counts(connection)
+        assert after_replay == before_replay
+
+        # An outcome nobody traced: the queue still records the verdict, and the
+        # trace id is an honest NULL rather than the event's own id.
+        untraced = _at(
+            prescription_approved_envelope(
+                case_id=1,
+                prescription_id=prescription_ref + 1,
+                patient_id=patient_ref,
+                doctor_id=doctor_ref,
+                edited_yn=True,
+            ),
+            _NOW,
+        )
+        token = set_trace_id(None)
+        try:
+            await dispatch(registry, untraced)
+        finally:
+            reset_trace_id(token)
+
+        async with engine.connect() as connection:
+            queue = await _annotation_rows(connection)
+        assert [(row["evaluator"], row["trace_id"]) for row in queue] == [
+            (ANNOTATION_EVALUATOR_ACCEPTED_EDITED, None),
+            (ANNOTATION_EVALUATOR_ACCEPTED_UNCHANGED, _TRACE_ID),
+            (ANNOTATION_EVALUATOR_REJECTED, _TRACE_ID),
+        ]
     finally:
         await engine.dispose()

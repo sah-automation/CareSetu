@@ -41,6 +41,7 @@ from modules.observability.adapters import (
     register_handlers as register_obs_handlers,
 )
 from modules.observability.domain.consumer import (
+    ANNOTATION_EVENT_MIRRORS,
     BUSINESS_EVENT_METRICS,
     PRODUCT_EVENT_MIRRORS,
     CaseClosedTelemetryPayload,
@@ -130,11 +131,15 @@ def test_every_consumed_event_type_gets_exactly_one_seat() -> None:
 
     A second handler delivered the same envelope would find the first one's ledger
     row, be told it is a replay, and skip its own effect forever - invisibly.
+    The annotation queue (#752) is in the sweep: ``prescription.approved`` is both a
+    funnel step and a review outcome, and a second seat for it would never write
+    its annotation.
     """
     registry = HandlerRegistry()
     register_obs_handlers(registry)
 
-    for event_type in {step.event_type for step in product_steps()} | set(BUSINESS_EVENT_METRICS):
+    consumed = {step.event_type for step in product_steps()} | set(BUSINESS_EVENT_METRICS)
+    for event_type in consumed | set(ANNOTATION_EVENT_MIRRORS):
         assert len(registry.handlers_for(event_type)) == 1, event_type
 
 
@@ -430,7 +435,8 @@ async def test_every_consumed_event_type_writes_exactly_one_ledger_row(
 
     EVERY seat for the type is driven, not just one, so a funnel step that shares an
     event type with a business count is proven to write its own row rather than to
-    disappear behind the seat registered first.
+    disappear behind the seat registered first. The annotation effect (#752) of the
+    one step that carries it is stubbed here and proven in its own suite.
     """
     registry = HandlerRegistry()
     register_obs_handlers(registry)
@@ -441,7 +447,9 @@ async def test_every_consumed_event_type_writes_exactly_one_ledger_row(
     _patch_delivery(monkeypatch)
     _fake_ledger(monkeypatch, set())
     record = AsyncMock()
+    annotation = AsyncMock()
     monkeypatch.setattr("modules.observability.adapters.record_product_event", record)
+    monkeypatch.setattr("modules.observability.adapters.record_annotation", annotation)
 
     mirror = PRODUCT_EVENT_MIRRORS[event_type]
     envelope = Envelope[BaseModel](

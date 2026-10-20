@@ -127,6 +127,7 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
 from bus.ledger import HANDLER_RESULT_ACTOR_KEY
+from modules.observability.domain.annotation import review_annotation
 from modules.observability.domain.consumer import (
     AI_JOB_SPEND_STATUS_COMPLETED,
     AI_JOB_SPEND_STATUS_FAILED,
@@ -1169,6 +1170,36 @@ async def record_evaluation_scores(
         where=table.c.source == SOURCE_CODE,
     )
     await connection.execute(statement)
+
+
+async def record_annotation(
+    connection: AsyncConnection,
+    payload: BaseModel,
+    *,
+    trace_id: str | None,
+    occurred_at: datetime,
+) -> None:
+    """Write the one annotation-queue entry a doctor review outcome carries (#752).
+
+    The queue's write seam: build the ``source = 'human'`` score the outcome
+    classifies to, then write it through the score upsert above - so the
+    annotation rides the handler's SAME transaction as the ``consumed_events``
+    ledger row ``run_handler`` wrote first, and a redelivered ``event_id`` writes
+    no second row (ADR-0002 §3). The upsert's ``where`` clause keeps tonight's
+    code recompute from overwriting the human verdict, which is the whole reason
+    decision 40 declared ``source`` before a human could produce it.
+
+    A payload no review registry maps to writes nothing rather than raising - by
+    the time this runs the ledger row exists, and a vocabulary disagreement
+    between two registries must not fail a delivery that is already durable.
+    ``trace_id`` and ``occurred_at`` are the delivery's (see
+    :func:`~modules.observability.domain.annotation.annotation_trace_id` and the
+    builder's own docstring); this writer stores them, it does not invent them.
+    """
+    score = review_annotation(payload, trace_id=trace_id, occurred_at=occurred_at)
+    if score is None:
+        return
+    await record_evaluation_scores(connection, [score])
 
 
 @dataclass(frozen=True)

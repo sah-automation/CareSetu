@@ -528,11 +528,13 @@ observability_evaluation_scores = Table(
     # #752 annotation queue so a person's verdict lands in these same rows
     # without a schema change.
     Column("source", String(10), nullable=False, server_default=text("'code'")),
-    # 'ai_job' production telemetry versus 'golden' dataset example: a query
-    # that forgets to filter must still be able to tell them apart by kind.
+    # 'ai_job' production telemetry versus 'golden' dataset example versus
+    # (since #752) 'prescription' a doctor reviewed: a query that forgets to
+    # filter must still be able to tell them apart by kind.
     Column("observation_kind", String(20), nullable=False),
     # Local identity of the observation scored: the ai_job_ref for production
-    # rows, the golden example id for dataset rows - never content.
+    # rows, the golden example id for dataset rows, the prescription id for a
+    # reviewed prescription (#752) - never content.
     Column("observation_ref", String(64), nullable=False),
     # The cross-tool join #752's annotation queue matches a human judgement to
     # this technical verdict by. Nullable: a job row without a trace id still
