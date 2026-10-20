@@ -346,7 +346,7 @@
             "uid": "caresetu-observability-postgres"
           },
           "format": "time_series",
-          "rawSql": "SELECT metric_date AS time, metric_key, (value->>'count')::float AS value FROM observability.observability_business_daily WHERE $__timeFilter(metric_date) ORDER BY metric_date",
+          "rawSql": "SELECT metric_date AS time, metric_key, (value->>'count')::float AS value FROM observability.observability_business_daily WHERE $__timeFilter(metric_date) AND value ? 'count' ORDER BY metric_date",
           "refId": "A"
         }
       ],

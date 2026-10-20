@@ -302,13 +302,17 @@ def _insert_rollup_run(
     )
 
 
-def _upsert_statement(table: Table, values: dict[str, Any], conflict_keys: Sequence[str]) -> Any:
+def upsert_statement(table: Table, values: dict[str, Any], conflict_keys: Sequence[str]) -> Any:
     """An ``INSERT ... ON CONFLICT DO UPDATE`` refreshing every non-key column.
 
     Built from SQLAlchemy expressions rather than raw text so it compiles for the
     dialect and can be asserted without a database. The conflict keys keep their
     inserted value; everything else - including ``updated_at`` - is refreshed, so a
     re-run converges on the recomputed figure instead of accumulating.
+
+    Public because the #750 Langfuse daily batch lands in the same generic
+    ``business_daily`` store through it (``facade.record_langfuse_daily_metrics``),
+    so the whole store shares one upsert shape rather than two that could drift.
     """
     set_: dict[str, Any] = {key: value for key, value in values.items() if key not in conflict_keys}
     set_["updated_at"] = func.now()
@@ -317,6 +321,10 @@ def _upsert_statement(table: Table, values: dict[str, Any], conflict_keys: Seque
         .values(**values)
         .on_conflict_do_update(index_elements=list(conflict_keys), set_=set_)
     )
+
+
+#: Kept as a private alias for the rollup's own call sites and its adapter tests.
+_upsert_statement = upsert_statement
 
 
 # ------------------------------------------------------------------- the reads

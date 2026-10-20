@@ -423,3 +423,37 @@ def test_the_workflow_narrow_its_permissions_and_bounds_its_runtime() -> None:
 
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["jobs"]["rollup"]["timeout-minutes"] <= 60
+
+
+def test_the_langfuse_batch_pull_rides_the_rollup_s_schedule() -> None:
+    """Decision 39 (#717): one schedule for one system of record.
+
+    The pull is a STEP of the nightly job, after the rollup - never its own
+    timer, and it reaches the vendor by batch with its keys from secrets, never
+    from a dashboard refresh.
+    """
+    steps = _workflow()["jobs"]["rollup"]["steps"]
+    commands = [step.get("run", "") for step in steps]
+    pull_indexes = [i for i, command in enumerate(commands) if "worker.langfuse_metrics" in command]
+    rollup_indexes = [
+        i for i, command in enumerate(commands) if "python -m worker.rollup" in command
+    ]
+
+    assert pull_indexes and rollup_indexes
+    assert pull_indexes[0] > rollup_indexes[0]
+    pull_step = steps[pull_indexes[0]]
+    assert pull_step["env"]["LANGFUSE_PUBLIC_KEY"] == "${{ secrets.LANGFUSE_PUBLIC_KEY }}"
+    assert pull_step["env"]["LANGFUSE_SECRET_KEY"] == "${{ secrets.LANGFUSE_SECRET_KEY }}"
+
+
+def test_the_batch_pull_shares_the_rollup_job_not_a_second_schedule() -> None:
+    """One system of record, one schedule: the pull exists only on this job."""
+    workflow = _workflow()
+
+    assert list(workflow["jobs"]) == ["rollup"]
+    others = [
+        path.name
+        for path in sorted(WORKFLOW_PATH.parent.glob("*.yml"))
+        if path != WORKFLOW_PATH and "worker.langfuse_metrics" in path.read_text(encoding="utf-8")
+    ]
+    assert others == []

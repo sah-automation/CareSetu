@@ -120,6 +120,11 @@ DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON = "30 1 * * *"
 # cloud endpoint for the CareSetu project. Overridable via ``LANGFUSE_HOST``
 # (e.g. a self-hosted instance). Tracing is a no-op until both keys are supplied.
 DEFAULT_LANGFUSE_HOST = "https://us.cloud.langfuse.com"
+# The daily metrics pull's request timeout (#750): one aggregate request per
+# nightly run, so the ceiling only has to survive a slow vendor answer, not a
+# retry loop. Configuration like every other outbound timeout - one env var
+# moves it (third-party-integration-standards 1, coding-standards 9.1).
+DEFAULT_LANGFUSE_TIMEOUT_SECONDS = 30.0
 # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
 # knob with a fail-closed default (mock). The real provider is gated to
 # staging/production by ``__post_init__`` - a real key in dev/test is refused
@@ -349,6 +354,7 @@ class Settings:
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = DEFAULT_LANGFUSE_HOST
+    langfuse_timeout_seconds: float = DEFAULT_LANGFUSE_TIMEOUT_SECONDS
     # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
     # knob (mock is the fail-closed default); the real provider key/base URL/
     # model. ``__post_init__`` refuses a real provider in dev/test unless demo
@@ -611,6 +617,8 @@ class Settings:
                 "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must both be set or "
                 "both empty; refusing to initialise Langfuse with a partial key pair."
             )
+        if not math.isfinite(self.langfuse_timeout_seconds) or self.langfuse_timeout_seconds <= 0:
+            raise ValueError("langfuse_timeout_seconds must be finite and positive")
         intake_backend = self.intake_media_backend.strip().lower()
         if intake_backend not in {"local", "supabase"}:
             raise ValueError(
@@ -913,6 +921,9 @@ def get_settings() -> Settings:
         langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
         langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
         langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
+        langfuse_timeout_seconds=_env_float(
+            "LANGFUSE_TIMEOUT_SECONDS", DEFAULT_LANGFUSE_TIMEOUT_SECONDS
+        ),
         ai_provider=os.environ.get("AI_PROVIDER", DEFAULT_AI_PROVIDER),
         ai_model=os.environ.get("AI_MODEL", DEFAULT_AI_MODEL),
         ai_asr_model=os.environ.get("AI_ASR_MODEL", DEFAULT_AI_ASR_MODEL),

@@ -364,7 +364,7 @@ def build_panels() -> tuple[Panel, ...]:
                 """
                 SELECT metric_date AS time, metric_key, (value->>'count')::float AS value
                 FROM {schema}.observability_business_daily
-                WHERE $__timeFilter(metric_date)
+                WHERE $__timeFilter(metric_date) AND value ? 'count'
                 ORDER BY metric_date
                 """
             ),

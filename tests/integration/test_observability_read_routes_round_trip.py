@@ -560,6 +560,45 @@ async def test_overview_narrows_to_the_requested_window(
     ]
 
 
+async def test_overview_ignores_snapshot_rows_without_a_count(
+    seeded_engine: AsyncEngine, database_url: str
+) -> None:
+    """A non-count row in the shared store is not coerced to a business count.
+
+    ``observability_business_daily`` holds more than registry-driven counts: the
+    #750 batch pull lands a ``langfuse.daily`` snapshot carrying no ``count``
+    key, and the rollup's ``ai.*`` metrics carry other shapes. Reading every row
+    as ``value->>'count'`` would cast NULL to Integer and 500 the overview, so
+    the projection must ignore anything without a count.
+    """
+    async with seeded_engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO observability.observability_business_daily "
+                "(metric_key, metric_date, value) VALUES "
+                "('case.consult_complete', :today, CAST(:six AS jsonb)), "
+                "('langfuse.daily', :today, CAST(:snapshot AS jsonb))"
+            ),
+            {
+                "today": _TODAY,
+                "six": '{"count": 6}',
+                "snapshot": (
+                    '{"vendor": "langfuse", "observation_count": 42, '
+                    '"total_tokens": 123456, "total_cost_usd": "0.421300", '
+                    '"avg_latency_ms": "815.56"}'
+                ),
+            },
+        )
+
+    with _client(database_url) as client:
+        response = client.get(OVERVIEW_PATH, headers=_bearer())
+
+    assert response.status_code == 200
+    assert response.json()["business_counts"] == [
+        {"metric_key": "case.consult_complete", "count": 6}
+    ]
+
+
 async def test_latency_reports_the_rolled_percentiles(
     rolled_engine: AsyncEngine, database_url: str
 ) -> None:

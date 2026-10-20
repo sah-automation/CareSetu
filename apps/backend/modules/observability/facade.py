@@ -98,6 +98,7 @@ from time import perf_counter
 from typing import Any, Literal, TypeVar
 from uuid import UUID
 
+import httpx
 from pydantic import BaseModel, model_validator
 from sqlalchemy import (
     CTE,
@@ -202,7 +203,13 @@ from modules.observability.http_counter_stream import (
     HttpCounterDrainReport,
     drain_http_counter,
 )
-from modules.observability.rollup import RollupReport, RollupRunState, load_rollup_state, run_rollup
+from modules.observability.rollup import (
+    RollupReport,
+    RollupRunState,
+    load_rollup_state,
+    run_rollup,
+    upsert_statement,
+)
 from modules.observability.schema.models import (
     observability_ai_cost_budget,
     observability_ai_job_spend,
@@ -220,6 +227,7 @@ from modules.observability.schema.models import (
     observability_product_events,
     observability_rollup_runs,
 )
+from observability.langfuse_metrics import LangfuseDailyMetrics, pull_daily_metrics
 from observability.logging import SERVICE_API
 
 OBSERVABILITY_SCHEMA = "observability"
@@ -958,6 +966,100 @@ async def record_alert_event(connection: AsyncConnection, alert: AlertRow) -> No
             payload=alert.payload,
         )
     )
+
+
+# ----------------------------------------------- the Langfuse daily batch (#750)
+#
+# Decision 39 (#717): Langfuse metrics reach the system of record by daily
+# batch on the nightly rollup's schedule, never by a live vendor call behind a
+# dashboard - the free tier's ~100 metrics requests a day would not survive a
+# refresh loop. The pull itself (one aggregate-only ``httpx`` request) lives in
+# ``observability.langfuse_metrics``; this is the module's write path for what
+# it returns, plus the orchestration seam ``worker.langfuse_metrics`` runs.
+
+#: The generic-store key the daily Langfuse snapshot lands under: one
+#: ``observability_business_daily`` row per UTC date, keyed by the table's own
+#: ``(metric_key, metric_date)`` natural key, so a re-run of the same date
+#: replaces the value instead of double-counting and no new table is needed.
+METRIC_KEY_LANGFUSE_DAILY = "langfuse.daily"
+
+
+@dataclass(frozen=True)
+class LangfusePullReport:
+    """What one daily pull did: nothing when unconfigured, else the landed date."""
+
+    metric_date: date | None
+    written: bool
+
+
+async def record_langfuse_daily_metrics(
+    connection: AsyncConnection,
+    metric_date: date,
+    metrics: LangfuseDailyMetrics,
+) -> None:
+    """Upsert one day's Langfuse snapshot into the generic JSONB metric store.
+
+    Whole-value replacement on ``(metric_key, metric_date)``, the re-run
+    contract the rollup writes with: the batch owns every field it publishes,
+    so a second run of the same date lands on the fetched snapshot rather than
+    stacking on top of it. Only the four aggregate counters are stored - counts,
+    tokens, USD cost, mean latency - so no clinical content reaches Postgres
+    through this path, and the span-metadata allow-list in
+    ``observability.langfuse_span`` remains the only door metadata takes to
+    the vendor (#750).
+    """
+    values: dict[str, Any] = {
+        "metric_key": METRIC_KEY_LANGFUSE_DAILY,
+        "metric_date": metric_date,
+        "value": {
+            "vendor": "langfuse",
+            "observation_count": metrics.observation_count,
+            "total_tokens": metrics.total_tokens,
+            "total_cost_usd": f"{metrics.total_cost_usd:.6f}",
+            "avg_latency_ms": (
+                None if metrics.avg_latency_ms is None else f"{metrics.avg_latency_ms:.2f}"
+            ),
+        },
+    }
+    statement = upsert_statement(
+        observability_business_daily, values, ("metric_key", "metric_date")
+    )
+    await connection.execute(statement)
+
+
+async def run_langfuse_daily_pull(
+    engine: AsyncEngine,
+    target_date: date,
+    *,
+    public_key: str,
+    secret_key: str,
+    host: str,
+    timeout_seconds: float,
+    client: httpx.AsyncClient | None = None,
+) -> LangfusePullReport:
+    """Pull ``target_date``'s Langfuse metrics and land them in one transaction.
+
+    The #750 batch seam: exactly one metrics request (no retries), then a
+    single short transaction whose only write is the upsert above. An
+    unconfigured vendor returns ``written=False`` before the engine is ever
+    touched, so a project without a Langfuse account runs this seam - and the
+    nightly job around it - as a silent no-op. A failed request raises out
+    instead, so the scheduled run reports it and the operator re-runs the step
+    for that date; re-running never double-counts.
+    """
+    metrics = await pull_daily_metrics(
+        target_date,
+        public_key=public_key,
+        secret_key=secret_key,
+        host=host,
+        timeout_seconds=timeout_seconds,
+        client=client,
+    )
+    if metrics is None:
+        return LangfusePullReport(metric_date=None, written=False)
+    async with engine.begin() as connection:
+        await record_langfuse_daily_metrics(connection, target_date, metrics)
+    return LangfusePullReport(metric_date=target_date, written=True)
 
 
 # ------------------------------------------------------- operator read API (C1)
@@ -2607,6 +2709,11 @@ async def query_overview(
             cast(business.c.value.op("->>")("count"), Integer).label("count"),
         )
         .where(business.c.metric_date.between(from_date, to_date))
+        # Only registry-driven business counts (``{"count": <int>}``) are counts.
+        # The same store also holds snapshot rows keyed on other shapes - the
+        # rollup's ``ai.*`` metrics and the #750 ``langfuse.daily`` snapshot -
+        # which carry no ``count`` and must not be coerced to an Integer here.
+        .where(business.c.value.has_key("count"))
         .order_by(business.c.metric_key)
     )
 

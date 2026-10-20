@@ -126,3 +126,21 @@ jobs:
           else
             uv run python -m worker.rollup
           fi
+      # #750, spec #717 decision 39: the Langfuse metrics batch rides THIS
+      # job's schedule - a step after the rollup, never a second cron for the
+      # same system of record. One invocation makes at most ONE metrics request
+      # (no backfill flag exists here on purpose), so the free tier's ~100
+      # requests a day are never spent by a refresh loop or a window sweep, and
+      # no dashboard refresh ever reaches the vendor. Both secrets unset arrives
+      # as empty strings and the step no-ops with exit 0: a missing key must not
+      # fail the nightly run, exactly like every other vendor integration.
+      # LANGFUSE_HOST stays unset so the backend's own default (render.yaml's
+      # value) remains the single source for the host.
+      - name: pull Langfuse daily metrics (batch only, one request)
+        working-directory: apps/backend
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          uv run python -m worker.langfuse_metrics
