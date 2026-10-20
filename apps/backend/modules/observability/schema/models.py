@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -512,4 +513,59 @@ observability_product_actor_daily = Table(
         "actor_key",
         "event_date",
     ),
+)
+
+
+observability_evaluation_scores = Table(
+    "observability_evaluation_scores",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # The batch date the score belongs to - the same UTC day grain the #750
+    # metrics pull and the rollup ledger use, so one scheduled run's rows all
+    # share it.
+    Column("score_date", Date, nullable=False),
+    # 'code' today (the deterministic evaluators); 'human' is reserved for the
+    # #752 annotation queue so a person's verdict lands in these same rows
+    # without a schema change.
+    Column("source", String(10), nullable=False, server_default=text("'code'")),
+    # 'ai_job' production telemetry versus 'golden' dataset example: a query
+    # that forgets to filter must still be able to tell them apart by kind.
+    Column("observation_kind", String(20), nullable=False),
+    # Local identity of the observation scored: the ai_job_ref for production
+    # rows, the golden example id for dataset rows - never content.
+    Column("observation_ref", String(64), nullable=False),
+    # The cross-tool join #752's annotation queue matches a human judgement to
+    # this technical verdict by. Nullable: a job row without a trace id still
+    # gets its local score recorded.
+    Column("trace_id", String(64), nullable=True),
+    Column("evaluator", String(64), nullable=False),
+    # NUMERIC or BOOLEAN only - the aggregation rule decision 40 turns on.
+    # Six decimals, the precision the domain's EvaluationScore quantizes to.
+    Column("data_type", String(10), nullable=False),
+    Column("value", Numeric(12, 6), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # The nightly idempotency key: re-running a date upserts these rows
+    # instead of stacking a second set of scores beside the first.
+    UniqueConstraint(
+        "score_date",
+        "observation_kind",
+        "observation_ref",
+        "evaluator",
+        name="uq_observability_evaluation_scores_key",
+    ),
+    CheckConstraint(
+        "source IN ('code', 'human')",
+        name="ck_observability_evaluation_scores_source",
+    ),
+    CheckConstraint(
+        "data_type IN ('NUMERIC', 'BOOLEAN')",
+        name="ck_observability_evaluation_scores_data_type",
+    ),
+    CheckConstraint(
+        "data_type <> 'BOOLEAN' OR value IN (0, 1)",
+        name="ck_observability_evaluation_scores_boolean_value",
+    ),
+    # The #752 join opens on trace_id; the day aggregate opens on score_date.
+    Index("ix_observability_evaluation_scores_trace", "trace_id"),
+    Index("ix_observability_evaluation_scores_date", "score_date"),
 )

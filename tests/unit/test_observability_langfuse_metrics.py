@@ -35,6 +35,7 @@ from sqlalchemy.dialects import postgresql
 
 from modules.observability.facade import (
     METRIC_KEY_LANGFUSE_DAILY,
+    EvaluationRunReport,
     LangfusePullReport,
     record_langfuse_daily_metrics,
     run_langfuse_daily_pull,
@@ -318,20 +319,43 @@ def test_a_malformed_date_is_refused() -> None:
         entry_point.build_parser().parse_args(["--date", "10-02-2026"])
 
 
-def test_an_unconfigured_vendor_exits_zero_without_pulling(
+def test_an_unconfigured_vendor_still_scores_locally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A project without a Langfuse account must not fail the nightly rollup."""
+    """Keyless means no vendor requests, not no scores: the local run still lands.
+
+    Deterministic evaluation needs no vendor account, and decision data must
+    not depend on vendor churn (ADR-0024 D2), so the worker invokes both seams
+    unconditionally; each seam owns its own unconfigured-vendor no-op.
+    """
     settings = MagicMock(langfuse_public_key="")
     monkeypatch.setattr(entry_point, "get_settings", lambda: settings)
     monkeypatch.setattr(entry_point, "configure_logging", lambda *_a, **_k: None)
+    monkeypatch.setattr(entry_point, "create_async_engine", lambda _url: _DisposableEngine())
 
-    async def _must_not_run(*_a: object, **_k: object) -> object:
-        raise AssertionError("an unconfigured vendor must not start a pull")
+    pulls: list[str] = []
+    evaluated: list[str] = []
 
-    monkeypatch.setattr(entry_point, "run_langfuse_daily_pull", _must_not_run)
+    async def _fake_pull(engine: object, target_date: date, **kwargs: Any) -> LangfusePullReport:
+        pulls.append(kwargs["public_key"])
+        return LangfusePullReport(metric_date=None, written=False)
+
+    async def _fake_evaluate(
+        engine: object, target_date: date, **kwargs: Any
+    ) -> EvaluationRunReport:
+        evaluated.append(kwargs["public_key"])
+        return EvaluationRunReport(
+            metric_date=target_date, score_count=12, golden_count=12, vendor_scored=None
+        )
+
+    monkeypatch.setattr(entry_point, "run_langfuse_daily_pull", _fake_pull)
+    monkeypatch.setattr(entry_point, "run_daily_evaluation", _fake_evaluate)
 
     assert entry_point.main([]) == 0
+    # Both seams are invoked; the pull no-ops on the empty key, the local
+    # evaluation does not - it records the day's scores with no vendor post.
+    assert pulls == [""]
+    assert evaluated == [""]
 
 
 def test_a_successful_pull_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -347,15 +371,27 @@ def test_a_successful_pull_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(entry_point, "create_async_engine", lambda _url: _DisposableEngine())
 
     seen: list[date] = []
+    evaluated: list[date] = []
 
     async def _fake_pull(engine: object, target_date: date, **kwargs: Any) -> LangfusePullReport:
         seen.append(target_date)
         return LangfusePullReport(metric_date=target_date, written=True)
 
+    async def _fake_evaluate(
+        engine: object, target_date: date, **kwargs: Any
+    ) -> EvaluationRunReport:
+        evaluated.append(target_date)
+        return EvaluationRunReport(
+            metric_date=target_date, score_count=13, golden_count=12, vendor_scored=12
+        )
+
     monkeypatch.setattr(entry_point, "run_langfuse_daily_pull", _fake_pull)
+    monkeypatch.setattr(entry_point, "run_daily_evaluation", _fake_evaluate)
 
     assert entry_point.main(["--date", "2026-10-12"]) == 0
     assert seen == [date(2026, 10, 12)]
+    # AC5: the evaluator batch runs on the SAME invocation and date as the pull.
+    assert evaluated == [date(2026, 10, 12)]
 
 
 def test_a_failed_pull_exits_one(monkeypatch: pytest.MonkeyPatch) -> None:

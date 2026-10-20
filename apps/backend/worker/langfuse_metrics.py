@@ -1,4 +1,4 @@
-"""Runnable entry point for the #750 Langfuse daily batch pull.
+"""Runnable entry point for the #750 Langfuse daily batch pull and #751 evaluation.
 
 ``python -m worker.langfuse_metrics`` - the second step of the scheduled
 ``observability-rollup.yml`` job, on the SAME schedule as the rollup it follows
@@ -9,12 +9,21 @@ metrics request for one date - there is no backfill flag here by design: a
 window sweep would spend the daily allowance on N requests in one run, and a
 missed date is re-pulled with ``--date`` instead.
 
+The same invocation then runs the #751 code-evaluator batch for that date
+(AC5: evaluation rides the daily metrics batch, not a second timer): the
+deterministic evaluators score the day's AI-job rows and the synthetic golden
+dataset, the scores land in ``observability_evaluation_scores``, and the
+golden scores are posted to Langfuse observation-level - no model call, so no
+inference money, and no clinical content (spec #717 decision 40).
+
 The default date is YESTERDAY's UTC day - the same day the rollup step just
 rolled - so the store's ``(metric_key, metric_date)`` rows line up with the
 rollup ledger. Re-running the step after a fix lands on the same date and
 replaces the snapshot rather than double-counting. With ``LANGFUSE_PUBLIC_KEY``
-absent the run is a silent no-op that exits 0, exactly like every other vendor
-integration: a project without a Langfuse account must not fail the nightly job.
+absent the vendor halves of both seams no-op silently - no request, like
+every other vendor integration - but the local evaluation still runs and
+records the day's scores: deterministic scoring needs no vendor account, and
+decision data must not depend on vendor churn (ADR-0024 D2).
 
 Logging is configured once with its own service name so batch-pull lines stay
 separable from the rollup's, mirroring ``worker.rollup``.
@@ -31,7 +40,12 @@ from datetime import UTC, date, datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
-from modules.observability.facade import LangfusePullReport, run_langfuse_daily_pull
+from modules.observability.facade import (
+    EvaluationRunReport,
+    LangfusePullReport,
+    run_daily_evaluation,
+    run_langfuse_daily_pull,
+)
 from observability.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -72,12 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the pull for yesterday or ``--date``; ``0`` on success or no-op.
+    """Run the pull and the evaluator batch for yesterday or ``--date``.
 
-    An unconfigured vendor exits 0 with a log line - the missing-key no-op the
-    brief requires. A failed request or a failed write raises out and exits 1,
-    so the scheduled run reports it; the operator then re-runs the step with
-    ``--date`` for the missed night, which converges on the same row.
+    ``0`` on success or no-op. Both seams own their unconfigured-vendor no-op
+    internally, so the worker calls them unconditionally: absent keys the
+    metrics pull sends nothing, while the evaluator batch still records the
+    day's scores locally and skips only the vendor post. A failed request or
+    a failed write raises out and exits 1, so the scheduled run reports it;
+    the operator then re-runs the step with ``--date`` for the missed night,
+    which converges on the same row and the same scores.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -87,14 +104,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     target_date = args.date or default_target_date(datetime.now(tz=UTC).date())
 
     if not settings.langfuse_public_key:
-        logger.info("langfuse keys absent; daily metrics pull skipped for %s", target_date)
-        return 0
+        logger.info(
+            "langfuse keys absent; vendor requests skipped, local evaluation runs for %s",
+            target_date,
+        )
 
-    async def _execute() -> LangfusePullReport:
-        """One engine for the invocation: pull, upsert, dispose."""
+    async def _execute() -> tuple[LangfusePullReport, EvaluationRunReport]:
+        """One engine for the invocation: pull, upsert, evaluate, post, dispose."""
         engine = create_async_engine(settings.database_url)
         try:
-            return await run_langfuse_daily_pull(
+            pull = await run_langfuse_daily_pull(
                 engine,
                 target_date,
                 public_key=settings.langfuse_public_key,
@@ -102,19 +121,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host=settings.langfuse_host,
                 timeout_seconds=settings.langfuse_timeout_seconds,
             )
+            evaluation = await run_daily_evaluation(
+                engine,
+                target_date,
+                public_key=settings.langfuse_public_key,
+                secret_key=settings.langfuse_secret_key,
+                host=settings.langfuse_host,
+                timeout_seconds=settings.langfuse_timeout_seconds,
+            )
+            return pull, evaluation
         finally:
             await engine.dispose()
 
     try:
-        report = asyncio.run(_execute())
+        pull, evaluation = asyncio.run(_execute())
     except KeyboardInterrupt:
-        logger.warning("langfuse daily metrics pull interrupted")
+        logger.warning("langfuse daily batch interrupted")
         return 130
     except Exception:
-        logger.exception("langfuse daily metrics pull failed for %s", target_date)
+        logger.exception("langfuse daily batch failed for %s", target_date)
         return 1
-    if report.written:
-        logger.info("langfuse daily metrics landed for %s", report.metric_date)
+    if pull.written:
+        logger.info("langfuse daily metrics landed for %s", pull.metric_date)
+    logger.info(
+        "code evaluators recorded %s scores for %s (%s golden, %s posted to vendor)",
+        evaluation.score_count,
+        evaluation.metric_date,
+        evaluation.golden_count,
+        evaluation.vendor_scored,
+    )
     return 0
 
 

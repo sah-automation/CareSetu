@@ -96,6 +96,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from time import perf_counter
 from typing import Any, Literal, TypeVar
+from typing import cast as narrowing_cast
 from uuid import UUID
 
 import httpx
@@ -151,6 +152,12 @@ from modules.observability.domain.deeplinks import (
     sentry_issues_link,
     sentry_project,
     sentry_trace_link,
+)
+from modules.observability.domain.evaluation import (
+    OBSERVATION_KIND_GOLDEN,
+    SOURCE_CODE,
+    EvaluationScore,
+    evaluate_day,
 )
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
@@ -222,11 +229,13 @@ from modules.observability.schema.models import (
     observability_care_attribution_edges,
     observability_consumed_events,
     observability_error_events,
+    observability_evaluation_scores,
     observability_http_minute,
     observability_product_actor_daily,
     observability_product_events,
     observability_rollup_runs,
 )
+from observability.langfuse_evaluation import post_evaluation_scores
 from observability.langfuse_metrics import LangfuseDailyMetrics, pull_daily_metrics
 from observability.logging import SERVICE_API
 
@@ -1060,6 +1069,162 @@ async def run_langfuse_daily_pull(
     async with engine.begin() as connection:
         await record_langfuse_daily_metrics(connection, target_date, metrics)
     return LangfusePullReport(metric_date=target_date, written=True)
+
+
+# ---------------------------------------------- the code-evaluator batch (#751)
+#
+# Decision 40 (#717): evaluation is deterministic code over PHI-free metadata
+# plus the synthetic golden dataset - no model call, so running it costs no
+# inference money - and it rides the SAME daily batch as the #750 metrics pull
+# (``worker.langfuse_metrics``). Scores are numeric or boolean, one row per
+# (observation, evaluator) with the cross-tool trace id on them, so they
+# aggregate and so the #752 annotation queue can join a human's verdict to a
+# technical one by one key. The vendor half posts only the golden run's scores
+# through the observation-level path: production rows have no vendor
+# observation id we may name, and the trace-level score path they would fall
+# back to is deprecated with the November 2026 cloud cutover.
+
+
+async def _load_ai_job_rows(
+    connection: AsyncConnection, target_date: date
+) -> list[Mapping[str, object]]:
+    """The production columns the ``job_succeeded`` evaluator is allowed to see.
+
+    Exactly the allow-listed span-metadata columns plus the identity
+    reference. The domain forces every one of them through the PHI-free
+    allow-list at read time, so a future column outside that list fails the
+    run loudly instead of becoming a silent evaluator input.
+    """
+    table = observability_ai_job_spend
+    result = await connection.execute(
+        select(
+            table.c.ai_job_ref,
+            table.c.provider,
+            table.c.model,
+            table.c.task_type,
+            table.c.input_tokens,
+            table.c.output_tokens,
+            table.c.cost_paise,
+            table.c.status,
+            table.c.trace_id,
+        )
+        .where(table.c.usage_date == target_date)
+        .order_by(table.c.ai_job_ref)
+    )
+    # A RowMapping IS a Mapping at runtime, but mypy's view of sqlalchemy's
+    # RowMapping does not accept it as one; the cast names what the domain
+    # contract reads.
+    return narrowing_cast(list[Mapping[str, object]], list(result.mappings()))
+
+
+async def record_evaluation_scores(
+    connection: AsyncConnection, scores: Sequence[EvaluationScore]
+) -> None:
+    """Upsert one batch of scores on the per-observation natural key.
+
+    The unique key ``(score_date, observation_kind, observation_ref,
+    evaluator)`` is the nightly idempotency: re-running a date replaces the
+    value, data type, source and trace id of its own rows and touches no
+    others, so the batch converges instead of double-counting. Identity
+    columns are not updatable - a score naming a different observation is a
+    different row, never a rewritten one. ``None`` values (a job row without
+    a trace id) insert as SQL NULL through the same statement.
+
+    The update only fires when the stored row is itself a code row: a future
+    human verdict on the same observation and evaluator (#752's annotation
+    queue) outranks tonight's recompute and must survive it, so the nightly
+    batch leaves ``source = 'human'`` rows untouched.
+    """
+    if not scores:
+        return
+    table = observability_evaluation_scores
+    statement = insert(table).values(
+        [
+            {
+                "score_date": score.score_date,
+                "source": score.source,
+                "observation_kind": score.observation_kind,
+                "observation_ref": score.observation_ref,
+                "trace_id": score.trace_id,
+                "evaluator": score.evaluator,
+                "data_type": score.data_type,
+                "value": Decimal(str(score.value)),
+            }
+            for score in scores
+        ]
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=[
+            "score_date",
+            "observation_kind",
+            "observation_ref",
+            "evaluator",
+        ],
+        set_={
+            "source": statement.excluded.source,
+            "trace_id": statement.excluded.trace_id,
+            "data_type": statement.excluded.data_type,
+            "value": statement.excluded.value,
+        },
+        where=table.c.source == SOURCE_CODE,
+    )
+    await connection.execute(statement)
+
+
+@dataclass(frozen=True)
+class EvaluationRunReport:
+    """One run's tally: what landed in Postgres, what reached the vendor.
+
+    ``vendor_scored`` is ``None`` when the vendor is unconfigured (the no-op
+    path), otherwise the number of golden scores posted - both requests are
+    idempotent, so the number is "current state", not "sent this time".
+    """
+
+    metric_date: date
+    score_count: int
+    golden_count: int
+    vendor_scored: int | None
+
+
+async def run_daily_evaluation(
+    engine: AsyncEngine,
+    target_date: date,
+    *,
+    public_key: str,
+    secret_key: str,
+    host: str,
+    timeout_seconds: float,
+    client: httpx.AsyncClient | None = None,
+) -> EvaluationRunReport:
+    """Score one batch date locally, then post the golden scores to the vendor.
+
+    The #751 seam the nightly job runs right after the #750 metrics pull (AC5:
+    same daily batch, same invocation). One short transaction whose only write
+    is the score upsert above - load, evaluate, record - so a crash mid-run
+    leaves no half-written verdicts; the vendor post runs after that
+    transaction commits and never holds it open. An unconfigured vendor still
+    gets the local scores recorded (``vendor_scored=None``) and sends nothing.
+    """
+    async with engine.begin() as connection:
+        job_rows = await _load_ai_job_rows(connection, target_date)
+        scores = evaluate_day(target_date, job_rows)
+        await record_evaluation_scores(connection, scores)
+    golden_scores = [score for score in scores if score.observation_kind == OBSERVATION_KIND_GOLDEN]
+    vendor_scored = await post_evaluation_scores(
+        target_date,
+        golden_scores,
+        public_key=public_key,
+        secret_key=secret_key,
+        host=host,
+        timeout_seconds=timeout_seconds,
+        client=client,
+    )
+    return EvaluationRunReport(
+        metric_date=target_date,
+        score_count=len(scores),
+        golden_count=len(golden_scores),
+        vendor_scored=vendor_scored,
+    )
 
 
 # ------------------------------------------------------- operator read API (C1)
