@@ -201,7 +201,7 @@ def test_a_record_carries_no_field_a_request_body_could_hide_in() -> None:
 
 def test_the_buffer_is_bounded_and_drops_the_oldest_rather_than_growing() -> None:
     """#726: an unbounded buffer turns an error storm into an OOM kill."""
-    configure_error_capture(3)
+    configure_error_capture(3, enabled=True)
     request = _request()
 
     kept = [_capture(request) for _ in range(5)]
@@ -215,7 +215,7 @@ def test_the_buffer_is_bounded_and_drops_the_oldest_rather_than_growing() -> Non
 
 def test_shrinking_the_buffer_keeps_what_is_currently_failing() -> None:
     """A resize down applies the same policy an append to a full buffer does."""
-    configure_error_capture(5)
+    configure_error_capture(5, enabled=True)
     for offset in range(5):
         capture_server_error(
             request=_request(f"/v1/cases/{offset}/entries"),
@@ -225,7 +225,7 @@ def test_shrinking_the_buffer_keeps_what_is_currently_failing() -> None:
             trace_id="trace-abc123",
         )
 
-    configure_error_capture(2)
+    configure_error_capture(2, enabled=True)
 
     pending = pending_error_captures()
     assert [record.status_code for record in pending] == [503, 504]
@@ -233,7 +233,7 @@ def test_shrinking_the_buffer_keeps_what_is_currently_failing() -> None:
 
 def test_a_snapshot_does_not_consume_and_a_discard_releases_only_what_it_claims() -> None:
     """The drain writes a snapshot and releases it AFTER the commit; both halves matter."""
-    configure_error_capture(10)
+    configure_error_capture(10, enabled=True)
     for _ in range(3):
         _capture(_request())
 
@@ -265,7 +265,7 @@ def test_a_discard_releases_the_survivors_of_a_partial_turnover() -> None:
     inflating ``occurrences`` permanently. Only the survivors may be released; the
     newcomers were never in the batch.
     """
-    configure_error_capture(4)
+    configure_error_capture(4, enabled=True)
     captured = [_capture(_request(f"/v1/cases/{offset}/entries")) for offset in range(4)]
     persisted = tuple(record for record in captured if record is not None)
     assert len(persisted) == 4
@@ -290,13 +290,13 @@ def test_a_discard_of_a_fully_evicted_batch_releases_nothing() -> None:
     free those three - silent loss during exactly the storm the bound exists for -
     while identity matching finds nothing of the batch and releases nothing.
     """
-    configure_error_capture(10)
+    configure_error_capture(10, enabled=True)
     captured = [_capture(_request(f"/v1/cases/{offset}/entries")) for offset in range(3)]
     persisted = tuple(record for record in captured if record is not None)
 
     # A ceiling small enough that the next three captures evict all three of the
     # batch, so the buffer holds only records the write never persisted.
-    configure_error_capture(3)
+    configure_error_capture(3, enabled=True)
     for _ in range(3):
         _capture(_request("/v1/cases/90/entries"))
     newcomers = pending_error_captures()
@@ -317,10 +317,19 @@ def test_the_method_is_bounded_so_a_hostile_request_cannot_grow_a_record() -> No
 
 def test_the_buffer_ceiling_floors_at_one_rather_than_disabling_capture() -> None:
     """A misconfigured ceiling of zero must not turn error capture off silently."""
-    configure_error_capture(0)
+    configure_error_capture(0, enabled=True)
 
     assert error_capture_capacity() == 1
     assert _capture(_request()) is not None
+
+
+def test_configured_off_is_a_no_op_that_buffers_nothing() -> None:
+    """#753: the gate off means the seam captures nothing, at any capacity."""
+    configure_error_capture(10, enabled=False)
+
+    assert _capture(_request()) is None
+    assert pending_error_captures() == ()
+    assert dropped_error_captures() == 0
 
 
 # ------------------------------------------------- the gateway seams, at the app
@@ -386,4 +395,29 @@ def test_a_healthy_request_buffers_nothing() -> None:
 
     assert client.get("/v1/cases/912/fine").status_code == 200
 
+    assert pending_error_captures() == ()
+
+
+def test_the_lifespan_arms_the_capture_when_the_gate_is_on() -> None:
+    """#753: the composition root applies the gate, not just the buffer ceiling."""
+    with _failing_client(error_capture_enabled=True) as client:
+        response = client.get("/v1/cases/912/boom")
+
+    assert response.status_code == 500
+    (record,) = pending_error_captures()
+    assert record.route_template == "/v1/cases/{case_id}/boom"
+
+
+def test_a_disabled_gate_serves_the_error_without_capturing_it() -> None:
+    """#753: gate off changes nothing the client sees; only the buffer stays empty.
+
+    The whole point of the gate: a deployment that has not opted in behaves as
+    if the capture seam did not exist - the 500 still answers the same way, and
+    not one byte of record is built or buffered.
+    """
+    with _failing_client() as client:
+        response = client.get("/v1/cases/912/boom")
+
+    assert response.status_code == 500
+    assert response.json()["code"] == "INTERNAL_SERVER_ERROR"
     assert pending_error_captures() == ()

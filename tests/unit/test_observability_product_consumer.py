@@ -126,15 +126,20 @@ def test_every_registered_step_has_a_handler_seat_and_the_mirror_covers_them() -
     assert set(PRODUCT_EVENT_MIRRORS) == {step.event_type for step in product_steps()}
 
 
-def test_every_consumed_event_type_gets_exactly_one_seat() -> None:
+def test_every_consumed_event_type_gets_exactly_one_seat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One seat per event type, because the consumed-event ledger is keyed by it alone.
 
     A second handler delivered the same envelope would find the first one's ledger
     row, be told it is a replay, and skip its own effect forever - invisibly.
     The annotation queue (#752) is in the sweep: ``prescription.approved`` is both a
     funnel step and a review outcome, and a second seat for it would never write
-    its annotation.
+    its annotation. The queue's #753 gate is opted into here so the sweep sees
+    every event type the feature can consume; gate-off seating is asserted in the
+    annotation suite.
     """
+    monkeypatch.setenv("ANNOTATION_QUEUE_ENABLED", "true")
     registry = HandlerRegistry()
     register_obs_handlers(registry)
 

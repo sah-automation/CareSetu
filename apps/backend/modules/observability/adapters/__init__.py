@@ -50,6 +50,9 @@ The queue is the ``source = 'human'`` half of ``observability_evaluation_scores`
 (see ``domain.annotation``); it is fed here through the bus like every other
 subscription, and the outcome CLASS is all a seat ever reads - the doctor's
 free-text rationale is dropped by the rejected mirror before this file runs.
+#753 gates the effect behind ANNOTATION_QUEUE_ENABLED (off by default): with the
+gate off the approval keeps its funnel-step seat minus the annotation flag and
+the rejection gets no seat at all, so no other feature moves.
 """
 
 from __future__ import annotations
@@ -61,6 +64,7 @@ from typing import cast
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.config import get_settings
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_AI_EGRESS_RECORDED,
@@ -227,7 +231,7 @@ class _Seat:
         return "record_" + "_and_".join(effects)
 
 
-def _seats() -> tuple[_Seat, ...]:
+def _seats(*, annotation_enabled: bool) -> tuple[_Seat, ...]:
     """Every seat this module registers for an event it merely CONSUMES.
 
     The registry-driven path, and the reason "adding a funnel step is a registry
@@ -240,16 +244,25 @@ def _seats() -> tuple[_Seat, ...]:
     is a funnel step AND a review outcome (#752) - it gets ONE seat carrying every
     effect that applies, because the consumed-event ledger is keyed by ``event_id``
     alone and a second seat would be told it is a replay: see :class:`_Seat`.
+
+    ``annotation_enabled`` is the #753 ``ANNOTATION_QUEUE_ENABLED`` gate, read once
+    at the composition seam (:func:`register_handlers`). Off, the annotation effect
+    leaves every seat: ``prescription.rejected``, whose ONLY effect it is, gets no
+    seat at all (a no-effect handler would write a ledger row naming no effect),
+    while ``prescription.approved`` keeps its funnel-step seat with the flag
+    dropped - the gate moves nothing but the gate.
     """
     steps = {step.event_type: step for step in product_steps()}
-    event_types = set(BUSINESS_EVENT_METRICS) | set(steps) | set(ANNOTATION_EVENT_MIRRORS)
+    event_types = set(BUSINESS_EVENT_METRICS) | set(steps)
+    if annotation_enabled:
+        event_types |= set(ANNOTATION_EVENT_MIRRORS)
     return tuple(
         _Seat(
             event_type=event_type,
             mirror=_mirror_for(event_type, steps),
             business_metric=BUSINESS_EVENT_METRICS.get(event_type),
             product_step=steps.get(event_type),
-            annotation=event_type in ANNOTATION_EVENT_MIRRORS,
+            annotation=annotation_enabled and event_type in ANNOTATION_EVENT_MIRRORS,
         )
         for event_type in sorted(event_types)
     )
@@ -315,7 +328,15 @@ def _register_seat(registry: HandlerRegistry, seat: _Seat) -> None:
 
 
 def register_handlers(registry: HandlerRegistry) -> None:
-    """Register the observability module's event handlers (B4a #702)."""
+    """Register the observability module's event handlers (B4a #702).
+
+    #753: ``ANNOTATION_QUEUE_ENABLED`` is read HERE, at the composition seam -
+    the same place the notify adapter reads its settings - so the gate lives at
+    one layer up from the seats and no delivery ever re-reads it. With the gate
+    off, :func:`_seats` simply never offers the annotation-only seat, and every
+    other registration runs exactly as it did before the gate existed.
+    """
+    annotation_enabled = get_settings().annotation_queue_enabled
 
     async def record_ai_job_queued(envelope: Envelope[BaseModel]) -> None:
         """Consume ``ai_job.queued``: add one still-open job to the queue table.
@@ -412,8 +433,10 @@ def register_handlers(registry: HandlerRegistry) -> None:
 
     # B4b (#703) + B4e (#739): the registry-driven seats for the events this module
     # merely CONSUMES - the business counts and the product event ledger's funnel
-    # steps, from one seat per event type carrying whichever effects apply.
-    for seat in _seats():
+    # steps, from one seat per event type carrying whichever effects apply. #753:
+    # the annotation gate is resolved above, before this loop, so the seats it
+    # builds are the seats this deployment opted into.
+    for seat in _seats(annotation_enabled=annotation_enabled):
         _register_seat(registry, seat)
 
     async def record_tamper_alert(envelope: Envelope[BaseModel]) -> None:

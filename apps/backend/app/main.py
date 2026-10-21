@@ -314,8 +314,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # any worker exists, so a setting applied only by the worker would leave the
         # ceiling at its import-time default on the one path the ceiling exists to
         # protect. The worker applies it too, so whichever process runs first has
-        # already done it.
-        configure_error_capture(resolved_settings.error_capture_max_records)
+        # already done it. #753: the same call applies ERROR_CAPTURE_ENABLED, so
+        # this root also decides whether the seam is armed at all.
+        configure_error_capture(
+            resolved_settings.error_capture_max_records,
+            enabled=resolved_settings.error_capture_enabled,
+        )
         # PHASE-14A B9 (#727): the per-minute HTTP counter's ceiling, applied for
         # the same reason as the error buffer above. It is set HERE rather than in
         # the gateway middleware because the middleware runs on the request path

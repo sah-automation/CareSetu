@@ -135,12 +135,15 @@ jobs:
       # as empty strings and the step no-ops with exit 0: a missing key must not
       # fail the nightly run, exactly like every other vendor integration.
       # LANGFUSE_HOST stays unset so the backend's own default (render.yaml's
-      # value) remains the single source for the host.
+      # value) remains the single source for the host. #753: EVALUATION_ENABLED
+      # is this step's own opt-in - the gate defaults off, so the scheduled batch
+      # is where the #751 evaluators are switched on for the nightly run.
       - name: pull Langfuse daily metrics (batch only, one request)
         working-directory: apps/backend
         env:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          EVALUATION_ENABLED: "true"
         run: |
           set -euo pipefail
           uv run python -m worker.langfuse_metrics

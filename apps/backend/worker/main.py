@@ -435,7 +435,8 @@ def build_scheduler(
     """Build the worker's periodic-job scheduler (PHASE-6 T04a, #315).
 
     An ``AsyncIOScheduler`` running on the worker's event loop, registered with
-    three periodic jobs. The first is the daily credential-expiry sweep, scheduled
+    the periodic jobs below - the error-buffer drain only when its #753 gate is
+    on. The first is the daily credential-expiry sweep, scheduled
     on ``settings.partner_credential_sweep_cron`` (defaults to the daily 01:30
     cadence of the backup cron, ``deploy/cron``), whose callback is the injectable
     ``sweep_callback`` (defaulting to :func:`_run_credential_sweep`, the T04b
@@ -447,7 +448,10 @@ def build_scheduler(
     calendar period, and it must reach the module through
     ``modules.observability.facade`` like every other composition-root seam -
     importing ``modules.observability.error_stream`` here would bypass the facade
-    that owns this module's only legal write path.
+    that owns this module's only legal write path. #753: the job is registered
+    ONLY when ``settings.error_capture_enabled`` - a deployment that has not
+    opted into the capture seam has an always-empty buffer, so the gate-off
+    scheduler is the pre-#726 one (sweep + HTTP-counter fold, nothing else).
 
     The third is PHASE-14A B9's HTTP-counter fold (#727), on an ``IntervalTrigger``
     of ``settings.http_counter_drain_interval_seconds``, for the same two reasons:
@@ -457,9 +461,9 @@ def build_scheduler(
     information (a bucket split across two passes still lands on one row, since the
     upsert ADDS) and firing slower only makes the operator's "recent past" stale.
 
-    All three jobs use ``coalesce`` + a fixed job id so late or missed firings cannot
-    stack duplicate passes across a sleep, and ``max_instances=1`` so a drain that
-    is slower than its interval skips rather than overlaps.
+    Every registered job uses ``coalesce`` + a fixed job id so late or missed
+    firings cannot stack duplicate passes across a sleep, and ``max_instances=1``
+    so a drain that is slower than its interval skips rather than overlaps.
     """
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -470,14 +474,15 @@ def build_scheduler(
         coalesce=True,
         max_instances=1,
     )
-    scheduler.add_job(
-        drain_callback,
-        IntervalTrigger(seconds=settings.error_drain_interval_seconds),
-        id="error-buffer-drain",
-        name="observability-error-buffer-drain",
-        coalesce=True,
-        max_instances=1,
-    )
+    if settings.error_capture_enabled:
+        scheduler.add_job(
+            drain_callback,
+            IntervalTrigger(seconds=settings.error_drain_interval_seconds),
+            id="error-buffer-drain",
+            name="observability-error-buffer-drain",
+            coalesce=True,
+            max_instances=1,
+        )
     scheduler.add_job(
         counter_drain_callback,
         IntervalTrigger(seconds=settings.http_counter_drain_interval_seconds),
@@ -515,8 +520,12 @@ async def run_worker_until_stopped(
     # PHASE-14A B8 (#726): size the in-process error-capture buffer from Settings
     # once, here, rather than at each capture site - the seam appends without
     # knowing anything about configuration and the drain reads the same bound when
-    # it reports what it dropped.
-    configure_error_capture(resolved_settings.error_capture_max_records)
+    # it reports what it dropped. #753: the same call applies ERROR_CAPTURE_ENABLED,
+    # so this root also decides whether the seam is armed at all.
+    configure_error_capture(
+        resolved_settings.error_capture_max_records,
+        enabled=resolved_settings.error_capture_enabled,
+    )
     # PHASE-14A B9 (#727): size the in-process per-minute HTTP counter the same way,
     # for the same reason - the gateway seam counts without knowing anything about
     # configuration, and this fold reads the same bound when it reports what it

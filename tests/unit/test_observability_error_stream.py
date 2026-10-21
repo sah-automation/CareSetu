@@ -210,7 +210,7 @@ def test_discards_are_warned_about_once_per_growth_not_once_per_pass(
     # A ceiling of one record: a second capture in the same pass discards the first,
     # which is the storm this line exists to report. The middle pass fits in the
     # buffer and so discards nothing - the pass that must NOT re-warn.
-    configure_error_capture(1)
+    configure_error_capture(1, enabled=True)
     _capture(500)
     _capture(500)
     asyncio.run(drain_error_buffer(engine))  # type: ignore[arg-type]
@@ -242,7 +242,7 @@ def test_a_reset_re_arms_the_discard_warning(
     monkeypatch.setattr(error_stream, "_drops_last_reported", 5)
     engine = _FakeEngine(_RecordingConnection())
 
-    configure_error_capture(1)
+    configure_error_capture(1, enabled=True)
     _capture(500)
     _capture(500)
     asyncio.run(drain_error_buffer(engine))  # type: ignore[arg-type]

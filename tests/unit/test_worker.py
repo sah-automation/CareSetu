@@ -222,7 +222,7 @@ def test_build_scheduler_registers_the_error_drain_on_an_interval() -> None:
     fire on a cadence a cron expression cannot express - and a buffer that waited
     for the next night to drain would not be a live error feed.
     """
-    scheduler = worker_main.build_scheduler(Settings())
+    scheduler = worker_main.build_scheduler(Settings(error_capture_enabled=True))
 
     job = _job(scheduler, "error-buffer-drain")
     assert isinstance(job.trigger, IntervalTrigger)
@@ -234,9 +234,25 @@ def test_build_scheduler_registers_the_error_drain_on_an_interval() -> None:
 
 def test_build_scheduler_honours_a_configured_drain_interval() -> None:
     """B8 #726: the drain cadence is configuration (coding-standards §9.1)."""
-    scheduler = worker_main.build_scheduler(Settings(error_drain_interval_seconds=5))
+    scheduler = worker_main.build_scheduler(
+        Settings(error_capture_enabled=True, error_drain_interval_seconds=5)
+    )
 
     assert _job(scheduler, "error-buffer-drain").trigger.interval == timedelta(seconds=5)
+
+
+def test_build_scheduler_skips_the_error_drain_when_the_capture_gate_is_off() -> None:
+    """#753: gate off means the pre-#726 scheduler - the drain job never registers.
+
+    An empty buffer drained every 30 seconds is pure cost, and the gate-off
+    posture has to be exactly "as if the feature were not there" - while the
+    sweep and the HTTP-counter fold (different features) stay untouched.
+    """
+    scheduler = worker_main.build_scheduler(Settings())
+
+    assert not any(job.id == "error-buffer-drain" for job in scheduler.get_jobs())
+    _job(scheduler, "credential-expiry-sweep")
+    _job(scheduler, "http-counter-fold")
 
 
 async def test_drain_callback_persists_the_buffer_through_the_module_facade(

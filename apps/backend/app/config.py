@@ -417,6 +417,12 @@ class Settings:
     # nothing is skipped. A limit, so configuration (coding-standards §9.1), not a
     # constant.
     observability_rollup_max_dates: int = DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
+    # The gateway error-capture seam's own gate (B8 #726, gated #753): off (the
+    # default) means no server error is captured at all - the catch-all seam and
+    # the gateway middleware answer exactly as they would without the feature,
+    # and the worker skips the error-buffer drain job. On, the seam is armed and
+    # the ceiling below applies.
+    error_capture_enabled: bool = False
     # Ceiling on the in-process error-capture buffer (B8 #726). The gateway error
     # seam appends one record per server error and the worker drains the buffer on
     # ``error_drain_interval_seconds``; a full buffer DISCARDS its oldest record, so
@@ -439,6 +445,18 @@ class Settings:
     # schema, in seconds. Bounded below only by "must be positive": a zero interval
     # is a busy loop against the database.
     http_counter_drain_interval_seconds: int = DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
+    # Batch-3 observability feature gates (#753): additive and disabled by
+    # default, one gate per feature that shipped in this batch, so a deployment
+    # opts in per feature and local dev / tests / CI run without them. The A5
+    # gate block above is untouched: ``observability_enabled`` stays reserved.
+    # ``evaluation_enabled`` runs the #751 code-evaluator batch as part of the
+    # daily Langfuse pull (``worker/langfuse_metrics.py``); with it off the
+    # pull still runs and only the evaluators are skipped. ``annotation_queue_enabled``
+    # feeds the #752 doctor-review annotation queue from review-outcome events;
+    # with it off the outcome seats still record their funnel/business effects
+    # and only the annotation write is skipped (``modules.observability.adapters``).
+    evaluation_enabled: bool = False
+    annotation_queue_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -966,6 +984,7 @@ def get_settings() -> Settings:
         observability_rollup_max_dates=_env_int(
             "OBSERVABILITY_ROLLUP_MAX_DATES", DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
         ),
+        error_capture_enabled=_env_bool("ERROR_CAPTURE_ENABLED", False),
         error_capture_max_records=_env_int(
             "ERROR_CAPTURE_MAX_RECORDS", DEFAULT_ERROR_CAPTURE_MAX_RECORDS
         ),
@@ -978,4 +997,6 @@ def get_settings() -> Settings:
         http_counter_drain_interval_seconds=_env_int(
             "HTTP_COUNTER_DRAIN_INTERVAL_SECONDS", DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
         ),
+        evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
+        annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),
     )

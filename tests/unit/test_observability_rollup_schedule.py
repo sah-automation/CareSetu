@@ -430,7 +430,9 @@ def test_the_langfuse_batch_pull_rides_the_rollup_s_schedule() -> None:
 
     The pull is a STEP of the nightly job, after the rollup - never its own
     timer, and it reaches the vendor by batch with its keys from secrets, never
-    from a dashboard refresh.
+    from a dashboard refresh. #753: this step is also where EVALUATION_ENABLED
+    opts in - the gate defaults off everywhere else, so without the step's own
+    env the #751 evaluators would silently stop running every night.
     """
     steps = _workflow()["jobs"]["rollup"]["steps"]
     commands = [step.get("run", "") for step in steps]
@@ -444,6 +446,7 @@ def test_the_langfuse_batch_pull_rides_the_rollup_s_schedule() -> None:
     pull_step = steps[pull_indexes[0]]
     assert pull_step["env"]["LANGFUSE_PUBLIC_KEY"] == "${{ secrets.LANGFUSE_PUBLIC_KEY }}"
     assert pull_step["env"]["LANGFUSE_SECRET_KEY"] == "${{ secrets.LANGFUSE_SECRET_KEY }}"
+    assert pull_step["env"]["EVALUATION_ENABLED"] == "true"
 
 
 def test_the_batch_pull_shares_the_rollup_job_not_a_second_schedule() -> None:

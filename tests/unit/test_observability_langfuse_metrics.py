@@ -325,8 +325,9 @@ def test_an_unconfigured_vendor_still_scores_locally(
     """Keyless means no vendor requests, not no scores: the local run still lands.
 
     Deterministic evaluation needs no vendor account, and decision data must
-    not depend on vendor churn (ADR-0024 D2), so the worker invokes both seams
-    unconditionally; each seam owns its own unconfigured-vendor no-op.
+    not depend on vendor churn (ADR-0024 D2), so with the #753 evaluation gate
+    on (a MagicMock attribute is truthy, as any opted-in deployment's is) the
+    worker invokes both seams; each seam owns its own unconfigured-vendor no-op.
     """
     settings = MagicMock(langfuse_public_key="")
     monkeypatch.setattr(entry_point, "get_settings", lambda: settings)
@@ -392,6 +393,43 @@ def test_a_successful_pull_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [date(2026, 10, 12)]
     # AC5: the evaluator batch runs on the SAME invocation and date as the pull.
     assert evaluated == [date(2026, 10, 12)]
+
+
+def test_the_evaluation_gate_skips_the_evaluators_but_still_pulls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#753: EVALUATION_ENABLED off skips exactly the evaluators, nothing else.
+
+    The metrics pull is its own seam with its own vendor no-op, so a deployment
+    that has not opted into evaluation still lands the day's Langfuse metrics:
+    the gate moves the feature it names and the exit code stays 0.
+    """
+    settings = MagicMock(
+        langfuse_public_key="pk-lf-test",
+        langfuse_secret_key="sk-lf-test",
+        langfuse_host=_HOST,
+        langfuse_timeout_seconds=30.0,
+        database_url="postgresql+asyncpg://u:p@h/db",
+        evaluation_enabled=False,
+    )
+    monkeypatch.setattr(entry_point, "get_settings", lambda: settings)
+    monkeypatch.setattr(entry_point, "configure_logging", lambda *_a, **_k: None)
+    monkeypatch.setattr(entry_point, "create_async_engine", lambda _url: _DisposableEngine())
+
+    seen: list[date] = []
+
+    async def _fake_pull(engine: object, target_date: date, **kwargs: Any) -> LangfusePullReport:
+        seen.append(target_date)
+        return LangfusePullReport(metric_date=target_date, written=True)
+
+    async def _fail_evaluate(*_a: object, **_k: object) -> EvaluationRunReport:
+        raise AssertionError("the evaluators must not run when the gate is off")
+
+    monkeypatch.setattr(entry_point, "run_langfuse_daily_pull", _fake_pull)
+    monkeypatch.setattr(entry_point, "run_daily_evaluation", _fail_evaluate)
+
+    assert entry_point.main(["--date", "2026-10-12"]) == 0
+    assert seen == [date(2026, 10, 12)]
 
 
 def test_a_failed_pull_exits_one(monkeypatch: pytest.MonkeyPatch) -> None:

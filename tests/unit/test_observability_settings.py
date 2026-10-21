@@ -38,6 +38,11 @@ def test_settings_observability_gates_default_to_inert() -> None:
     # The nightly rollup's per-pass date ceiling (B5b #705) is a limit, so it is
     # configuration (coding-standards 9.1), not a constant in the worker.
     assert settings.observability_rollup_max_dates == DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
+    # Batch-3 feature gates (#753): each new observability feature ships behind
+    # its own gate, off until a deployment opts in.
+    assert settings.error_capture_enabled is False
+    assert settings.evaluation_enabled is False
+    assert settings.annotation_queue_enabled is False
 
 
 def test_settings_reads_every_observability_gate_from_environment(
@@ -54,6 +59,9 @@ def test_settings_reads_every_observability_gate_from_environment(
     monkeypatch.setenv("METRICS_ENABLED", "1")
     monkeypatch.setenv("OBSERVABILITY_ENABLED", "on")
     monkeypatch.setenv("OBSERVABILITY_ROLLUP_MAX_DATES", "14")
+    monkeypatch.setenv("ERROR_CAPTURE_ENABLED", "true")
+    monkeypatch.setenv("EVALUATION_ENABLED", "1")
+    monkeypatch.setenv("ANNOTATION_QUEUE_ENABLED", "on")
 
     settings = get_settings()
 
@@ -68,6 +76,9 @@ def test_settings_reads_every_observability_gate_from_environment(
     assert settings.metrics_enabled is True
     assert settings.observability_enabled is True
     assert settings.observability_rollup_max_dates == 14
+    assert settings.error_capture_enabled is True
+    assert settings.evaluation_enabled is True
+    assert settings.annotation_queue_enabled is True
 
 
 def test_settings_refuses_a_non_positive_rollup_date_ceiling() -> None:

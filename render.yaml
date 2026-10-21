@@ -107,6 +107,19 @@ services:
         value: "false"
       - key: OBSERVABILITY_ENABLED
         value: "false"
+      # Batch-3 observability feature gates (#753): additive and disabled by
+      # default, one gate per shipped feature. Flip a gate on in the Render
+      # Dashboard to opt this deployment into the feature it names - with every
+      # gate at "false" each feature is a complete no-op, as before it existed.
+      # EVALUATION_ENABLED is consumed by the nightly observability-rollup
+      # workflow (which opts its own step in); it is declared here so every
+      # gate's default lives in one manifest.
+      - key: ERROR_CAPTURE_ENABLED
+        value: "false"
+      - key: EVALUATION_ENABLED
+        value: "false"
+      - key: ANNOTATION_QUEUE_ENABLED
+        value: "false"
       # Browsable Grafana base (PHASE-14A C1b, #707): the stack the OTLP endpoint
       # above exports into, as an operator can actually open it. Serves the
       # operator observability "/deeplinks" read; dashboard-managed, because the

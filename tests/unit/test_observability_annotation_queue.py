@@ -165,7 +165,7 @@ def test_the_approved_seat_carries_the_funnel_step_and_the_annotation_together()
     A second seat would find the first one's ledger row, be told it is a replay,
     and write nothing - invisibly, forever.
     """
-    seats = {seat.event_type: seat for seat in _seats()}
+    seats = {seat.event_type: seat for seat in _seats(annotation_enabled=True)}
 
     approved = seats[EVENT_PRESCRIPTION_APPROVED]
     assert approved.annotation is True
@@ -181,8 +181,30 @@ def test_the_approved_seat_carries_the_funnel_step_and_the_annotation_together()
     assert rejected.handler_name == "record_annotation"
 
 
-def test_every_consumed_event_type_gets_exactly_one_seat() -> None:
+def test_with_the_gate_off_the_seats_keep_every_other_effect() -> None:
+    """#753: gate off must not touch what is not the gate.
+
+    ``prescription.approved`` keeps its funnel-step seat (its effect is a
+    different feature), renamed to name only what it will actually do; the
+    rejection - whose ONLY effect is the annotation - gets no seat at all,
+    because registering a no-effect handler would file a bogus ledger row.
+    """
+    seats = {seat.event_type: seat for seat in _seats(annotation_enabled=False)}
+
+    approved = seats[EVENT_PRESCRIPTION_APPROVED]
+    assert approved.annotation is False
+    assert approved.product_step is not None
+    assert "annotation" not in approved.handler_name
+    assert "product_event" in approved.handler_name
+
+    assert EVENT_PRESCRIPTION_REJECTED not in seats
+
+
+def test_every_consumed_event_type_gets_exactly_one_seat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One seat per event type, because the consumed-event ledger is keyed by it alone."""
+    monkeypatch.setenv("ANNOTATION_QUEUE_ENABLED", "true")
     registry = HandlerRegistry()
     register_obs_handlers(registry)
 
@@ -294,6 +316,7 @@ async def test_the_approved_delivery_writes_the_funnel_row_and_one_annotation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One seat, both effects, in the one ledger-gated transaction."""
+    monkeypatch.setenv("ANNOTATION_QUEUE_ENABLED", "true")
     registry = HandlerRegistry()
     register_obs_handlers(registry)
     _patch_delivery(monkeypatch)
@@ -324,6 +347,7 @@ async def test_the_rejected_delivery_hands_the_mirror_that_lost_the_rationale(
 ) -> None:
     """What the queue is given is the classification, and the seat never sees
     the prose the producer shipped alongside it."""
+    monkeypatch.setenv("ANNOTATION_QUEUE_ENABLED", "true")
     registry = HandlerRegistry()
     register_obs_handlers(registry)
     _patch_delivery(monkeypatch)
@@ -344,6 +368,7 @@ async def test_a_replayed_review_outcome_writes_neither_effect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The ledger row gates BOTH effects, so a redelivery cannot double the queue."""
+    monkeypatch.setenv("ANNOTATION_QUEUE_ENABLED", "true")
     registry = HandlerRegistry()
     register_obs_handlers(registry)
     handler = registry.handlers_for(EVENT_PRESCRIPTION_APPROVED)[0]
@@ -360,6 +385,32 @@ async def test_a_replayed_review_outcome_writes_neither_effect(
 
     assert step_record.await_count == 1
     assert annotation_record.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_with_the_gate_off_the_approval_keeps_its_funnel_step_and_skips_the_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#753: gate off, the seat delivers its OTHER effect - and only that one.
+
+    The rejection has no other effect, so it has no seat at all: a delivery of
+    it finds no handler and writes nothing anywhere, which is what "the feature
+    is off" has to mean without disturbing the funnel-step feature next door.
+    """
+    registry = HandlerRegistry()
+    register_obs_handlers(registry)
+    _patch_delivery(monkeypatch)
+    _fake_ledger(monkeypatch, set())
+    step_record = AsyncMock()
+    annotation_record = AsyncMock()
+    monkeypatch.setattr("modules.observability.adapters.record_product_event", step_record)
+    monkeypatch.setattr("modules.observability.adapters.record_annotation", annotation_record)
+
+    await registry.handlers_for(EVENT_PRESCRIPTION_APPROVED)[0](_approved(edited_yn=False))
+
+    assert step_record.await_count == 1
+    assert annotation_record.await_count == 0
+    assert not registry.handlers_for(EVENT_PRESCRIPTION_REJECTED)
 
 
 @pytest.mark.asyncio

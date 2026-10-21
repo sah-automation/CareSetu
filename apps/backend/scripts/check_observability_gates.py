@@ -10,8 +10,12 @@ import, or a shutdown flush that assumes a client.
 
 ``ci.yml`` runs this twice, once with every gate off (the default posture) and
 once with them on (dummy endpoints), so both ends of every gate are exercised on
-each CI run. The smoke imports the real composition root (``create_app`` wires
-structlog + OTel), drives the ASGI lifespan through an in-process client (which
+each CI run. The #753 batch-3 feature gates (ERROR_CAPTURE_ENABLED,
+EVALUATION_ENABLED, ANNOTATION_QUEUE_ENABLED) ride the same two legs: the off
+leg proves each feature is a complete no-op while boot and ``/health`` stay
+healthy, and the on leg proves the armed wiring still boots. The smoke imports
+the real composition root (``create_app`` wires structlog + OTel), drives the
+ASGI lifespan through an in-process client (which
 wires Sentry + Langfuse and runs the shutdown flushes), and serves
 ``GET /health``. It needs no database: the engine is lazy and ``/health``
 touches nothing.
@@ -40,6 +44,9 @@ def _gate_posture(settings: Settings) -> dict[str, object]:
         "otel_metrics": settings.metrics_enabled and bool(endpoint),
         "langfuse": bool(settings.langfuse_public_key.strip()),
         "observability": settings.observability_enabled,
+        "error_capture": settings.error_capture_enabled,
+        "evaluation": settings.evaluation_enabled,
+        "annotation_queue": settings.annotation_queue_enabled,
     }
 
 

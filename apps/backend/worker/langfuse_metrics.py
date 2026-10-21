@@ -21,9 +21,12 @@ rolled - so the store's ``(metric_key, metric_date)`` rows line up with the
 rollup ledger. Re-running the step after a fix lands on the same date and
 replaces the snapshot rather than double-counting. With ``LANGFUSE_PUBLIC_KEY``
 absent the vendor halves of both seams no-op silently - no request, like
-every other vendor integration - but the local evaluation still runs and
-records the day's scores: deterministic scoring needs no vendor account, and
-decision data must not depend on vendor churn (ADR-0024 D2).
+every other vendor integration - but with EVALUATION_ENABLED on the local
+evaluation still runs and records the day's scores: deterministic scoring needs
+no vendor account, and decision data must not depend on vendor churn (ADR-0024
+D2). #753 gates the evaluator half behind ``EVALUATION_ENABLED`` (off by
+default): with the gate off only the evaluators are skipped - the metrics pull
+runs exactly as before, because the gate moves the feature it names.
 
 Logging is configured once with its own service name so batch-pull lines stay
 separable from the rollup's, mirroring ``worker.rollup``.
@@ -88,13 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the pull and the evaluator batch for yesterday or ``--date``.
 
-    ``0`` on success or no-op. Both seams own their unconfigured-vendor no-op
-    internally, so the worker calls them unconditionally: absent keys the
-    metrics pull sends nothing, while the evaluator batch still records the
-    day's scores locally and skips only the vendor post. A failed request or
-    a failed write raises out and exits 1, so the scheduled run reports it;
-    the operator then re-runs the step with ``--date`` for the missed night,
-    which converges on the same row and the same scores.
+    ``0`` on success or no-op. The pull is called unconditionally - its
+    unconfigured-vendor no-op lives inside the seam, so absent keys the metrics
+    pull sends nothing. The evaluator batch is called only when the #753
+    ``EVALUATION_ENABLED`` gate is on; off (the default), the pull still runs
+    and only the evaluators are skipped, so a deployment that has not opted in
+    behaves as if #751 had never landed. A failed request or a failed write
+    raises out and exits 1, so the scheduled run reports it; the operator then
+    re-runs the step with ``--date`` for the missed night, which converges on
+    the same row and the same scores.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -104,12 +109,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     target_date = args.date or default_target_date(datetime.now(tz=UTC).date())
 
     if not settings.langfuse_public_key:
+        logger.info("langfuse keys absent; vendor requests skipped for %s", target_date)
+    if not settings.evaluation_enabled:
         logger.info(
-            "langfuse keys absent; vendor requests skipped, local evaluation runs for %s",
+            "evaluation gate off (EVALUATION_ENABLED); code evaluators skipped for %s",
             target_date,
         )
 
-    async def _execute() -> tuple[LangfusePullReport, EvaluationRunReport]:
+    async def _execute() -> tuple[LangfusePullReport, EvaluationRunReport | None]:
         """One engine for the invocation: pull, upsert, evaluate, post, dispose."""
         engine = create_async_engine(settings.database_url)
         try:
@@ -121,14 +128,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host=settings.langfuse_host,
                 timeout_seconds=settings.langfuse_timeout_seconds,
             )
-            evaluation = await run_daily_evaluation(
-                engine,
-                target_date,
-                public_key=settings.langfuse_public_key,
-                secret_key=settings.langfuse_secret_key,
-                host=settings.langfuse_host,
-                timeout_seconds=settings.langfuse_timeout_seconds,
-            )
+            evaluation: EvaluationRunReport | None = None
+            if settings.evaluation_enabled:
+                evaluation = await run_daily_evaluation(
+                    engine,
+                    target_date,
+                    public_key=settings.langfuse_public_key,
+                    secret_key=settings.langfuse_secret_key,
+                    host=settings.langfuse_host,
+                    timeout_seconds=settings.langfuse_timeout_seconds,
+                )
             return pull, evaluation
         finally:
             await engine.dispose()
@@ -143,13 +152,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if pull.written:
         logger.info("langfuse daily metrics landed for %s", pull.metric_date)
-    logger.info(
-        "code evaluators recorded %s scores for %s (%s golden, %s posted to vendor)",
-        evaluation.score_count,
-        evaluation.metric_date,
-        evaluation.golden_count,
-        evaluation.vendor_scored,
-    )
+    if evaluation is not None:
+        logger.info(
+            "code evaluators recorded %s scores for %s (%s golden, %s posted to vendor)",
+            evaluation.score_count,
+            evaluation.metric_date,
+            evaluation.golden_count,
+            evaluation.vendor_scored,
+        )
     return 0
 
 

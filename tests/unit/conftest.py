@@ -52,8 +52,8 @@ def clean_error_buffer() -> Iterator[None]:
     for it, and an autouse fixture here would reconfigure a module singleton for
     every test in the suite.
     """
-    configure_error_capture(DEFAULT_ERROR_CAPTURE_MAX_RECORDS)
+    configure_error_capture(DEFAULT_ERROR_CAPTURE_MAX_RECORDS, enabled=True)
     reset_error_capture()
     yield
-    configure_error_capture(DEFAULT_ERROR_CAPTURE_MAX_RECORDS)
+    configure_error_capture(DEFAULT_ERROR_CAPTURE_MAX_RECORDS, enabled=True)
     reset_error_capture()

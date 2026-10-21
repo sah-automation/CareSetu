@@ -285,6 +285,10 @@ def _failing_client(database_url: str) -> TestClient:
             gateway_jwt_verify_enabled=True,
             gateway_jwt_signing_key=_SIGNING_KEY,
             dispatcher_in_process_enabled=False,
+            # #753: the lifespan applies ERROR_CAPTURE_ENABLED, and every test
+            # driving this client asserts on captured records - so the gate is
+            # opted into explicitly rather than assumed.
+            error_capture_enabled=True,
         )
     )
 

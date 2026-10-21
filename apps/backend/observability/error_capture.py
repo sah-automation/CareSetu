@@ -290,15 +290,29 @@ class _BoundedErrorBuffer:
 
 
 _buffer = _BoundedErrorBuffer(DEFAULT_ERROR_CAPTURE_MAX_RECORDS)
+#: The #753 gate (ERROR_CAPTURE_ENABLED). Armed at import - the pre-gate
+#: behaviour - and re-armed by every composition root from its resolved
+#: ``Settings`` at boot, so the capture sites stay Settings-free too.
+_error_capture_enabled = True
 
 
-def configure_error_capture(max_records: int) -> None:
-    """Resize the process-global buffer; called once at a composition root.
+def configure_error_capture(max_records: int, *, enabled: bool = False) -> None:
+    """Size the process-global buffer and set the #753 capture gate.
 
     Resizing rather than reading a constant at append time is what lets a
     deployment bound the buffer by configuration (coding-standards §9.1) without
-    every capture site having to know about ``Settings``.
+    every capture site having to know about ``Settings``. ``enabled`` is the same
+    idea one level up: the composition root applies ``ERROR_CAPTURE_ENABLED``
+    here, so the gate check inside :func:`capture_server_error` needs no
+    ``Settings`` either. The default is OFF so a caller that forgets the kwarg
+    fails safe; every caller in this repo passes it explicitly (the composition
+    roots from resolved ``Settings``, the suites' fixture arming ``True``). The
+    module flag's own import-time default stays ``True`` - the pre-gate
+    behaviour - so a process that never configures at all (a one-off script) is
+    unchanged.
     """
+    global _error_capture_enabled
+    _error_capture_enabled = enabled
     _buffer.reset(max_records)
 
 
@@ -321,19 +335,27 @@ def capture_server_error(
     code: str,
     trace_id: str,
 ) -> CapturedError | None:
-    """Build and buffer one server-error record; ``None`` when one was displaced.
+    """Build and buffer one server-error record; ``None`` when it captured nothing.
+
+    The gate first (#753): with ``ERROR_CAPTURE_ENABLED`` off this returns before
+    a record is even built, which is what makes the feature a true no-op for a
+    deployment that has not opted in - the 500 answers exactly as it would
+    without the seam. Like the ceiling, the gate lives here so neither capture
+    site (the catch-all handler, the gateway middleware) knows about ``Settings``.
 
     The whole hot-path cost of the capture is this call: read the matched route
     template off the scope, hash five short strings, append to a deque. No I/O, no
     await, no database connection - the failing request pays microseconds and the
     drain pays the write.
 
-    The return is the DISPLACEMENT signal, not a rejection: ``None`` means the
+    The remaining ``None`` is the DISPLACEMENT signal, not a rejection: ``None`` means the
     buffer was full and an older capture lost its place, which :func:`capture` has
     already counted. Nothing on the request path branches on it - a failing request
     must not start failing differently because telemetry was busy - and the drain
     reads the cumulative count instead, one place, where an operator will see it.
     """
+    if not _error_capture_enabled:
+        return None
     route_template = route_template_for(request)
     method = method_for(request)
     safe_code = (code or "")[:_MAX_CODE_LENGTH]

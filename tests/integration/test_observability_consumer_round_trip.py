@@ -1645,7 +1645,7 @@ async def _annotation_table_text(connection: AsyncConnection) -> str:
 
 @pytest.mark.asyncio
 async def test_doctor_review_outcomes_land_in_the_annotation_queue_replay_safe(
-    database_url: str, clean_tables: None
+    database_url: str, clean_tables: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC (#752): the queue is fed by review outcomes, PHI-free, carrying the trace.
 
@@ -1696,6 +1696,10 @@ async def test_doctor_review_outcomes_land_in_the_annotation_queue_replay_safe(
             finally:
                 reset_trace_id(token)
 
+        # #753: ANNOTATION_QUEUE_ENABLED defaults off; this round trip opts in
+        # BEFORE the registry is built, because registration reads the gate once
+        # at the composition seam.
+        monkeypatch.setenv("ANNOTATION_QUEUE_ENABLED", "true")
         registry = _registry()
         # The producer owns its payload models, so the care subscriptions have to be
         # registered for the dispatcher to reconstruct a claimed ``care_outbox`` row

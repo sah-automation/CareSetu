@@ -236,7 +236,9 @@ jobs:
         # proves the configured path still wires. Dummy endpoints keep this
         # hermetic: the exporters fail to connect and are swallowed, exactly as
         # a degraded boot would. No database needed (the engine is lazy and
-        # /health touches nothing).
+        # /health touches nothing). #753: the batch-3 feature gates (error
+        # capture, evaluation, annotation queue) ride the same two legs, so both
+        # ends of each new gate are exercised on every CI run too.
         run: uv run --directory apps/backend python -m scripts.check_observability_gates
         env:
           APP_ENVIRONMENT: test
@@ -255,6 +257,9 @@ jobs:
           LANGFUSE_SECRET_KEY: ${{ matrix.gates == 'on' && 'sk-lf-ci-smoke' || '' }}
           LANGFUSE_HOST: ${{ matrix.gates == 'on' && 'http://127.0.0.1:9' || 'https://cloud.langfuse.com' }}
           OBSERVABILITY_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
+          ERROR_CAPTURE_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
+          EVALUATION_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
+          ANNOTATION_QUEUE_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
 
   contract-check:
     name: contract check (OpenAPI vs frontend auth client)
