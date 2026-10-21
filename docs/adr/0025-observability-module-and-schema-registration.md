@@ -25,15 +25,15 @@ It owns its own `observability` schema, consumes existing outbox events, and exp
 
 ### D4 - Idempotent by its own ledger
 
-`obs_consumed_events` records `event_id` before effects are applied, so a replayed delivery is a no-op (the same `consumed_events` pattern every module uses, `ADR-0002`).
+`consumed_events` records `event_id` before effects are applied, so a replayed delivery is a no-op (the same `consumed_events` pattern every module uses, `ADR-0002`).
 
 ### D5 - Schema surface (`v9_0`)
 
-The module ships `obs_ai_usage_daily` (per date/provider/model/task_type counts, tokens, cost, latency), `obs_ai_cost_budget` (monthly limits vs spend), `obs_ai_provider_health` (rolling success rate, latency percentiles, breaker state), `obs_business_daily` (a registry-driven `metric_key`/`date`/`value` JSONB rollup so later phases add metrics without schema churn), `obs_alert_events` (the operator-visible alert feed), and `obs_consumed_events` (the idempotency ledger).
+The module ships `observability_ai_usage_daily` (per date/provider/model/task_type counts, tokens, cost, latency), `observability_ai_cost_budget` (monthly limits vs spend), `observability_ai_provider_health` (rolling success rate, latency percentiles, breaker state), `observability_business_daily` (a registry-driven `metric_key`/`date`/`value` JSONB rollup so later phases add metrics without schema churn), `observability_alert_events` (the operator-visible alert feed), and `consumed_events` (the idempotency ledger).
 
 ### D6 - No cross-schema foreign keys, single additive migration
 
-`obs_*` tables reference only their own schema; the migration adds one schema, no edits to existing ones (`ADR-0003`; `plan-phase14-observability.md` §15).
+`observability_*` tables reference only their own schema; the migration adds one schema, no edits to existing ones (`ADR-0003`; `plan-phase14-observability.md` §15).
 
 ### D7 - PHI-free
 
@@ -48,7 +48,7 @@ The schema stores pseudonymous ids and aggregate counters only - never transcrip
 
 ## Consequences
 
-- The module boundary checker (`ADR-0003`) now recognizes `observability` as a legitimate schema; `MOD-013` must ship the outbox consumer and the `obs_consumed_events` replay test like every other consumer.
+- The module boundary checker (`ADR-0003`) now recognizes `observability` as a legitimate schema; `MOD-013` must ship the outbox consumer and the `consumed_events` replay test like every other consumer.
 - Aggregates depend on event completeness: any field the decision surfaces need but no event carries must be raised as a narrow read-only exception on this decision rather than silently read across a schema.
-- The nightly rollup (`plan-phase14-observability.md` §8) recomputes percentile-based aggregates from `obs_ai_usage_daily`; the vendor data model stays API-first and independent of it.
+- The nightly rollup (`plan-phase14-observability.md` §8) recomputes percentile-based aggregates from `observability_ai_usage_daily`; the vendor data model stays API-first and independent of it.
 - The `D2` tickets (#713, #715, #716) record the `MOD-013` spec and its §4.1/§4.2/§5 matrix rows; this ADR is the decision they cite.

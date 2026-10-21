@@ -26,7 +26,7 @@ Every module follows hexagonal layout - pure domain core + adapters:
 ```
 
 - No module imports another module's `domain`/`schema`/adapters directly. Cross-module access is **only** via `facade.py` (sync) or the event bus (async).
-- **No cross-schema SQL. No foreign keys across schemas.** Each module owns exactly one of the 11 private schemas.
+- **No cross-schema SQL. No foreign keys across schemas.** Each module owns exactly one of the 12 private schemas.
 - Namespace prefixes: every model/table carries the module id (e.g. `consent_consents`, `care_prescriptions`).
 
 ## 3. Typing & Naming

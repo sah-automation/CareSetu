@@ -51,3 +51,4 @@ Redaction at the structlog processor, a Sentry `before_send` scrub, and an OTel 
 - **PHI leakage** into third-party telemetry is a standing risk: mitigated by the redaction/scrub/allow-list postures above and covered by tests (`plan-phase14-observability.md` §16).
 - Three new external systems enter `system-context.md` as `EXT-005` (Langfuse), `EXT-006` (Grafana Cloud), and `EXT-007` (Sentry), each documented off-by-default and PHI-free.
 - No change to `EXT-001..004` rows or contracts, and no change to the session/auth/CORS/deploy surface (`ADR-0007`).
+- **D1's "(later) evals" landed in Postgres, not in Langfuse** (Batch 3, #750-#752): the daily span pull is the only Langfuse concern, while the code evaluators and the annotation queue are `observability` schema rows (`observability_evaluation_scores`), and the golden dataset they score is a code constant in the module. The D1 wording is left as the Batch 1 decision it was.
