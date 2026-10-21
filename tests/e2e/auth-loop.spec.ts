@@ -6,6 +6,8 @@ import {
   type Page,
 } from "@playwright/test";
 
+import { BACKEND_BASE_URL as BACKEND, requireMockOtp } from "./helpers";
+
 // The Phase 2 release loop driven end to end in the browser: register -> OTP
 // (mocked SMS) -> verify -> authenticated session -> access a protected route.
 // Runs against the live backend booted by playwright.config.ts with the mock
@@ -52,7 +54,6 @@ test.describe.configure({ mode: "serial" });
 test.setTimeout(120_000);
 
 const FRONTEND = "http://localhost:3000";
-const BACKEND = "http://localhost:8000";
 
 function randomPhone(): string {
   return `9${String(Math.floor(Math.random() * 1_000_000_000)).padStart(
@@ -111,31 +112,12 @@ async function startRegistration(page: Page, number: string): Promise<void> {
     });
 }
 
-async function readMockOtp(
-  request: APIRequestContext,
-  number: string,
-): Promise<string> {
-  const url = `${BACKEND}/v1/auth/dev/otp?${new URLSearchParams({
-    phone: `+91${number}`,
-  })}`;
-  const response = await request.get(url);
-  expect(response.status(), "dev mock-OTP read-back should answer 200").toBe(
-    200,
-  );
-  const body = (await response.json()) as { code: string | null };
-  expect(
-    body.code,
-    `mock SMS should have sent a code to +91${number}`,
-  ).not.toBeNull();
-  return body.code as string;
-}
-
 async function verifyOtp(
   page: Page,
   request: APIRequestContext,
   number: string,
 ): Promise<void> {
-  const code = await readMockOtp(request, number);
+  const code = await requireMockOtp(request, `+91${number}`);
   await page.getByLabel("Verification code").fill(code);
   await page.getByRole("button", { name: "Verify & continue" }).click();
   await page.waitForURL("**/patient", { timeout: 15_000 });
@@ -223,7 +205,7 @@ async function confirmPartnerPhone(
   await expect(page.getByText(/^Demo OTP: \d{6}$/)).toBeVisible({
     timeout: 30_000,
   });
-  const code = await readMockOtp(request, number);
+  const code = await requireMockOtp(request, `+91${number}`);
   await page.getByTestId("pr-confirm-otp").fill(code);
   await page.getByTestId("pr-confirm-submit").click();
   await page.waitForURL("**/partner/status/pending", { timeout: 60_000 });
@@ -274,7 +256,7 @@ async function partnerLogin(
       });
     });
 
-  const code = await readMockOtp(request, number);
+  const code = await requireMockOtp(request, `+91${number}`);
   await page.getByTestId("partner-otp").fill(code);
   await page.getByTestId("staff-submit").click();
   await page.waitForURL("**/partner/status/pending", { timeout: 60_000 });
@@ -478,7 +460,7 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
   await expect(page.getByLabel("Verification code")).toBeVisible({
     timeout: 30_000,
   });
-  const code = await readMockOtp(request, returnPhone);
+  const code = await requireMockOtp(request, `+91${returnPhone}`);
   await page.getByLabel("Verification code").fill(code);
   await page.getByRole("button", { name: "Verify & continue" }).click();
   await page.waitForURL(
