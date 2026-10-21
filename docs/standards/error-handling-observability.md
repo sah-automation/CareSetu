@@ -55,27 +55,44 @@ Classify every failure into exactly one bucket; handling differs per bucket:
 
 ### 5.1 SLOs
 
-Percentiles, not averages. Derived from the existing NFRs and the whitebox latency SLAs; the plan remains the source of truth for these numbers (`plan-phase14-observability.md` §11), restated here so the standard is checkable on its own.
+Percentiles, not averages. Derived from the existing NFRs and the whitebox latency SLAs; the plan remains the source of truth for these numbers (`plan-phase14-observability.md` §11), restated here so the standard is checkable on its own. Every row names the source it was derived from, and no row introduces a new target: a new target is a new decision.
 
-| SLO                                        | Target                                                              |
-| :----------------------------------------- | :------------------------------------------------------------------ |
-| Auth - token validation (`validate_token`) | p95 < 100 ms                                                        |
-| Auth - OTP verification (`verify_otp`)     | p95 < 400 ms                                                        |
-| Directory search                           | p95 < 250 ms                                                        |
-| AI call (end to end, provider included)    | p95 <= 30 s                                                         |
-| Care-loop latency (`KPI-008`)              | tracked per stage; stage deltas recorded from Phase 9 (`PHASE-14B`) |
-| Error rate (5xx share of requests)         | < 1%                                                                |
+| SLO                                        | Target                                                              | Source of the target                             | Window measured over                      | Alert on breach               |
+| :----------------------------------------- | :------------------------------------------------------------------ | :----------------------------------------------- | :---------------------------------------- | :---------------------------- |
+| Auth - token validation (`validate_token`) | p95 < 100 ms                                                        | `internal-modules.md` §3.1 (MOD-001) latency SLA | the dashboard window, `now-6h` by default | none - an internal cause (D2) |
+| Auth - OTP verification (`verify_otp`)     | p95 < 400 ms                                                        | `internal-modules.md` §3.1 (MOD-001) latency SLA | the dashboard window, `now-6h` by default | none - an internal cause (D2) |
+| Directory search                           | p95 < 250 ms                                                        | `internal-modules.md` §3.2 (MOD-002) latency SLA | the dashboard window, `now-6h` by default | none - an internal cause (D2) |
+| AI call (end to end, provider included)    | p95 <= 30 s                                                         | `internal-modules.md` §3.5 (MOD-005) latency SLA | the rolled day                            | `latency_objective_breach`    |
+| Care-loop latency (`KPI-008`)              | tracked per stage; stage deltas recorded from Phase 9 (`PHASE-14B`) | PRD `KPI-008` (median loop completion, proposed) | a 30-day cohort window                    | none - tracked, not paged     |
+| Error rate (5xx share of requests)         | < 1%                                                                | `plan-phase14-observability.md` §11              | the rolled day, silent below 100 requests | `error_rate_high`             |
+
+**D1 - Every objective is derived, never chosen, and it says which slice it speaks about.** The set above is the six the plan names, and nothing outside it is a platform objective. The per-module latency SLAs, the frontend budget in `NFR-003`, the best-effort availability in `NFR-004` and the cost floor in `NFR-001` are real targets and are **not** platform objectives; they are enforced by their own gates. No row introduces a new target, and every row names the window it is measured over, because a target without a window cannot be checked - "< 1% error rate" says nothing about which requests it speaks about. The windows are the ones the platform already measures over, so naming them adds no number. The formal record, including why each of those stays where it is, is `ADR-0030`.
+
+**D2 - An alert fires on a symptom, never on an internal cause.** No user experiences a token validation, a consent check or a directory search, so their p95s are measured and displayed but never paged. The AI call is different: the 30-second figure is the async pipeline's own timeout, so breaching it means the AI-assisted work is not produced and the pipeline degrades to forced doctor review, which the patient and the doctor both experience. It is the same figure the provider board shows, so the alert and the board cannot disagree. The alert kinds and the symptom each one names are tabulated in `ADR-0030` D3.
+
+**D3 - The absence of an availability objective is a decision.** `NFR-004` states best-effort availability with no uptime SLA, so there is no availability objective, no availability alert and no error-budget burn-down. Availability is covered by the external free uptime monitor probing `GET /health`.
+
+**D4 - The measurement's own liveness is alerted.** An empty error feed is ambiguous - a healthy system and a broken capture path look identical - so the capture path carries its own liveness signal. Without it, "no errors" would be a false all-clear.
 
 ### 5.2 Minimum alert set
 
-| Alert                | Trigger                                              | Signal source                                   |
-| :------------------- | :--------------------------------------------------- | :---------------------------------------------- |
-| Audit tamper         | any `audit.tamper_detected`                          | `audit.*` events → `observability_alert_events` |
-| Backup failure       | drill or nightly backup reports failure              | `backup-drill.yml`                              |
-| AI budget            | meter/spend above 80% of the monthly cap (`NFR-001`) | `observability_ai_cost_budget`                  |
-| Outbox backlog       | pending rows above threshold                         | `MOD-013` health read                           |
-| Circuit breaker open | provider breaker state ≠ closed                      | `observability_ai_provider_health`              |
-| Dead-letter row      | any dead-lettered event                              | dispatcher / `observability_alert_events`       |
-| Provider health drop | success rate or p95 degrades                         | `observability_ai_provider_health`              |
+| Alert                      | Trigger                                              | Signal source                                   |
+| :------------------------- | :--------------------------------------------------- | :---------------------------------------------- |
+| `audit_tamper`             | any `audit.tamper_detected`                          | `audit.*` events → `observability_alert_events` |
+| backup failure             | drill or nightly backup reports failure              | `backup-drill.yml`                              |
+| `ai_budget`                | meter/spend above 80% of the monthly cap (`NFR-001`) | `observability_ai_cost_budget`                  |
+| `outbox_backlog`           | pending rows above threshold                         | `MOD-013` health read                           |
+| `breaker_open`             | provider breaker state ≠ closed                      | `observability_ai_provider_health`              |
+| `outbox_dead_letter`       | any dead-lettered event                              | dispatcher / `observability_alert_events`       |
+| `provider_health_drop`     | success rate or p95 degrades                         | `observability_ai_provider_health`              |
+| `error_rate_high`          | 5xx share of requests above the `< 1%` objective     | `observability_http_minute`                     |
+| `queue_age`                | age of the oldest still-open job above threshold     | `observability_ai_queue_open`                   |
+| `provider_rate_limited`    | upstream quota refusals above threshold              | `observability_ai_provider_health`              |
+| `cost_outlier`             | one actor's day deviates from its own trailing week  | `observability_attribution_daily`               |
+| `latency_objective_breach` | the AI call end to end breaches its `p95 <= 30 s`    | `observability_ai_provider_health`              |
+
+Every name in backticks is a value the `observability_alert_events.kind` column carries; the backup drill is a workflow signal rather than a feed row, and it is listed here because a failed backup is an operational alert whether or not it lands in the feed. The symptom each kind names, and the reason a kind that measures an internal cause is not in this table, are in `ADR-0030` D3 and D4.
 
 - All alerting must be reviewable from the operator console - the in-app `observability_alert_events` feed is the operator-visible record; delivery itself goes through the free channels (Sentry alerts, Grafana Cloud alerting to email/Slack webhook).
+- Every kind in this table fires on a user-facing, business-facing or operator-facing **symptom**; an internal cause is measured and shown but never paged (`ADR-0030` D2, D3). The alert-rule set stays deliberately small: a new rule is argued for, not added.
+- Acknowledgement is an in-app write against the feed: it changes who owns the response, never whether the condition still holds. Its statuses and the rules around it belong to the module that owns the feed, not here (`internal-modules.md` §3.14, `ADR-0029` D7).
