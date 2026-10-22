@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from cryptography.exceptions import InvalidTag
+from pydantic import ValidationError
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -37,10 +39,21 @@ from modules.intake.adapters.ai_gateway import (
     AiGateway,
     DraftRxRequest,
     DraftRxResult,
+    Ext002CallError,
+)
+from modules.intake.adapters.ai_jobs import (
+    complete_ai_job,
+    configured_plan,
+    fail_ai_job,
+    failure_reason,
+    insert_ai_job,
+    is_timeout,
 )
 from modules.intake.adapters.media_store import PREFIX, RX_INPUT_PREFIX, IntakeMediaStore
 from modules.intake.domain.events import (
     intake_captured_envelope,
+    intake_composer_opened_envelope,
+    intake_doctor_assigned_envelope,
     intake_retry_requested_envelope,
     intake_started_envelope,
     pre_summary_ready_envelope,
@@ -203,6 +216,49 @@ class IntakeFacade:
         self._sleep = sleep
         self._consent_facade = consent_facade
         self._iam_facade = iam_facade
+
+    async def record_composer_opened(self, *, patient_id: int, trace_id: str) -> None:
+        """Record one ``intake.composer_opened`` funnel-entry event.
+
+        The intake funnel's real ENTRY step (B4e, #721; #717 decision 4).
+        ``intake.started`` is written inside the capture transaction by
+        :meth:`submit_intake`, so a patient who opened the recorder and walked
+        away without submitting produced no event at all and the funnel had no
+        head to drop off from. This seam fires the moment the composer opens, so
+        it is reached by a submit AND by an abandon alike - the two are then
+        distinguishable precisely because they are SEPARATE events on SEPARATE
+        transactions.
+
+        Deliberately the narrowest write on this module: one ``intake.composer_
+        opened`` outbox row in its own transaction and nothing else. No intake
+        row, no media ref, no clinical content of any kind (security-phii-
+        standards no-PHI) - the patient has opened a screen and typed nothing,
+        so the seam must not invent a capture for them. That also makes it
+        consent-safe by construction rather than by a gate: ``check_consent``
+        keys on a (patient, counterparty, record_scope) triple and no
+        counterparty exists before the doctor pick, but nothing here reads the
+        patient's record, writes clinical content or egresses anything, so there
+        is nothing for a consent gate to protect. The row that does arrive is a
+        row in the intake module's own outbox, written under the patient's own
+        authenticated scope.
+
+        ``trace_id`` is resolved by the route through ``resolve_trace_id`` - the
+        gateway's single read point for the request-scoped id - and doubles as
+        the product ledger's session key, the platform holding no client session
+        identity to key on (see :class:`IntakeComposerOpenedPayload` for why, and
+        for what changes when one exists).
+        """
+        async with self._engine.begin() as connection:
+            await write_outbox(
+                connection,
+                INTAKE_SCHEMA,
+                INTAKE_OUTBOX_TABLE,
+                intake_composer_opened_envelope(
+                    patient_id=patient_id,
+                    session_key=trace_id,
+                    trace_id=trace_id,
+                ),
+            )
 
     async def submit_intake(
         self,
@@ -1321,6 +1377,13 @@ class IntakeFacade:
         visible when this transaction committed), so a later ``check_consent``
         never answers from a stale decision.
 
+        The pick also publishes ``intake.doctor_assigned`` into the intake outbox
+        in that same transaction (B4d, #720): doctor attribution rides an event,
+        never a cross-schema join (ADR-0003), so the event - not the assignment
+        column - is the legal source of the intake-to-doctor pairing downstream
+        (MOD-013's care-attribution edge, #724). Exactly one pick ever publishes
+        it, since a re-pick is refused below.
+
         Raises :class:`IntakeNotFoundError` when the intake is not the caller's;
         :class:`IllegalIntakeTransitionError` when a doctor is already assigned;
         :class:`IntakeValidationError` when ``partner_id`` is missing.
@@ -1368,6 +1431,24 @@ class IntakeFacade:
                     updated_at=func.now(),
                 )
             )
+            # The care-attribution event rides the SAME transaction as the
+            # assignment it describes (ADR-0002 S1, B4d #720): an event written
+            # after the commit could describe a pick that rolled back, and an
+            # event that never lands leaves every other module unable to learn
+            # the intake-to-doctor pairing without a cross-schema read, which
+            # ADR-0003 forbids. Publishing inside this transaction also keeps the
+            # three consent grants below all-or-nothing with the attribution
+            # edge: a failing grant leg rolls the edge back too.
+            await write_outbox(
+                connection,
+                INTAKE_SCHEMA,
+                INTAKE_OUTBOX_TABLE,
+                intake_doctor_assigned_envelope(
+                    intake_id=intake_id,
+                    patient_id=patient_id,
+                    doctor_id=partner_id,
+                ),
+            )
             consent_granted: dict[str, ConsentView] = {}
             for record_scope in record_scopes:
                 consent_granted[record_scope] = await self._consent_facade.grant_consent_on(
@@ -1403,14 +1484,14 @@ class IntakeFacade:
         doctor_input_ref: int,
         pre_summary_ref: int,
         history_summary: str | None = None,
+        doctor_id: int | None = None,
     ) -> RxDraftResult:
         """Produce a structured rx draft from the doctor input (PHASE-8 T05).
 
         Delegates to the AI gateway ``draft_rx`` leg (the Phase 7 providers
         - mock/fallback/openai-compatible) and returns a typed result with the
         draft ``rx_items`` and the provider confidence. The caller
-        (``PrescriptionFacade.create_rx_draft``) supplies the consent-gated
-        history
+        (``PrescriptionFacade.create_rx_draft``) supplies the consent-gated history
         context via ``history_summary`` (NFR-SEC-006) - this facade never
         performs a raw history read.
 
@@ -1418,12 +1499,39 @@ class IntakeFacade:
         ``pre_summary_ref`` so the AI gateway's ``AiEgressContext`` carries
         only the intake context (NFR-SEC-006 egress boundary). Raises
         :class:`~modules.intake.domain.exceptions.IntakeNotFoundError` when no
-        pre-summary or intake exists for the given references.
+        pre-summary or intake exists for the given references - including when
+        the pre-summary's intake cannot be read, because the metered job row is
+        keyed to that intake and a draft spent without one is unrecordable spend.
+
+        The drafting leg is METERED like the transcription and structuring legs
+        (PS-03, B4 #722): a ``draft`` ``ai_jobs`` row is booked before the
+        provider call and finalized with the effective serving provider/model,
+        the provider's reported tokens priced into ``cost_paise``, the call
+        duration and the confidence; ``ai_job.completed`` rides the same
+        transaction. A provider failure finalizes the same row ``failed`` and
+        publishes ``ai_job.failed`` instead - durably, because the transaction
+        commits before the error is re-raised - and records no token count,
+        since a failed call reports no usage and a fabricated zero would read as
+        a free call.
+
+        ``doctor_id`` is the drafting doctor, and it rides the job's own key -
+        the fallback that covers a pick the edge table has not recorded yet
+        (ADR-0027 D3). It comes from the CALLER, which owns the doctor
+        identity, not from a read of the care schema (ADR-0003 forbids this
+        module reading it): the caller hands the id over with the call, exactly
+        as it hands over the consent-gated history. It stays null on the
+        transcription and structuring legs, which run before a patient picks a
+        doctor, and per-doctor attribution there rides the
+        ``intake.doctor_assigned`` edge (#720). The drafting-cap and consent
+        gates stay in the care module and are untouched by this metering.
         """
         gateway = self._ai_gateway
         if gateway is None:
             gateway = build_ai_gateway(get_settings())
 
+        configured_provider, configured_model = configured_plan()
+
+        draft_failure: Ext002CallError | ValidationError
         async with self._engine.begin() as connection:
             ps_row = (
                 await connection.execute(
@@ -1435,35 +1543,90 @@ class IntakeFacade:
             if ps_row is None:
                 raise IntakeNotFoundError(f"pre-summary {pre_summary_ref} not found for rx-draft")
 
+            intake_id = int(ps_row.intake_id)
             intake_row = (
                 await connection.execute(
                     select(intake_intakes).where(
-                        intake_intakes.c.id == ps_row.intake_id,
+                        intake_intakes.c.id == intake_id,
                     )
                 )
             ).first()
-            language: str = intake_row.language if intake_row is not None else "en"
+            if intake_row is None:
+                raise IntakeNotFoundError(f"intake {intake_id} not found for rx-draft")
 
-        draft_result: DraftRxResult = await gateway.draft_rx(
-            DraftRxRequest(
-                doctor_input_ref=str(doctor_input_ref),
-                pre_summary_ref=str(pre_summary_ref),
-                patient_history_summary=history_summary or "",
-                context=AiEgressContext(language=language),
+            patient_id = int(intake_row.patient_id)
+            job_id = await insert_ai_job(
+                connection,
+                intake_id,
+                provider=configured_provider,
+                model=configured_model,
+                task_type="draft",
+                patient_id=patient_id,
             )
-        )
-
-        return RxDraftResult(
-            doctor_input_ref=doctor_input_ref,
-            pre_summary_ref=pre_summary_ref,
-            rx_items=[
-                RxDraftItem(
-                    name=item.name,
-                    dose=item.dose,
-                    duration=item.duration,
-                    frequency=item.frequency,
+            try:
+                started = time.monotonic()
+                draft_result: DraftRxResult = await gateway.draft_rx(
+                    DraftRxRequest(
+                        doctor_input_ref=str(doctor_input_ref),
+                        pre_summary_ref=str(pre_summary_ref),
+                        patient_history_summary=history_summary or "",
+                        context=AiEgressContext(language=intake_row.language),
+                    )
                 )
-                for item in draft_result.rx_items
-            ],
-            confidence=draft_result.confidence,
-        )
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+            except (Ext002CallError, ValidationError) as exc:
+                # The booking row is already written on this connection; only
+                # its status and the failure event are left to write, and both
+                # commit with it when the block below exits.
+                await fail_ai_job(
+                    connection,
+                    ai_job_id=job_id,
+                    intake_id=intake_id,
+                    patient_id=patient_id,
+                    doctor_id=doctor_id,
+                    task_type="draft",
+                    reason=failure_reason(exc),
+                    provider=configured_provider,
+                    model=configured_model,
+                    timeout=is_timeout(exc),
+                )
+                draft_failure = exc
+            else:
+                await complete_ai_job(
+                    connection,
+                    ai_job_id=job_id,
+                    intake_id=intake_id,
+                    patient_id=patient_id,
+                    doctor_id=doctor_id,
+                    task_type="draft",
+                    provider=gateway.effective_provider or configured_provider,
+                    model=gateway.effective_model or configured_model,
+                    confidence=draft_result.confidence,
+                    elapsed_ms=elapsed_ms,
+                    input_tokens=draft_result.input_tokens,
+                    output_tokens=draft_result.output_tokens,
+                    # The domain declares ONE confidence threshold (0.70,
+                    # AMB-006), so the drafting leg reuses it rather than
+                    # inventing a second: below it, the draft is a low-confidence
+                    # outcome the quality panels should count.
+                    low_confidence=is_low_confidence(draft_result.confidence),
+                )
+                return RxDraftResult(
+                    doctor_input_ref=doctor_input_ref,
+                    pre_summary_ref=pre_summary_ref,
+                    rx_items=[
+                        RxDraftItem(
+                            name=item.name,
+                            dose=item.dose,
+                            duration=item.duration,
+                            frequency=item.frequency,
+                        )
+                        for item in draft_result.rx_items
+                    ],
+                    confidence=draft_result.confidence,
+                )
+
+        # Only the failure branch falls through here, and the transaction above
+        # has already committed: the failed job row and its ``ai_job.failed``
+        # event are durable before the caller sees the provider error (PS-03).
+        raise draft_failure

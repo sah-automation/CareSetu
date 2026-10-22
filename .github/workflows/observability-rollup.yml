@@ -1,0 +1,149 @@
+name: Observability rollup (nightly)
+
+# PHASE-14A B5b (#705, plan-phase14 §8): the scheduled half of MOD-013's rollup.
+# The engine (B5a, `python -m worker.rollup`) recomputes the percentile
+# aggregates, refreshes provider health, snapshots budget spend and evaluates the
+# alert thresholds - off the request path, from the observability schema's own
+# tables. This workflow is what puts it on a clock.
+#
+# Why a scheduled workflow and not an in-process cron: Render's free web process
+# sleeps at ~15 minutes idle, so a timer living inside it would fire only when
+# someone happened to be using the app - the rollup would silently stop running on
+# exactly the deployments that cannot afford it. A GitHub Actions schedule is
+# independent of the web process being awake, matching `backup-drill.yml`.
+#
+# What the pass covers is NOT decided here. With no flag it reads
+# `observability_rollup_runs` and plans itself: the first run sweeps the whole
+# AI-job history the module has metered, and every run after that rolls the
+# previous UTC day (catching up on any night this job missed). So there is no
+# "first run" branch in YAML to get wrong, and a re-run of the same night is a
+# no-op - every write in the pass is an upsert keyed on the rolled date.
+#
+# Budget period: `observability_ai_cost_budget` carries a calendar-month billing
+# period, so it rolls over on the first pass whose target date falls in the new
+# month - the 02:45 UTC run on the 2nd, one day after the 1st's pass rolls the last
+# day of the old month. No separate monthly cron is needed: the period is a
+# function of the date being rolled, and the ledger guarantees the 1st is never
+# skipped for more than a night.
+#
+# Hard-fail posture (plan §5): a missing secret or an unreachable database fails
+# the run loudly with a clear message - it never passes silently. DATABASE_URL is
+# a repo secret, never committed.
+
+on:
+  schedule:
+    # Nightly, 02:45 UTC - in the same quiet window as `nightly.yml` and
+    # `backup-drill.yml`, and late enough that yesterday's UTC day is complete.
+    # The :45 offset keeps this pass off the exact hour the other two jobs start.
+    - cron: "45 2 * * *"
+  workflow_dispatch:
+    inputs:
+      backfill_days:
+        description: "Roll this many days ending yesterday, ignoring the plan"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  # One rollup at a time; a manual dispatch replaces a queued run so cron and
+  # manual runs never stack writes over the same rows.
+  group: observability-rollup
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rollup:
+    name: plan -> roll -> record
+    runs-on: ubuntu-latest
+    # The pass is a handful of aggregate queries plus a small batch of upserts.
+    # A wedged free-tier pooler must not hold the slot past a short bound.
+    timeout-minutes: 30
+    env:
+      # The live Supabase connection, same repo secret deploy.yml's migrate job
+      # uses. A missing secret becomes an empty string and is caught by the assert
+      # step below, never a silent fall back to alembic.ini's localhost default.
+      DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+      # The cap the pass raises `ai_budget` against, supplied as a repo VARIABLE
+      # (Settings > Secrets and variables > Actions > Variables) because it is
+      # configuration, not a credential. It is the same knob the Render service
+      # sets as AI_MONTHLY_BUDGET_PAISE, and the two must agree or the nightly
+      # alert would fire against a different cap than the runtime BudgetMeter
+      # reports. Deliberately NOT defaulted here: an unset variable arrives empty,
+      # and the run step below unsets it so the backend applies its own single
+      # default rather than this file carrying a second copy of the number.
+      AI_MONTHLY_BUDGET_PAISE: ${{ vars.AI_MONTHLY_BUDGET_PAISE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: install backend
+        run: uv sync --project apps/backend
+      - name: assert SUPABASE_DATABASE_URL is set
+        run: |
+          set -euo pipefail
+          test -n "$DATABASE_URL" || {
+            echo "observability rollup FAILED: SUPABASE_DATABASE_URL secret is missing" >&2
+            exit 1
+          }
+      - name: preflight - database reachable (fails loud if paused)
+        working-directory: apps/backend
+        run: |
+          set -euo pipefail
+          HOST_PORT="$(printf '%s' "$DATABASE_URL" | sed -E 's#^[^/]+//[^@]*@##; s#[/?].*$##')"
+          PROBE='import asyncio, sys
+          from sqlalchemy import text
+          from sqlalchemy.ext.asyncio import create_async_engine
+          async def probe():
+              engine = create_async_engine(sys.argv[1])
+              try:
+                  async with engine.connect() as connection:
+                      await connection.execute(text("SELECT 1"))
+              finally:
+                  await engine.dispose()
+          asyncio.run(probe())'
+          if ! uv run python -c "$PROBE" "$DATABASE_URL"; then
+            echo "observability rollup FAILED: database unreachable at $HOST_PORT - paused after 7 idle days?" >&2
+            exit 1
+          fi
+          echo "preflight OK: database reachable at $HOST_PORT"
+      - name: run the rollup
+        working-directory: apps/backend
+        env:
+          BACKFILL_DAYS: ${{ inputs.backfill_days }}
+        run: |
+          set -euo pipefail
+          # An unset repo variable arrives as an empty string, which would fail
+          # integer parsing. Unset it instead of substituting a number here, so
+          # DEFAULT_MONTHLY_BUDGET_PAISE stays the one place the default lives.
+          if [ -z "${AI_MONTHLY_BUDGET_PAISE:-}" ]; then
+            unset AI_MONTHLY_BUDGET_PAISE
+            echo "AI_MONTHLY_BUDGET_PAISE repo variable is unset; using the backend default"
+          fi
+          if [ -n "${BACKFILL_DAYS:-}" ]; then
+            echo "manual dispatch: overriding the plan with --backfill-days $BACKFILL_DAYS"
+            uv run python -m worker.rollup --backfill-days "$BACKFILL_DAYS"
+          else
+            uv run python -m worker.rollup
+          fi
+      # #750, spec #717 decision 39: the Langfuse metrics batch rides THIS
+      # job's schedule - a step after the rollup, never a second cron for the
+      # same system of record. One invocation makes at most ONE metrics request
+      # (no backfill flag exists here on purpose), so the free tier's ~100
+      # requests a day are never spent by a refresh loop or a window sweep, and
+      # no dashboard refresh ever reaches the vendor. Both secrets unset arrives
+      # as empty strings and the step no-ops with exit 0: a missing key must not
+      # fail the nightly run, exactly like every other vendor integration.
+      # LANGFUSE_HOST stays unset so the backend's own default (render.yaml's
+      # value) remains the single source for the host. #753: EVALUATION_ENABLED
+      # is this step's own opt-in - the gate defaults off, so the scheduled batch
+      # is where the #751 evaluators are switched on for the nightly run.
+      - name: pull Langfuse daily metrics (batch only, one request)
+        working-directory: apps/backend
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          EVALUATION_ENABLED: "true"
+        run: |
+          set -euo pipefail
+          uv run python -m worker.langfuse_metrics

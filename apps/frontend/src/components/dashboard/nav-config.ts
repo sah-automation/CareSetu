@@ -11,20 +11,28 @@
 
 import type { ComponentType } from "react";
 import {
+  Activity,
   BadgeCheck,
+  BarChart3,
+  Boxes,
   CalendarDays,
   ClipboardList,
+  Coins,
   FileText,
   FolderOpen,
+  HeartPulse,
   History,
   Home,
   Inbox,
+  LayoutDashboard,
   Mic,
   Package,
   Scale,
   ScrollText,
   Search,
   Settings,
+  ShieldCheck,
+  TrendingUp,
   User,
   Users,
   Wallet,
@@ -92,6 +100,15 @@ export interface NavItemDef {
   // metadata for the redesigned full-shell sidebar only; the mobile bars and
   // top-nav ignore it.
   group?: NavSectionKey;
+  // #744: a disclosure parent's sub-destinations. Sub-membership is declared
+  // here ONCE and read by every renderer that has a nested surface (the
+  // sidebar disclosure and the mobile More sheet), never re-listed by hand. A
+  // parent's own `href` is its group landing - the page the collapsed rail
+  // (and the mobile tab) navigate to - and also the prefix that makes the
+  // parent read as current while an operator is inside any sub-destination.
+  // #745 renders the expanded parent as a disclosure toggle, not a link, so
+  // the group's landing is reached through its Overview child there.
+  children?: NavItemDef[];
 }
 
 export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
@@ -249,8 +266,101 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       soon: true,
       group: "work",
     },
+    // #744 (spec #717 decisions 27-29): the console is now its own section and
+    // a disclosure parent - its nine sub-destinations are declared here once
+    // and read by both the sidebar disclosure (#745) and the mobile More sheet
+    // (#746). Overview is the group landing (same route as the parent), the
+    // three lenses and the four AI panels have live pages, and Settings is the
+    // #747 placeholder shell: a real page carrying no configuration until the
+    // Batch 2 settings surface ships, so it is live rather than Soon.
+    //
+    // Decision 28 says the parent has "no destination of its own"; decision 29
+    // and ticket criterion 2 make parent highlighting key off "its own
+    // destination". Resolved by giving the parent the console landing route as
+    // its href and making Overview a child that points at that same route: the
+    // parent's href is a real page (so the collapsed rail and the disclosure
+    // header have somewhere to go, and the prefix match has an anchor), while
+    // Overview remains the destination an operator reads as current. The
+    // duplication is deliberate and pinned by the contract tests.
+    {
+      key: "observability",
+      labelKey: "observability",
+      href: "/operator/observability",
+      icon: Activity,
+      group: "observability",
+      children: [
+        {
+          key: "overview",
+          labelKey: "overview",
+          href: "/operator/observability",
+          icon: LayoutDashboard,
+        },
+        {
+          key: "business",
+          labelKey: "business",
+          href: "/operator/observability/business",
+          icon: TrendingUp,
+        },
+        {
+          key: "product",
+          labelKey: "product",
+          href: "/operator/observability/product",
+          icon: Boxes,
+        },
+        {
+          key: "reliability",
+          labelKey: "reliability",
+          href: "/operator/observability/reliability",
+          icon: ShieldCheck,
+        },
+        {
+          key: "cost",
+          labelKey: "cost",
+          href: "/operator/observability/cost",
+          icon: Coins,
+        },
+        {
+          key: "usage",
+          labelKey: "usage",
+          href: "/operator/observability/usage",
+          icon: BarChart3,
+        },
+        {
+          key: "quality",
+          labelKey: "quality",
+          href: "/operator/observability/quality",
+          icon: BadgeCheck,
+        },
+        {
+          key: "health",
+          labelKey: "health",
+          href: "/operator/observability/health",
+          icon: HeartPulse,
+        },
+        {
+          key: "settings",
+          labelKey: "settings",
+          href: "/operator/observability/settings",
+          icon: Settings,
+        },
+      ],
+    },
   ],
 };
+
+// #744: the one active-state predicate every nav renderer shares (sidebar row,
+// collapsed-rail row, bottom tab). An item is current when the path equals its
+// own destination. A disclosure parent (an item carrying children) is ALSO
+// current when the path sits beneath its own destination, so a group never
+// looks inactive while the operator is inside it. The prefix match is bounded
+// at a path-segment boundary: a sibling whose href merely begins with the same
+// string ("/operator/observability" vs "/operator/observability-archive") must
+// not light the parent up. Soon entries are never current.
+export function isNavItemActive(item: NavItemDef, pathname: string): boolean {
+  if (item.soon) return false;
+  if (pathname === item.href) return true;
+  return Boolean(item.children?.length) && pathname.startsWith(`${item.href}/`);
+}
 
 // Bottom-tab bar capacity: up to five destination columns; the optional More
 // trigger is chrome, not a destination, so it takes one extra column only
@@ -280,10 +390,18 @@ function weaveCenter(
 
 export function splitMobileTabs(items: NavItemDef[]): MobileTabSplit {
   const center = items.find((item) => item.center);
+  // #746: the pinned-overflow rule now also covers disclosure parents. A tab
+  // column is a single flat destination and cannot expand a group, so an item
+  // carrying `children` is pinned into the More sheet exactly like a
+  // `mobileOverflow` destination - where the group (and every sub-destination)
+  // renders. This is what makes adding nine sub-destinations change what fits
+  // on the operator bar: the parent leaves the bar for the More sheet.
   const pinnedOverflow = items.filter(
-    (item) => item.mobileOverflow && !item.center,
+    (item) => (item.mobileOverflow || isGroupParent(item)) && !item.center,
   );
-  const regular = items.filter((item) => !item.center && !item.mobileOverflow);
+  const regular = items.filter(
+    (item) => !item.center && !item.mobileOverflow && !isGroupParent(item),
+  );
   const capacity = center
     ? TABBAR_MAX_DESTINATIONS - 1
     : TABBAR_MAX_DESTINATIONS;
@@ -296,6 +414,23 @@ export function splitMobileTabs(items: NavItemDef[]): MobileTabSplit {
     overflow: [...pinnedOverflow, ...regular.slice(capacity)],
     hasMore: true,
   };
+}
+
+// #746: an item is a disclosure parent (a group) when it carries
+// sub-destinations. A group is not a flat destination - a tab column cannot
+// expand it - so it is pinned into the More sheet, and the sheet grows a nested
+// branch to render it. Naming the rule here keeps it one expression.
+export function isGroupParent(item: NavItemDef): boolean {
+  return Boolean(item.children?.length);
+}
+
+// #746: whether a configuration declares disclosure groups. When it does, the
+// mobile More sheet renders the full grouped navigation (mirroring the sidebar)
+// rather than the flat overflow list, so every destination - parents and
+// sub-destinations alike - is reachable from the sheet. A config with no
+// nesting keeps the sheet as the overflow list it has always been.
+export function hasNestedDestinations(items: NavItemDef[]): boolean {
+  return items.some(isGroupParent);
 }
 
 // Collapse preference persists per role (spec decision 6): the storage key is

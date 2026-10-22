@@ -383,13 +383,43 @@ def test_blank_request_id_falls_back_to_minted_trace_id(
 
 
 def test_request_id_guard_rejects_log_unsafe_tokens() -> None:
-    from app.gateway.trace import _is_safe_trace_id
+    """#757: the client id is honoured only when it is an identifier we can store.
 
-    assert _is_safe_trace_id("abc-123._:/~")
-    assert not _is_safe_trace_id("")
-    assert not _is_safe_trace_id("a b")
-    assert not _is_safe_trace_id("a\nb")
-    assert not _is_safe_trace_id("a" * 129)
+    The rule is the platform's own (see ``observability.trace_ids``): printable
+    ASCII, no whitespace, no URL separator, at most the column's width. A value
+    outside it is not echoed - a minted id is used instead.
+    """
+    from observability.trace_ids import is_safe_trace_id
+
+    assert is_safe_trace_id("abc-123._")
+    assert not is_safe_trace_id("")
+    assert not is_safe_trace_id("a b")
+    assert not is_safe_trace_id("a\nb")
+    assert not is_safe_trace_id("a" * 65)
+    # A separator a URL would have to escape is not an identifier.
+    assert not is_safe_trace_id("abc/123")
+    assert not is_safe_trace_id("abc:123")
+    assert not is_safe_trace_id("abc'123")
+
+
+def test_a_client_trace_id_that_is_not_storable_is_replaced_by_a_minted_one() -> None:
+    """#757: an over-long id would wedge the product ledger's write.
+
+    ``observability_product_events.trace_id`` and ``session_key`` are
+    ``VARCHAR(64)``, and the product event writer does not clamp - so an id
+    longer than that reaches an insert that raises on length, and the row for
+    that step is never written. The gateway therefore refuses the id rather
+    than storing one it cannot write.
+    """
+    client = _protected_client()
+
+    response = client.get("/v1/me", headers={"X-Request-Id": "t" * 200})
+
+    assert response.status_code == 401
+    trace_id = response.json()["trace_id"]
+    assert trace_id
+    assert trace_id != "t" * 200
+    assert len(trace_id) <= 64
 
 
 # ---------------------------------------------------------------------------

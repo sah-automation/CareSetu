@@ -23,8 +23,15 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.config import Settings, get_settings
-from app.gateway.errors import ErrorEnvelope, error_response, register_gateway_error_handlers
+from app.config import APP_VERSION, Settings, get_settings
+from app.gateway.errors import (
+    CODE_INTERNAL_SERVER_ERROR,
+    MESSAGE_INTERNAL_SERVER_ERROR,
+    ErrorEnvelope,
+    error_response,
+    register_gateway_error_handlers,
+)
+from app.gateway.http_counter import HttpCounterMiddleware
 from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
@@ -65,6 +72,11 @@ from modules.intake.adapters.routes import (
 )
 from modules.intake.adapters.routes import router as intake_router
 from modules.intake.facade import IntakeFacade
+from modules.observability.adapters.routes import (
+    register_error_handlers as register_observability_error_handlers,
+)
+from modules.observability.adapters.routes import router as observability_router
+from modules.observability.facade import ObservabilityFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
 from modules.partner.adapters.routes import directory_router
 from modules.partner.adapters.routes import (
@@ -78,6 +90,17 @@ from modules.partner.directory_cache import (
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
 from modules.profile_media.facade import ProfileMediaRetryPolicy
+from observability.error_capture import (
+    ERROR_KIND_UNHANDLED_EXCEPTION,
+    capture_server_error,
+    configure_error_capture,
+    route_template_for,
+)
+from observability.http_counter import configure_http_counter, record_request
+from observability.langfuse_client import flush_langfuse, get_langfuse_client
+from observability.logging import SERVICE_API, configure_logging
+from observability.otel import flush_otel, init_otel
+from observability.sentry import flush_sentry, init_sentry
 from worker.main import run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
@@ -262,13 +285,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     worker (#30) can read the same resolved config from the app instance.
     """
     resolved_settings = settings if settings is not None else get_settings()
+    # PHASE-14A A1 (#694): configure structured logging once at the composition
+    # root, before any route/middleware can emit a line. Never raises - a
+    # logging setup failure degrades to stdlib defaults instead of blocking boot.
+    configure_logging(resolved_settings, service=SERVICE_API)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # PHASE-14A A4 (#696): initialise Sentry error tracking at the app
+        # composition root when SENTRY_DSN is set; a no-op when it is empty and
+        # never a boot failure (init failures are logged and swallowed).
+        init_sentry(resolved_settings)
+        # PHASE-14A B2 (#700): wire the Langfuse client explicitly at boot so AI
+        # tracing is intentional rather than an accident of the SDK's env-global
+        # client. A no-op (returns None, SDK never imported) when the keys are
+        # absent, so boot is byte-for-byte unchanged when Langfuse is off.
+        get_langfuse_client(
+            resolved_settings.langfuse_public_key,
+            resolved_settings.langfuse_secret_key,
+            resolved_settings.langfuse_host,
+        )
         # Initialize Redis clients for the consent-status and directory-search
         # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)
         await init_directory_redis_client(resolved_settings)
+        # PHASE-14A B8 (#726): size the in-process error-capture buffer here, at the
+        # WEB composition root - not only in worker/main.py. This is the process
+        # that captures: a route that raises calls ``capture_server_error`` before
+        # any worker exists, so a setting applied only by the worker would leave the
+        # ceiling at its import-time default on the one path the ceiling exists to
+        # protect. The worker applies it too, so whichever process runs first has
+        # already done it. #753: the same call applies ERROR_CAPTURE_ENABLED, so
+        # this root also decides whether the seam is armed at all.
+        configure_error_capture(
+            resolved_settings.error_capture_max_records,
+            enabled=resolved_settings.error_capture_enabled,
+        )
+        # PHASE-14A B9 (#727): the per-minute HTTP counter's ceiling, applied for
+        # the same reason as the error buffer above. It is set HERE rather than in
+        # the gateway middleware because the middleware runs on the request path
+        # and must not know about Settings, and because the worker that drains it
+        # applies it too - so whichever process starts first has already sized it.
+        # #753: the same call applies HTTP_COUNTER_ENABLED, so this root also
+        # decides whether the counter is armed at all.
+        configure_http_counter(
+            resolved_settings.http_counter_max_series,
+            enabled=resolved_settings.http_counter_enabled,
+        )
         # In-process dispatcher (worker-outbox-runbook Rule 1, Render free
         # worker gap): when DISPATCHER_IN_PROCESS_ENABLED=true the lifespan
         # hosts exactly one outbox poll loop (intake pipeline, audit/consent/
@@ -300,8 +363,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Close Redis clients on shutdown
             await close_directory_redis_client()
             await close_redis_client()
+            # PHASE-14A A4 (#696): flush queued Sentry events on shutdown so a
+            # Render spin-down does not drop them; no-op when Sentry is off.
+            flush_sentry()
+            # PHASE-14A A3a (#697): force-flush the OTel exporter on shutdown so
+            # a Render spin-down does not drop buffered spans; no-op when off.
+            flush_otel()
+            # PHASE-14A B2 (#700): force-flush buffered Langfuse AI spans on
+            # shutdown; no-op when Langfuse is unconfigured.
+            flush_langfuse()
 
-    app = FastAPI(title="CareSetu API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="CareSetu API", version=APP_VERSION, lifespan=lifespan)
     app.state.settings = resolved_settings
 
     # MOD-001 (PHASE-2 T3, #54): one resolved iam facade instance behind the
@@ -433,6 +505,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the health schema, so the audit facade calls through the facade seam
     # instead of reading across schemas (module isolation rule).
     app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
+    # MOD-013 (PHASE-14A C1a, #706): the operator observability read facade shares
+    # the settled engine - it only ever reads this module's own schema, so it needs
+    # no other module's facade. Stored on state so the four operator read routes
+    # read one resolved object and their tests stub it wholesale, like the audit
+    # instance above.
+    app.state.observability_facade = ObservabilityFacade(engine=engine)
     # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
     # and, for open registration (ADR-0010), the settled iam facade - the sync
     # ``create_credential_account`` seam is called in-sequence at registration
@@ -585,11 +663,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # one path it does not cover is a 500 regenerated by Starlette's
     # ServerErrorMiddleware, which sits outside all user middleware.
     app.add_middleware(SecurityHeadersMiddleware)
+    # PHASE-14A B9 (#727): count every ANSWERED request into the in-process
+    # per-minute bucket the worker folds into `observability_http_minute`. The
+    # OUTERMOST user middleware, so a gateway rejection - a 401 from jwt_verify, a
+    # 429 from rate_limit - is counted like any other served request; an inner
+    # registration would omit exactly the requests the gateway turned away, which are
+    # the ones an availability signal is made of. The one request it cannot see is
+    # the one where a handler raised: Starlette answers that 500 from its
+    # ServerErrorMiddleware, outside all user middleware, so it is counted by the
+    # catch-all below instead.
+    # #753: the middleware is only installed when HTTP_COUNTER_ENABLED is on, so
+    # the gate's off path is a genuine no-op - a deployment that did not opt in
+    # does not even pay the middleware's per-request cost.
+    if resolved_settings.http_counter_enabled:
+        app.add_middleware(HttpCounterMiddleware)
 
     app.include_router(iam_router)
     app.include_router(health_router)
     app.include_router(consent_router)
     app.include_router(audit_router)
+    app.include_router(observability_router)
     app.include_router(partner_router)
     app.include_router(directory_router)
     app.include_router(intake_router)
@@ -603,6 +696,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_intake_error_handlers(app)
     register_care_error_handlers(app)
     register_doctor_error_handlers(app)
+    register_observability_error_handlers(app)
 
     # Catch-all for any unhandled exception that escapes the module-level
     # handlers above (e.g. SQLAlchemy OperationalError from a DB connection
@@ -613,12 +707,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(Exception)
     async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
         trace_id = resolve_trace_id(request)
-        logger.exception("unhandled_exception trace_id=%s path=%s", trace_id, request.url.path)
+        # #757: the ROUTE TEMPLATE, never the concrete path. A path carries
+        # whatever the client put in it - a case id, a patient id, anything a
+        # query string was built from - and a log line is a telemetry store
+        # (security-phii §4). The capture below already uses the template for
+        # exactly this reason; the log line beside it said otherwise.
+        logger.exception(
+            "unhandled_exception trace_id=%s route=%s",
+            trace_id,
+            route_template_for(request),
+        )
         envelope = ErrorEnvelope(
-            code="INTERNAL_SERVER_ERROR",
-            message="An unexpected error occurred",
+            code=CODE_INTERNAL_SERVER_ERROR,
+            message=MESSAGE_INTERNAL_SERVER_ERROR,
             trace_id=trace_id,
             details={},
+        )
+        # PHASE-14A B8 (#726): capture the failure into the bounded in-process
+        # buffer the worker drains into the observability error stream. One append
+        # to a deque, on a request that is ALREADY failing - deliberately not a
+        # write, which would add latency to exactly the requests least able to
+        # afford it. The record carries the matched ROUTE TEMPLATE rather than the
+        # path just logged above, so no identifier reaches telemetry.
+        capture_server_error(
+            request=request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            kind=ERROR_KIND_UNHANDLED_EXCEPTION,
+            code=CODE_INTERNAL_SERVER_ERROR,
+            trace_id=trace_id,
+        )
+        # PHASE-14A B9 (#727): count this 500 as a served request too. It is NOT
+        # double counting with HttpCounterMiddleware - an escaped exception never
+        # comes back through it, because Starlette answers the 500 from
+        # ServerErrorMiddleware, outside all user middleware. Without this line the
+        # requests that failed worst would be the only ones missing from
+        # throughput, and an error rate reading zero during a crash loop is the
+        # exact answer this ticket exists to make impossible.
+        record_request(
+            request=request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -972,6 +1099,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
         return SeedEgressResponse(egress_id=egress_id)
+
+    # PHASE-14A A3a (#697): wire the OTel SDK and instrument the request path
+    # (FastAPI server spans, SQLAlchemy async DB spans, httpx outbound spans)
+    # when OTEL_ENABLED is on; inert when off. Done here rather than in the
+    # lifespan because the FastAPI instrumentor adds ASGI middleware, which
+    # Starlette forbids once the app has started - the lifespan force-flushes
+    # the exporter on shutdown instead. Never raises.
+    init_otel(resolved_settings, service=SERVICE_API, engine=engine, app=app)
 
     return app
 

@@ -15,6 +15,7 @@ import redis.asyncio as redis
 from redis.asyncio import Redis
 
 from app.config import Settings
+from observability.otel import record_cache_hit, record_cache_miss
 
 _LOG = logging.getLogger(__name__)
 
@@ -86,21 +87,24 @@ async def get_cached_decision(
     """
     client = get_redis_client()
     if client is None:
+        record_cache_miss("consent")
         return None
     key = _cache_key(patient_id, counterparty_type, counterparty_id, record_scope)
     try:
         data = await client.hmget(key, ["allowed", "consent_id", "version", "effective_scope"])
         if data[0] is None:
+            record_cache_miss("consent")
             return None
-        return (
-            data[0] == "1",
-            int(data[1] or 0),
-            int(data[2] or 0),
-            str(data[3] or ""),
-        )
+        allowed = data[0] == "1"
+        consent_id = int(data[1] or 0)
+        version = int(data[2] or 0)
+        effective_scope = str(data[3] or "")
     except Exception:
+        record_cache_miss("consent")
         _LOG.debug("Redis cache read failed; SQL fallback will apply", exc_info=True)
         return None
+    record_cache_hit("consent")
+    return (allowed, consent_id, version, effective_scope)
 
 
 async def set_cached_decision(

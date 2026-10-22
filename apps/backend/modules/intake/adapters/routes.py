@@ -169,9 +169,58 @@ class PickDoctorRequest(BaseModel):
     )
 
 
+class ComposerOpenedRequest(BaseModel):
+    """Body of ``POST /v1/intake/composer-opened``: nothing, strictly (B4e, #721).
+
+    An empty model with ``extra="forbid"``, and it is the whole point: the
+    endpoint has no field a caller could fill, and api-standards §3's strict
+    mode is enforced rather than assumed, so a client that sends a body anyway
+    gets a 422 instead of having it silently dropped. Declaring "no body" by
+    simply omitting a model would have left FastAPI ignoring the payload - which
+    is how a mis-wired client could believe it recorded a patient id or some
+    symptoms when it recorded neither.
+
+    Optional (``| None``) because a fire-and-forget analytics ping from a mount
+    effect should not have to send ``{}`` to be valid.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/composer-opened",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Record that the patient opened the intake composer (patient only, no content)",
+)
+async def record_composer_opened(
+    request: Request,
+    account: Annotated[Principal, Depends(require_patient)],
+    _body: ComposerOpenedRequest | None = None,
+) -> None:
+    """Record one ``intake.composer_opened`` funnel-entry event (B4e, #721).
+
+    Thin patient-scoped adapter. The patient is the authenticated subject
+    (``account.subject_id``), never anything a caller asserts, and the body is a
+    strict no-op, so consent-safe by construction rather than by a gate: no
+    record read, no clinical content, no egress - one outbox row in this
+    module's own schema. The rate limiter (the same strict intake tier as
+    ``pick-doctor``, a small patient-initiated row write) bounds the volume.
+
+    No ``Idempotency-Key``: §5's key is a client-minted stable value, and this
+    write is a no-op analytics row with no retry hazard worth one - the six
+    sibling intake writes here all omit it too. See ``IntakeComposerOpenedPayload``
+    for the session-key derivation behind ``trace_id``.
+    """
+    facade = cast(IntakeFacade, request.app.state.intake_facade)
+    await facade.record_composer_opened(
+        patient_id=_resolve_subject_id(account),
+        trace_id=resolve_trace_id(request),
+    )
 
 
 @router.post(

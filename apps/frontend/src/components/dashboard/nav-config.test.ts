@@ -11,6 +11,7 @@ import {
   NAV_CONFIG,
   TABBAR_CENTER_COLUMN,
   TABBAR_MAX_DESTINATIONS,
+  isNavItemActive,
   sidebarSections,
   sidebarStorageKey,
   splitMobileTabs,
@@ -20,6 +21,13 @@ import type { Role } from "./types";
 import { ROLE_HOME } from "./types";
 
 const ROLES: Role[] = ["patient", "doctor", "partner", "operator"];
+
+// #744: the whole destination tree for a role - top-level and nested - in
+// config order. Every contract assertion below walks this one flattening
+// instead of hand-threading `children`, so a deeper group needs no new test.
+function flatten(items: NavItemDef[]): NavItemDef[] {
+  return items.flatMap((item) => [item, ...flatten(item.children ?? [])]);
+}
 
 describe("NAV_CONFIG", () => {
   it("ships a config for every role", () => {
@@ -35,7 +43,7 @@ describe("NAV_CONFIG", () => {
     expect(home.soon).toBeUndefined();
   });
 
-  it("keeps every non-home staff entry as Soon except the doctor Cases, Patients and Profile tabs", () => {
+  it("keeps every non-home staff entry as Soon except the doctor Cases, Patients and Profile tabs and the operator Observability entry", () => {
     for (const role of ["doctor", "partner", "operator"] as const) {
       for (const item of NAV_CONFIG[role].slice(1)) {
         // #543: Profile joins Cases/Patients as a live doctor tab - each one
@@ -45,26 +53,45 @@ describe("NAV_CONFIG", () => {
           (item.key === "cases" ||
             item.key === "patients" ||
             item.key === "profile");
+        // #708: the operator's Observability entry joins them - the console has
+        // a live overview page behind it, so it may not read as coming-soon.
+        const isLiveOperatorTab =
+          role === "operator" && item.key === "observability";
         expect(item.soon, `${role}/${item.key}`).toBe(
-          isLiveDoctorTab ? undefined : true,
+          isLiveDoctorTab || isLiveOperatorTab ? undefined : true,
         );
       }
     }
   });
 
-  it("keeps hrefs unique and absolute within each role", () => {
+  it("keeps hrefs unique and absolute within each role, nested destinations included (#744)", () => {
     for (const role of ROLES) {
-      const hrefs = NAV_CONFIG[role].map((item) => item.href);
-      for (const href of hrefs) {
-        expect(href.startsWith("/"), `${role} ${href}`).toBe(true);
+      // Absolute: every item in the tree, parents and children alike.
+      for (const item of flatten(NAV_CONFIG[role])) {
+        expect(item.href.startsWith("/"), `${role} ${item.href}`).toBe(true);
       }
-      expect(new Set(hrefs).size).toBe(hrefs.length);
+      // Unique: no route may serve two distinct destinations. A disclosure
+      // parent's own href is its group landing and may equal exactly one of its
+      // own children (the page it opens onto) - that single deliberate reuse is
+      // pinned by the group-landing test below. Every other collision fails.
+      const seen = new Set<string>();
+      const claim = (href: string) => {
+        expect(seen.has(href), `${role} ${href}`).toBe(false);
+        seen.add(href);
+      };
+      for (const item of NAV_CONFIG[role]) {
+        claim(item.href);
+        for (const child of item.children ?? []) {
+          if (child.href === item.href) continue;
+          claim(child.href);
+        }
+      }
     }
   });
 
-  it("resolves every label key in both locales via the i18n engine", () => {
+  it("resolves every label key in both locales via the i18n engine, nested labels included (#744)", () => {
     for (const role of ROLES) {
-      for (const item of NAV_CONFIG[role]) {
+      for (const item of flatten(NAV_CONFIG[role])) {
         expect(typeof STRINGS.en.nav[item.labelKey], item.labelKey).toBe(
           "string",
         );
@@ -73,6 +100,38 @@ describe("NAV_CONFIG", () => {
         );
         expect(STRINGS.en.nav[item.labelKey].length).toBeGreaterThan(0);
         expect(STRINGS.hi.nav[item.labelKey].length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("gives every disclosure parent a group landing that is one of its own sub-destinations (#744)", () => {
+    // Criterion 2 keys parent highlighting off the parent's own href, so a
+    // disclosure parent must carry a real destination (decision 29) and that
+    // destination must be one of its pages. Without this the parent would have
+    // no route of its own and the prefix match would have nothing to match.
+    for (const role of ROLES) {
+      for (const item of flatten(NAV_CONFIG[role])) {
+        if (!item.children?.length) continue;
+        expect(
+          item.children.some((child) => child.href === item.href),
+          `${role}/${item.key}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("keeps center and mobileOverflow slots on top-level destinations only (#744)", () => {
+    // The mobile split helper (#746) filters for `center`/`mobileOverflow`. A
+    // nested child carrying either flag would be consumed by a mechanism that
+    // never walks `children`, dropping a declared sub-destination from every
+    // surface - the "destination in one config, missing in the other" failure
+    // criterion 1 exists to prevent.
+    for (const role of ROLES) {
+      for (const item of NAV_CONFIG[role]) {
+        for (const child of flatten(item.children ?? [])) {
+          expect(child.center, `${role}/${child.key}`).toBeUndefined();
+          expect(child.mobileOverflow, `${role}/${child.key}`).toBeUndefined();
+        }
       }
     }
   });
@@ -111,6 +170,115 @@ describe("NAV_CONFIG", () => {
     expect(patient.home?.soon).toBeUndefined();
     expect(patient.start?.soon).toBeUndefined();
     expect(patient.record?.soon).toBeUndefined();
+  });
+});
+
+describe("isNavItemActive (#744)", () => {
+  const leaf: NavItemDef = {
+    key: "leaf",
+    labelKey: "home",
+    href: "/x/leaf",
+    icon: Home,
+  };
+  const parent: NavItemDef = {
+    key: "group",
+    labelKey: "observability",
+    href: "/x/group",
+    icon: Home,
+    children: [leaf],
+  };
+
+  it("matches a leaf destination by exact path only", () => {
+    expect(isNavItemActive(leaf, "/x/leaf")).toBe(true);
+    // A leaf is never a prefix parent: a nested path under it is not "current".
+    expect(isNavItemActive(leaf, "/x/leaf/deeper")).toBe(false);
+    expect(isNavItemActive(leaf, "/x")).toBe(false);
+  });
+
+  it("lights a disclosure parent on its own destination and any nested path", () => {
+    expect(isNavItemActive(parent, "/x/group")).toBe(true);
+    expect(isNavItemActive(parent, "/x/group/leaf")).toBe(true);
+    expect(isNavItemActive(parent, "/x/group/deep/er")).toBe(true);
+  });
+
+  it("bounds the parent prefix at a path-segment boundary", () => {
+    // The trap this ticket exists to close: a sibling whose href merely shares
+    // a string prefix must not light the parent up.
+    expect(isNavItemActive(parent, "/x/grouper")).toBe(false);
+    expect(isNavItemActive(parent, "/x/group-2")).toBe(false);
+    expect(isNavItemActive(parent, "/x/grou")).toBe(false);
+  });
+
+  it("never marks a Soon destination current, parent or child", () => {
+    const soonLeaf: NavItemDef = { ...leaf, soon: true };
+    const soonParent: NavItemDef = { ...parent, soon: true };
+    expect(isNavItemActive(soonLeaf, "/x/leaf")).toBe(false);
+    expect(isNavItemActive(soonParent, "/x/group/leaf")).toBe(false);
+    expect(isNavItemActive(soonParent, "/x/group")).toBe(false);
+  });
+});
+
+describe("operator Observability group (#744)", () => {
+  const parent = NAV_CONFIG.operator.find(
+    (item) => item.key === "observability",
+  );
+
+  it("is a disclosure parent in its own section, landing on Overview", () => {
+    expect(parent?.group).toBe("observability");
+    expect(parent?.href).toBe("/operator/observability");
+    // The console is live, not a placeholder.
+    expect(parent?.soon).toBeUndefined();
+    expect(parent?.children?.length).toBeGreaterThan(0);
+  });
+
+  it("declares the decision-28 sub-destinations in order", () => {
+    // Spec #717 decision 28: Observability holds Overview, Business, Product,
+    // Reliability, the four existing AI panels and Settings. #745 renders this
+    // exact order as the disclosure's sub-menu, so the order is a contract, not
+    // an incidental detail.
+    expect(parent?.children?.map((child) => child.key)).toEqual([
+      "overview",
+      "business",
+      "product",
+      "reliability",
+      "cost",
+      "usage",
+      "quality",
+      "health",
+      "settings",
+    ]);
+    // #747: no sub-destination is a coming-soon stub any more. Settings is the
+    // placeholder shell behind a live page, so the whole sub-menu is clickable.
+    expect(
+      parent?.children?.filter((child) => child.soon).map((child) => child.key),
+    ).toEqual([]);
+  });
+
+  it("keeps Settings live as the #747 placeholder shell", () => {
+    const settings = parent?.children?.find(
+      (child) => child.key === "settings",
+    );
+
+    expect(settings?.href).toBe("/operator/observability/settings");
+    expect(settings?.soon).toBeUndefined();
+  });
+
+  it("keeps the Work entries as they were and adds Observability as a second section", () => {
+    const sections = sidebarSections(NAV_CONFIG.operator);
+
+    expect(sections.map((section) => section.labelKey)).toEqual([
+      "work",
+      "observability",
+    ]);
+    expect(sections[0].items.map((item) => item.key)).toEqual([
+      "home",
+      "verifications",
+      "disputes",
+      "audit",
+    ]);
+    expect(sections[1].items.map((item) => item.key)).toEqual([
+      "observability",
+    ]);
   });
 });
 
@@ -171,7 +339,7 @@ describe("splitMobileTabs", () => {
     expect(overflow.map((item) => item.key)).toEqual(["pinned"]);
   });
 
-  it.each(["doctor", "partner", "operator"] as const)(
+  it.each(["doctor", "partner"] as const)(
     "%s fits its entries below the cap without a More sheet",
     (role) => {
       const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG[role]);
@@ -179,11 +347,29 @@ describe("splitMobileTabs", () => {
       expect(tabs.map((item) => item.key)).toEqual(
         NAV_CONFIG[role].map((item) => item.key),
       );
-      expect(tabs).toHaveLength(4);
+      expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
       expect(hasMore).toBe(false);
       expect(overflow).toHaveLength(0);
     },
   );
+
+  // #746: a disclosure parent (an item carrying `children`) is not a flat tab -
+  // a tab column cannot expand a group - so the pinned-overflow rule sends it
+  // into the More sheet. The operator bar keeps the four Work destinations plus
+  // More; the parent and its nine sub-destinations live in the sheet.
+  it("pins the operator's disclosure parent into More (#746)", () => {
+    const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.operator);
+
+    expect(tabs.map((item) => item.key)).toEqual([
+      "home",
+      "verifications",
+      "disputes",
+      "audit",
+    ]);
+    expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
+    expect(hasMore).toBe(true);
+    expect(overflow.map((item) => item.key)).toEqual(["observability"]);
+  });
 
   it("keeps the first five destinations visible and pushes the rest into More", () => {
     const synthetic: NavItemDef[] = Array.from({ length: 7 }, (_, i) => ({
@@ -303,6 +489,14 @@ describe("sidebarSections (#538)", () => {
         NAV_CONFIG[role].every((item) => item.group !== undefined),
         `${role} group`,
       ).toBe(true);
+      // #744: sub-membership lives in the parent's `children` list alone - a
+      // nested item never re-declares its own group, the second hand-maintained
+      // list this ticket exists to prevent.
+      for (const item of NAV_CONFIG[role]) {
+        for (const child of flatten(item.children ?? [])) {
+          expect(child.group, `${role}/${child.key}`).toBeUndefined();
+        }
+      }
     }
   });
 });

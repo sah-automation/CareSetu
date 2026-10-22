@@ -44,3 +44,30 @@ def get_langfuse_client(public_key: str, secret_key: str, host: str) -> Langfuse
     _client = Langfuse(public_key=public_key, secret_key=secret_key, host=host)
     log.info("langfuse client initialised (host=%s)", host)
     return _client
+
+
+def get_configured_client() -> Langfuse | None:
+    """Return the process-wide client **without** creating it (PHASE-14A B2, #700).
+
+    ``None`` when :func:`get_langfuse_client` has never run or ran with blank
+    keys - the span-metadata enrichment path treats that as "tracing off" and
+    no-ops, so no SDK import happens and behaviour is unchanged when Langfuse is
+    unconfigured. The explicit singleton (not the SDK's env-global client) is
+    what the AI gateway adapters enrich.
+    """
+    return _client
+
+
+def flush_langfuse() -> None:
+    """Force-flush buffered Langfuse spans on shutdown; no-op when unconfigured.
+
+    Mirrors the Sentry/OTel shutdown flushes (plan-phase14-observability §5): a
+    Render spin-down must not drop queued AI spans. A flush failure is logged and
+    swallowed so shutdown never raises.
+    """
+    if _client is None:
+        return
+    try:
+        _client.flush()
+    except Exception:
+        log.warning("langfuse flush failed", exc_info=True)

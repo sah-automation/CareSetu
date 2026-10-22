@@ -7,7 +7,7 @@
 // CSS visibility: `lg:hidden` swaps it out for the sidebar/top-nav at the
 // breakpoint. The patient light shell never renders a sidebar at any width.
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronRight, LogOut, MoreHorizontal } from "lucide-react";
@@ -26,7 +26,14 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
-import { NAV_CONFIG, splitMobileTabs } from "./nav-config";
+import {
+  hasNestedDestinations,
+  isGroupParent,
+  isNavItemActive,
+  NAV_CONFIG,
+  sidebarSections,
+  splitMobileTabs,
+} from "./nav-config";
 import { CountPill, SoonBadge } from "./NavItemLink";
 import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
@@ -46,6 +53,10 @@ export function BottomTabs({
   const [moreOpen, setMoreOpen] = useState(false);
   const config = items ?? NAV_CONFIG[role];
   const { tabs, overflow, hasMore } = splitMobileTabs(config);
+  // #746: a configuration that declares disclosure groups (a parent carrying
+  // `children`) turns the More sheet into the full grouped navigation. The
+  // flat, overflow-only sheet the light patient shell uses is unchanged.
+  const nested = hasNestedDestinations(config);
   const strings = STRINGS[lang].nav;
 
   // #525 mobile account surface: for the patient role the More sheet opens
@@ -75,7 +86,7 @@ export function BottomTabs({
           <TabColumn
             key={item.key}
             item={item}
-            active={!item.soon && pathname === item.href}
+            active={isNavItemActive(item, pathname)}
             label={strings[item.labelKey]}
           />
         ))}
@@ -113,14 +124,21 @@ export function BottomTabs({
                 onNavigate={() => setMoreOpen(false)}
               />
             )}
-            {overflow.map((item) => (
-              <OverflowRow
-                key={item.key}
-                item={item}
-                label={strings[item.labelKey]}
+            {nested ? (
+              <SheetNavSections
+                config={config}
                 onNavigate={() => setMoreOpen(false)}
               />
-            ))}
+            ) : (
+              overflow.map((item) => (
+                <OverflowRow
+                  key={item.key}
+                  item={item}
+                  label={strings[item.labelKey]}
+                  onNavigate={() => setMoreOpen(false)}
+                />
+              ))
+            )}
             {isPatient && (
               <LogoutRow
                 label={strings.logOut}
@@ -325,9 +343,14 @@ function OverflowRow({
   // over the destination page.
   onNavigate: () => void;
 }) {
+  const pathname = usePathname();
   const Icon = item.icon;
   const className =
     "flex min-h-12 w-full items-center gap-3 rounded px-2 py-2 text-sm font-medium";
+  // A sheet row is a destination, so it carries the page-level marker. The
+  // group row above it carries the group marker ("true"), which keeps exactly
+  // one element in the sheet claiming the current page.
+  const active = isNavItemActive(item, pathname);
 
   if (item.soon) {
     return (
@@ -347,9 +370,13 @@ function OverflowRow({
     <Link
       href={item.href}
       onClick={onNavigate}
+      aria-current={active ? "page" : undefined}
+      data-active={active || undefined}
       className={cn(
         className,
-        "text-txt-sub hover:bg-accent-soft hover:text-txt",
+        active
+          ? "font-semibold text-accent-strong"
+          : "text-txt-sub hover:bg-accent-soft hover:text-txt",
       )}
       data-testid={`more-${item.key}`}
     >
@@ -357,5 +384,117 @@ function OverflowRow({
       <span className="flex-1">{label}</span>
       {typeof item.count === "number" && <CountPill count={item.count} />}
     </Link>
+  );
+}
+
+// #746: the More sheet as the full grouped navigation, mirroring the sidebar.
+// Every destination in the configuration appears here - top-level rows and
+// disclosure groups with their sub-destinations indented - so no destination is
+// unreachable on a phone. The grouping is read from `sidebarSections`, the same
+// source the sidebar uses, so the two surfaces can never disagree about where a
+// destination lives.
+function SheetNavSections({
+  config,
+  onNavigate,
+}: {
+  config: NavItemDef[];
+  onNavigate: () => void;
+}) {
+  const { lang } = useLang();
+  const strings = STRINGS[lang].nav;
+  const sections = sidebarSections(config);
+
+  return (
+    <>
+      {sections.map((section) => (
+        <Fragment key={section.labelKey ?? "ungrouped"}>
+          {section.labelKey && (
+            <p
+              className="px-2 pt-3 pb-1 text-[11px] font-semibold tracking-wide text-txt-muted uppercase"
+              data-testid={`more-section-${section.labelKey}`}
+            >
+              {STRINGS[lang].nav.sections[section.labelKey]}
+            </p>
+          )}
+          {section.items.map((item) =>
+            isGroupParent(item) ? (
+              <SheetGroupNavItem
+                key={item.key}
+                item={item}
+                onNavigate={onNavigate}
+              />
+            ) : (
+              <OverflowRow
+                key={item.key}
+                item={item}
+                label={strings[item.labelKey]}
+                onNavigate={onNavigate}
+              />
+            ),
+          )}
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
+// #746: one disclosure group inside the More sheet. Expanded everywhere by
+// nature - a bottom sheet has no room for a second collapse level - the parent
+// is a real row to the group landing and its sub-destinations sit indented
+// behind the same hairline guide rail the sidebar uses. The Soon convention is
+// reused, so a coming-soon sub-destination cannot become tappable just because
+// it moved into the sheet.
+function SheetGroupNavItem({
+  item,
+  onNavigate,
+}: {
+  item: NavItemDef;
+  onNavigate: () => void;
+}) {
+  const pathname = usePathname();
+  const { lang } = useLang();
+  const label = STRINGS[lang].nav[item.labelKey];
+  const Icon = item.icon;
+  // The same shared predicate (#744) the sidebar row and collapsed rail use, so
+  // the parent reads as current here too while the operator is inside the group.
+  const active = isNavItemActive(item, pathname);
+  const children = item.children ?? [];
+
+  return (
+    <div data-testid={`more-group-${item.key}`}>
+      <Link
+        href={item.href}
+        onClick={onNavigate}
+        // The group row is the current group, not the current page: the
+        // destination rows below it carry `aria-current="page"`, so the sheet
+        // never announces the current page twice.
+        aria-current={active ? "true" : undefined}
+        data-active={active || undefined}
+        data-testid={`more-${item.key}`}
+        className={cn(
+          "flex min-h-12 w-full items-center gap-3 rounded px-2 py-2 text-sm font-semibold",
+          active
+            ? "text-accent-strong"
+            : "text-txt-sub hover:bg-accent-soft hover:text-txt",
+        )}
+      >
+        <Icon size={20} className="shrink-0" />
+        <span className="flex-1">{label}</span>
+      </Link>
+      <ul
+        className="mt-0.5 ml-5 space-y-0.5 border-l border-hairline pl-1"
+        data-testid={`more-group-${item.key}-menu`}
+      >
+        {children.map((child) => (
+          <li key={child.key}>
+            <OverflowRow
+              item={child}
+              label={STRINGS[lang].nav[child.labelKey]}
+              onNavigate={onNavigate}
+            />
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

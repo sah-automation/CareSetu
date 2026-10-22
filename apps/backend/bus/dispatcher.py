@@ -48,9 +48,10 @@ clobber a row a sibling worker already reclaimed and re-claimed.
 import asyncio
 import logging
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -68,6 +69,8 @@ from bus.outbox_ddl import (
     outbox_table,
 )
 from bus.registry import HandlerRegistry, PayloadModel
+from observability.logging import reset_trace_id, set_trace_id, trace_id_from_traceparent
+from observability.otel import record_outbox_poll, start_span
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +105,7 @@ class OutboxRow:
     occurred_at: datetime
     next_attempt_at: datetime
     attempts: int
+    traceparent: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,7 +148,7 @@ async def discover_outbox_tables(
 
     Reads ``information_schema`` for base tables whose name ends in the outbox
     naming pattern (``<module>_outbox``), so the loop's table list is discovered
-    rather than hardcoded per module. The 11 module schemas are the canonical
+    rather than hardcoded per module. The module schemas are the canonical
     starting point (``bus.bootstrap.MODULE_SCHEMAS``); the worker may extend the
     list with any additional schema.
     """
@@ -163,6 +167,60 @@ async def discover_outbox_tables(
         OutboxTable(schema=mapping["table_schema"], table_name=mapping["table_name"])
         for mapping in result.mappings().all()
     )
+
+
+@dataclass(frozen=True)
+class OutboxRowCounts:
+    """One outbox table's rows per status, for health reporting.
+
+    ``pending`` plus ``inflight`` is the backlog still owed a delivery attempt;
+    ``dead_letter`` is the terminal set a human has to look at.
+    """
+
+    table: OutboxTable
+    pending: int
+    inflight: int
+    dead_letter: int
+
+    @property
+    def backlog(self) -> int:
+        """Rows not yet delivered: ``pending`` plus ``inflight``."""
+        return self.pending + self.inflight
+
+
+async def count_outbox_rows(
+    connection: AsyncConnection, tables: Sequence[OutboxTable]
+) -> tuple[OutboxRowCounts, ...]:
+    """Count each outbox table's rows by status, without touching domain tables.
+
+    Part of the transport carve-out (ADR-0003): the dispatcher owns the outbox
+    contract, so the one cross-schema reader stays here rather than growing a
+    per-consumer SELECT. Used by MOD-013's nightly rollup to raise the
+    ``outbox_backlog`` / ``outbox_dead_letter`` alerts (plan-phase14 §11).
+
+    Counts are read on the caller's connection, so a caller inside a
+    transaction sees its own uncommitted writes - the same snapshot the rollup
+    reads its own aggregates from.
+    """
+    counts: list[OutboxRowCounts] = []
+    for target in tables:
+        table = outbox_table(target.table_name, target.schema)
+        statement: Select[tuple[str, int]] = (
+            select(column("status", String), func.count().label("rows"))
+            .select_from(table)
+            .group_by(column("status", String))
+        )
+        result = await connection.execute(statement)
+        by_status = {row[0]: int(row[1]) for row in result.all()}
+        counts.append(
+            OutboxRowCounts(
+                table=target,
+                pending=by_status.get(OUTBOX_STATUS_PENDING, 0),
+                inflight=by_status.get(OUTBOX_STATUS_INFLIGHT, 0),
+                dead_letter=by_status.get(OUTBOX_STATUS_DEAD_LETTER, 0),
+            )
+        )
+    return tuple(counts)
 
 
 async def reclaim_stale_inflight(
@@ -227,6 +285,7 @@ async def claim_pending_rows(
             target.c.occurred_at,
             target.c.next_attempt_at,
             target.c.attempts,
+            target.c.traceparent,
         )
     )
     result = await connection.execute(statement)
@@ -243,6 +302,7 @@ def _to_outbox_row(mapping: RowMapping) -> OutboxRow:
         occurred_at=cast(datetime, mapping["occurred_at"]),
         next_attempt_at=cast(datetime, mapping["next_attempt_at"]),
         attempts=cast(int, mapping["attempts"]),
+        traceparent=cast(str | None, mapping["traceparent"]),
     )
 
 
@@ -346,6 +406,28 @@ async def record_failed_attempt(
     return None if mapping is None else str(mapping["status"])
 
 
+def outbox_row_span(row: OutboxRow, table: OutboxTable) -> AbstractContextManager[Any]:
+    """The span context manager for delivering one claimed outbox row (A3b).
+
+    A messaging span (``messaging.*`` attributes) that adopts the row's stored
+    W3C ``traceparent`` as its parent, so the worker's span continues the trace
+    of the API request that produced the event (ADR-0002 delivery side, A2
+    #695). When tracing is off this is a no-op manager, so the loop is
+    unchanged.
+    """
+    return start_span(
+        "outbox.process",
+        traceparent=row.traceparent,
+        attributes={
+            "messaging.system": "caresetu.outbox",
+            "messaging.operation": "process",
+            "messaging.destination.name": table.table_name,
+            "messaging.message.id": str(row.event_id),
+            "outbox.table": table.table_name,
+        },
+    )
+
+
 async def process_outbox_table(
     engine: AsyncEngine,
     table: OutboxTable,
@@ -373,66 +455,80 @@ async def process_outbox_table(
     retried = 0
     dead_lettered = 0
     for row in claimed_rows:
-        payload_model = registry.payload_model_for(row.event_type)
-        if payload_model is None:
-            logger.error(
-                "no payload model registered for event_type %r; leaving outbox row %s for reclaim",
-                row.event_type,
-                row.event_id,
-            )
-            continue
+        # PHASE-14A A2 (#695): when the originating API request carried a trace
+        # id, the row's stored W3C traceparent recovers it and it becomes the
+        # correlation key for this fan-out, so the worker's lines link back to
+        # the request. A row written with no request context keeps the A1
+        # fallback - the outbox event id. Bind whichever, then restore the
+        # previous context.
+        trace_token = set_trace_id(trace_id_from_traceparent(row.traceparent) or str(row.event_id))
         try:
-            envelope = envelope_from_row(row, table.schema, payload_model)
-            result = await dispatch(registry, envelope)
-        except Exception:
-            logger.exception(
-                "fan-out raised for outbox row %s (%s); leaving it for reclaim",
-                row.event_id,
-                row.event_type,
-            )
-            continue
-        fanned_out += 1
-        if not result.outcomes:
-            logger.error(
-                "no handlers registered for event_type %r; leaving outbox row %s for reclaim",
-                row.event_type,
-                row.event_id,
-            )
-        elif result.all_succeeded:
-            async with engine.begin() as connection:
-                if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
-                    deleted += 1
-                else:
-                    logger.info(
-                        "outbox row %s was re-claimed by another worker; not deleting",
+            # PHASE-14A A3b (#698): the row's span adopts the same traceparent,
+            # so the OTel span - not just the log line - continues the request.
+            with outbox_row_span(row, table):
+                payload_model = registry.payload_model_for(row.event_type)
+                if payload_model is None:
+                    logger.error(
+                        "no payload model registered for event_type %r; "
+                        "leaving outbox row %s for reclaim",
+                        row.event_type,
                         row.event_id,
                     )
-        else:
-            async with engine.begin() as connection:
-                outcome = await record_failed_attempt(connection, target, row, config)
-            if outcome == OUTBOX_STATUS_DEAD_LETTER:
-                dead_lettered += 1
-                logger.error(
-                    "outbox row %s (%s) dead-lettered after %d attempts",
-                    row.event_id,
-                    row.event_type,
-                    row.attempts + 1,
-                )
-            elif outcome == OUTBOX_STATUS_PENDING:
-                retried += 1
-                logger.warning(
-                    "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
-                    row.event_id,
-                    row.event_type,
-                    backoff_delay(row.attempts + 1, config).total_seconds(),
-                )
-            else:
-                logger.info(
-                    "outbox row %s was re-claimed by another worker; not recording failure",
-                    row.event_id,
-                )
+                    continue
+                try:
+                    envelope = envelope_from_row(row, table.schema, payload_model)
+                    result = await dispatch(registry, envelope)
+                except Exception:
+                    logger.exception(
+                        "fan-out raised for outbox row %s (%s); leaving it for reclaim",
+                        row.event_id,
+                        row.event_type,
+                    )
+                    continue
+                fanned_out += 1
+                if not result.outcomes:
+                    logger.error(
+                        "no handler for event_type %r; leaving outbox row %s for reclaim",
+                        row.event_type,
+                        row.event_id,
+                    )
+                elif result.all_succeeded:
+                    async with engine.begin() as connection:
+                        if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
+                            deleted += 1
+                        else:
+                            logger.info(
+                                "outbox row %s was re-claimed by another worker; not deleting",
+                                row.event_id,
+                            )
+                else:
+                    async with engine.begin() as connection:
+                        outcome = await record_failed_attempt(connection, target, row, config)
+                    if outcome == OUTBOX_STATUS_DEAD_LETTER:
+                        dead_lettered += 1
+                        logger.error(
+                            "outbox row %s (%s) dead-lettered after %d attempts",
+                            row.event_id,
+                            row.event_type,
+                            row.attempts + 1,
+                        )
+                    elif outcome == OUTBOX_STATUS_PENDING:
+                        retried += 1
+                        logger.warning(
+                            "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
+                            row.event_id,
+                            row.event_type,
+                            backoff_delay(row.attempts + 1, config).total_seconds(),
+                        )
+                    else:
+                        logger.info(
+                            "outbox row %s was re-claimed by another worker; not recording failure",
+                            row.event_id,
+                        )
+        finally:
+            reset_trace_id(trace_token)
 
-    return TablePollResult(
+    poll_result = TablePollResult(
         table=table,
         stale_reclaimed=stale_reclaimed,
         claimed=len(claimed_rows),
@@ -441,6 +537,14 @@ async def process_outbox_table(
         retried=retried,
         dead_lettered=dead_lettered,
     )
+    # A3b: surface the pass outcome as counters (no-op when metrics are off).
+    record_outbox_poll(
+        claimed=poll_result.claimed,
+        fanned_out=poll_result.fanned_out,
+        retried=poll_result.retried,
+        dead_lettered=poll_result.dead_lettered,
+    )
+    return poll_result
 
 
 async def run_poll_loop(

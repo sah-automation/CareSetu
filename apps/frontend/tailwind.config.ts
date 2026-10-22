@@ -2,7 +2,14 @@ import type { Config } from "tailwindcss";
 import tailwindcssAnimate from "tailwindcss-animate";
 
 const config: Config = {
-  content: ["./src/**/*.{ts,tsx}"],
+  // Test files are not app content. Tailwind scans them for class candidates
+  // like any other file under src/, and a planted fixture that names a
+  // colour outside the theme (the colour gate's
+  // "text-[theme(colors.brand.ink)]" case) makes Tailwind warn on every
+  // build. Excluding them keeps the build output clean and keeps test-only
+  // utilities out of the shipped CSS. The positive glob stays broad so a new
+  // top-level source directory is scanned without a config change.
+  content: ["./src/**/*.{ts,tsx}", "!./src/**/*.test.{ts,tsx}"],
   theme: {
     extend: {
       // Palette hexes live only in src/app/tokens.css (#193); this config

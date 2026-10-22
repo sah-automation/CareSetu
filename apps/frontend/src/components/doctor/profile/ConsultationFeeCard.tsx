@@ -25,7 +25,7 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { idempotencyKey } from "@/lib/idempotency";
 import { useLang } from "@/lib/i18n/LangContext";
 import { updateConsultationFee } from "@/lib/partner/api";
-import { formatFeePaise } from "@/components/pick/DoctorPickCard";
+import { formatInrPaise } from "@/lib/money";
 import { ProfileField, fieldClassName } from "./ProfileField";
 import { PROFILE_ANCHORS } from "./ProfileSectionIndex";
 import type { SectionFailure } from "./ProfileSectionShell";
@@ -131,7 +131,7 @@ export function ConsultationFeeCard({
         <CardContent>
           {feePaise !== null && (
             <p className="text-sm text-txt" data-testid="fee-current">
-              {formatFeePaise(feePaise)}
+              {formatInrPaise(feePaise)}
             </p>
           )}
 

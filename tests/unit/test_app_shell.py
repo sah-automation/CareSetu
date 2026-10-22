@@ -148,6 +148,9 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/intake/upload-media",
         # PHASE-8.1 T04 (#481): the doctor-scoped rx-input voice/photo upload.
         "/v1/intake/upload-doctor-media",
+        # B4e (#721): the funnel's entry step - a bodyless patient-scoped POST
+        # that records that the composer opened and writes no clinical content.
+        "/v1/intake/composer-opened",
         "/v1/intake/{intake_id}/re-record",
         "/v1/intake/{intake_id}",
         "/v1/intake/{intake_id}/pre-summary",
@@ -208,6 +211,52 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/doctor/profile/address",
         "/v1/doctor/profile/about",
         "/v1/doctor/profile/notifications",
+        # PHASE-14A C1 (#706/#707): the whole plan-phase14 §9.1 operator
+        # observability read table.
+        "/v1/operator/observability/cost",
+        "/v1/operator/observability/cost/trend",
+        "/v1/operator/observability/usage",
+        "/v1/operator/observability/quality",
+        "/v1/operator/observability/overview",
+        "/v1/operator/observability/latency",
+        "/v1/operator/observability/health",
+        "/v1/operator/observability/alerts",
+        "/v1/operator/observability/deeplinks",
+        # PHASE-14A B9 (#727): the per-minute request counter, which carries the
+        # capture-liveness answer rather than only the numbers.
+        "/v1/operator/observability/throughput",
+        # PHASE-14A B9 (#728): the degraded-provider board, one row per upstream
+        # model API with its healthy/degraded/down status derived at read time.
+        "/v1/operator/observability/providers",
+        # PHASE-14A B5 (#729): the reliability read - AI-queue depth with the age of
+        # the oldest queued item, the per-outbox backlog breakdown, the RECENT-activity
+        # figure, and the link out to true concurrency.
+        "/v1/operator/observability/reliability",
+        # PHASE-14A B8 (#730): the live error feed, served from the capture's own
+        # collapsed rows because Postgres is the system of record.
+        "/v1/operator/observability/errors",
+        # PHASE-14A B2 (#731): the business read - ONE period-parameterised endpoint
+        # serving today, week-to-date and month-to-date, so the three periods are not
+        # three aggregation copies.
+        "/v1/operator/observability/business",
+        # PHASE-14A B8 (#740): the funnel read - the walk from the composer to an
+        # issued e-prescription or a closed case, with each step's conversion, the
+        # median gap to the step before it, and success and abandonment over one
+        # denominator.
+        "/v1/operator/observability/product/funnel",
+        # PHASE-14A B4f (#741): the adoption read - daily, weekly and monthly active
+        # users with the stickiness ratio between them, plus the window's throughput,
+        # requests per active user and a daily load trend, all computed in Postgres
+        # because the free metrics tier's fourteen-day retention cannot answer a month.
+        "/v1/operator/observability/product/active-users",
+        # PHASE-14A B4g (#742): the stickiness read - what share of each arrival day
+        # came back at seven and thirty days, derived at read time from the daily
+        # per-actor product aggregate so a thirty-day question never scans the raw
+        # event ledger.
+        "/v1/operator/observability/product/retention-cohorts",
+        # PHASE-14A B5 (#735): the one operator WRITE in the module - the
+        # acknowledgement that fills the alert row's acked_by/acked_at columns.
+        "/v1/operator/observability/alerts/{alert_id}/acknowledge",
     }
 
 

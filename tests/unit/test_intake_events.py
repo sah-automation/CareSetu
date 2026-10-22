@@ -6,23 +6,31 @@ kind, retry attempt, failure reason) and never carries PHI (transcript,
 structured clinical fields, confidence scores, egressed bytes stay in the
 ``intake`` schema - security-phii-standards no-PHI). ``intake.started``
 (PHASE-7 T05 #369) carries the funnel facts - patient id, mode, language -
-and has no intake id yet because it precedes capture. Covers the frozen event
-shapes, the ``register_handlers`` registration seam (payload models + the
-``intake.started`` telemetry and ``intake.captured`` self-subscriptions), and
-an emitted-envelope round-trip through the registry validator - all without a
-database.
+and has no intake id yet because it precedes capture. The ``ai_job.*`` events
+also carry the operational metering facts MOD-013 accumulates (B4a #702) -
+provider/model, tokens, priced cost, duration and the *derived*
+``low_confidence`` flag (the raw confidence score still never travels).
+``intake.composer_opened`` (B4e #721) is the funnel's real ENTRY step: it fires
+when a patient opens the composer, before any capture, and carries the patient,
+the session key and the trace id - never an intake id, because no intake exists
+yet. Covers the frozen event shapes, the ``register_handlers`` registration seam
+(payload models + the ``intake.started`` telemetry and ``intake.captured`` self-
+subscriptions), and an emitted-envelope round-trip through the registry
+validator - all without a database.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy import CheckConstraint
 
 from bus.dispatcher import OutboxRow, envelope_from_row
 from bus.envelope import Envelope, is_valid_event_type
@@ -30,7 +38,10 @@ from bus.events import (
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_INTAKE_STARTED,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
@@ -40,25 +51,34 @@ from bus.registry import HandlerRegistry
 from modules.intake.adapters import intake_started_count, register_handlers
 from modules.intake.domain.events import (
     PRODUCER_MODULE,
+    AiTaskType,
+    IntakeComposerOpenedPayload,
+    IntakeStartedPayload,
     ai_egress_recorded_envelope,
     ai_job_completed_envelope,
     ai_job_failed_envelope,
     intake_captured_envelope,
+    intake_composer_opened_envelope,
+    intake_doctor_assigned_envelope,
     intake_retry_requested_envelope,
     intake_started_envelope,
     pre_summary_low_confidence_envelope,
     pre_summary_ready_envelope,
 )
+from modules.intake.schema.models import intake_ai_jobs
 
 _ALL_EVENT_TYPES = (
     EVENT_INTAKE_STARTED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_PRE_SUMMARY_READY,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_AI_EGRESS_RECORDED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
 )
 
 
@@ -85,7 +105,30 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
     assert EVENT_PRE_SUMMARY_LOW_CONFIDENCE == "pre_summary.low_confidence"
     assert EVENT_AI_JOB_COMPLETED == "ai_job.completed"
     assert EVENT_AI_JOB_FAILED == "ai_job.failed"
+    assert EVENT_AI_JOB_QUEUED == "ai_job.queued"
     assert EVENT_AI_EGRESS_RECORDED == "ai_egress.recorded"
+    assert EVENT_INTAKE_DOCTOR_ASSIGNED == "intake.doctor_assigned"
+    assert EVENT_INTAKE_COMPOSER_OPENED == "intake.composer_opened"
+
+
+def test_the_declared_task_type_vocabulary_is_exactly_the_schema_constraint() -> None:
+    """#722 meters the drafting leg with the ALREADY-DECLARED ``draft`` type.
+
+    Metering the prescription-drafting leg must not widen the vocabulary: the
+    payload's ``AiTaskType`` and the ``ai_jobs`` check constraint stay the same
+    four names, in the same order, so ``draft`` became a PRODUCED type rather
+    than a new one being invented, and ``summarize`` stays declared-only.
+    """
+    declared = get_args(AiTaskType)
+    assert declared == ("transcribe", "structure", "draft", "summarize")
+
+    check = next(
+        constraint
+        for constraint in intake_ai_jobs.constraints
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name == "ck_intake_ai_jobs_task_type"
+    )
+    assert set(re.findall(r"'(\w+)'", str(check.sqltext))) == set(declared)
 
 
 def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
@@ -95,9 +138,40 @@ def _capture_from_all_event_types() -> list[Envelope[BaseModel]]:
         intake_retry_requested_envelope(intake_id=1, record_attempt=2, reason="unusable_audio"),
         pre_summary_ready_envelope(intake_id=1, pre_summary_id=5, patient_id=7),
         pre_summary_low_confidence_envelope(intake_id=1, pre_summary_id=5),
-        ai_job_completed_envelope(ai_job_id=9, intake_id=1, task_type="structure"),
-        ai_job_failed_envelope(ai_job_id=9, intake_id=1, task_type="transcribe", reason="timeout"),
+        ai_job_completed_envelope(
+            ai_job_id=9,
+            intake_id=1,
+            task_type="structure",
+            provider="openai",
+            model="gpt-4o-mini",
+            input_tokens=900,
+            output_tokens=150,
+            cost_paise=24,
+            duration_ms=1200,
+            low_confidence=True,
+            patient_id=7,
+            doctor_id=None,
+            trace_id="a" * 32,
+        ),
+        ai_job_failed_envelope(
+            ai_job_id=9,
+            intake_id=1,
+            task_type="transcribe",
+            reason="Ext002CallError",
+            provider="openai",
+            model="whisper-1",
+            timeout=True,
+            patient_id=7,
+            doctor_id=None,
+            trace_id=None,
+        ),
         ai_egress_recorded_envelope(intake_id=1, ai_job_id=9, reason="structure"),
+        intake_doctor_assigned_envelope(intake_id=1, patient_id=7, doctor_id=909),
+        intake_composer_opened_envelope(
+            patient_id=7,
+            session_key="e" * 32,
+            trace_id="e" * 32,
+        ),
     ]
 
 
@@ -157,25 +231,68 @@ def test_pre_summary_low_confidence_names_the_summary() -> None:
     assert envelope.payload.pre_summary_id == 7
 
 
-def test_ai_job_completed_names_the_job_and_task() -> None:
-    envelope = ai_job_completed_envelope(ai_job_id=9, intake_id=42, task_type="draft")
+def test_ai_job_completed_names_the_job_and_carries_the_metering_facts() -> None:
+    envelope = ai_job_completed_envelope(
+        ai_job_id=9,
+        intake_id=42,
+        task_type="draft",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=800,
+        output_tokens=120,
+        cost_paise=21,
+        duration_ms=950,
+        low_confidence=True,
+        patient_id=7,
+        doctor_id=8,
+        trace_id="c" * 32,
+    )
 
     assert envelope.event_type == EVENT_AI_JOB_COMPLETED
     assert envelope.payload.ai_job_id == 9
     assert envelope.payload.intake_id == 42
     assert envelope.payload.task_type == "draft"
+    # B4a (#702): the telemetry facts MOD-013 accumulates from the event alone.
+    assert envelope.payload.provider == "openai"
+    assert envelope.payload.model == "gpt-4o-mini"
+    assert envelope.payload.input_tokens == 800
+    assert envelope.payload.output_tokens == 120
+    assert envelope.payload.cost_paise == 21
+    assert envelope.payload.duration_ms == 950
+    assert envelope.payload.low_confidence is True
+    # B4c (#719): the identity references attribution reads - identity only, no PHI.
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.doctor_id == 8
+    assert envelope.payload.trace_id == "c" * 32
 
 
-def test_ai_job_failed_carries_the_operational_reason() -> None:
+def test_ai_job_failed_carries_the_operational_reason_and_timeout_class() -> None:
     envelope = ai_job_failed_envelope(
-        ai_job_id=9, intake_id=42, task_type="summarize", reason="provider 429"
+        ai_job_id=9,
+        intake_id=42,
+        task_type="summarize",
+        reason="Ext002CallError",
+        provider="openai",
+        model="gpt-4o-mini",
+        timeout=True,
+        patient_id=7,
+        doctor_id=None,
+        trace_id="d" * 32,
     )
 
     assert envelope.event_type == EVENT_AI_JOB_FAILED
     assert envelope.payload.ai_job_id == 9
     assert envelope.payload.intake_id == 42
     assert envelope.payload.task_type == "summarize"
-    assert envelope.payload.reason == "provider 429"
+    assert envelope.payload.reason == "Ext002CallError"
+    # B4a (#702): serving scope for the aggregate + the timeout bucket.
+    assert envelope.payload.provider == "openai"
+    assert envelope.payload.model == "gpt-4o-mini"
+    assert envelope.payload.timeout is True
+    # B4c (#719): these failure legs involve no doctor, so the reference is null.
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.doctor_id is None
+    assert envelope.payload.trace_id == "d" * 32
 
 
 def test_ai_egress_recorded_names_the_job_and_reason() -> None:
@@ -185,6 +302,91 @@ def test_ai_egress_recorded_names_the_job_and_reason() -> None:
     assert envelope.payload.intake_id == 42
     assert envelope.payload.ai_job_id == 9
     assert envelope.payload.reason == "transcribe"
+
+
+def test_doctor_assigned_names_the_intake_the_patient_and_the_doctor() -> None:
+    """The care-attribution edge rides the event: all three references, nothing else.
+
+    This is the ONLY legal path for doctor attribution (#717 decision 3): a
+    consumer learns which doctor an intake belongs to from this payload, never by
+    joining to the care or partner schema (ADR-0003). It deliberately carries no
+    clinical content - the references only.
+    """
+    envelope = intake_doctor_assigned_envelope(intake_id=42, patient_id=7, doctor_id=909)
+
+    assert envelope.event_type == EVENT_INTAKE_DOCTOR_ASSIGNED
+    assert envelope.producer == PRODUCER_MODULE
+    assert envelope.payload.intake_id == 42
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.doctor_id == 909
+    assert set(envelope.payload.model_dump(mode="json")) == {
+        "intake_id",
+        "patient_id",
+        "doctor_id",
+    }
+
+
+def test_composer_opened_carries_the_patient_session_key_and_trace_and_nothing_else() -> None:
+    """The funnel's entry step: an arrival fact, carrying no clinical content.
+
+    ``intake.composer_opened`` fires when a patient OPENS the composer, before
+    any capture (#717 decision 4), so the funnel has an entry that an abandon
+    also reaches - which ``intake.started`` cannot be, because it rides the
+    capture transaction. It carries the patient, the session key and the trace
+    id and nothing else: no intake id (none exists yet), no audio reference, no
+    transcript, no free text (security-phii-standards no-PHI).
+    """
+    envelope = intake_composer_opened_envelope(
+        patient_id=7,
+        session_key="e" * 32,
+        trace_id="e" * 32,
+    )
+
+    assert envelope.event_type == EVENT_INTAKE_COMPOSER_OPENED
+    assert envelope.producer == PRODUCER_MODULE
+    assert set(envelope.payload.model_dump(mode="json")) == {
+        "patient_id",
+        "session_key",
+        "trace_id",
+    }
+    assert envelope.payload.patient_id == 7
+    assert envelope.payload.session_key == "e" * 32
+    assert envelope.payload.trace_id == "e" * 32
+
+
+def test_composer_opened_and_intake_started_are_independently_routable() -> None:
+    """An abandon must be distinguishable from a submit.
+
+    The acceptance hinges on the two being SEPARATE events on SEPARATE
+    transactions, not one event with two states: composer-opened has no intake
+    id because no intake exists yet, and intake.started carries the mode and
+    language that only a submission knows. A patient who opens the composer and
+    walks away produces the first and never the second, which is exactly what
+    makes the drop-off countable.
+
+    Asserted through the registry a consumer routes on, not through constant
+    inequality: collapsing the two into one entry, or letting composer-opened
+    inherit ``intake.started``'s submission-only fields, breaks separability.
+    """
+    registry = HandlerRegistry()
+    register_handlers(registry)
+
+    composer_opened = intake_composer_opened_envelope(
+        patient_id=7, session_key="e" * 32, trace_id="e" * 32
+    )
+    started = intake_started_envelope(patient_id=7, mode="voice", language="hi")
+
+    assert composer_opened.event_type != started.event_type
+    assert registry.payload_model_for(composer_opened.event_type) is IntakeComposerOpenedPayload
+    assert registry.payload_model_for(started.event_type) is IntakeStartedPayload
+
+    # composer-opened carries no submission-only field, and vice versa.
+    assert "intake_id" not in composer_opened.payload.model_dump(mode="json")
+    assert set(started.payload.model_dump(mode="json")) & {
+        "patient_id",
+        "mode",
+        "language",
+    } == {"patient_id", "mode", "language"}
 
 
 def test_no_payload_carries_phi() -> None:
@@ -230,13 +432,20 @@ def test_register_handlers_registers_the_self_subscriptions() -> None:
     assert registry.handlers_for(EVENT_INTAKE_CAPTURED)
     assert registry.handlers_for(EVENT_INTAKE_RETRY_REQUESTED)
     # No other intake event has a handler seat yet (pipeline bodies land in
-    # T08/T10/T11).
+    # T08/T10/T11). ``intake.doctor_assigned`` deliberately has none here either:
+    # its only subscriber is MOD-013's care-attribution edge (B4d #724), which
+    # registers its own payload mirror and handler - MOD-005 publishes it and
+    # never consumes it back. ``intake.composer_opened`` is the same shape: its
+    # only subscriber is MOD-013's product event ledger (B4e #739), so MOD-005
+    # publishes the payload model for fan-out and consumes nothing.
     for event_type in (
         EVENT_PRE_SUMMARY_READY,
         EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
         EVENT_AI_JOB_COMPLETED,
         EVENT_AI_JOB_FAILED,
         EVENT_AI_EGRESS_RECORDED,
+        EVENT_INTAKE_DOCTOR_ASSIGNED,
+        EVENT_INTAKE_COMPOSER_OPENED,
     ):
         assert registry.handlers_for(event_type) == ()
 

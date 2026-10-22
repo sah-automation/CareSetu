@@ -21,6 +21,8 @@ from typing import Any
 import httpx
 import pytest
 
+import modules.intake.adapters.ai_provider_openai_compatible as adapter_module
+import observability.langfuse_span as langfuse_span
 from app.config import DEFAULT_AI_MAX_RETRIES
 from modules.intake.adapters.ai_gateway import (
     AiEgressContext,
@@ -1040,3 +1042,114 @@ async def test_structure_sends_model() -> None:
 
     body = json.loads(captured_requests[0].content)
     assert body["model"] == "test-model"
+
+
+# --- Span metadata (PHASE-14A B2, #700) ---
+
+
+class _SpanRecorder:
+    def __init__(self) -> None:
+        self.spans: list[dict[str, object]] = []
+
+    def update_current_span(self, *, metadata: dict[str, object]) -> None:
+        self.spans.append(metadata)
+
+
+def _record_spans(monkeypatch: pytest.MonkeyPatch) -> _SpanRecorder:
+    recorder = _SpanRecorder()
+    monkeypatch.setattr(langfuse_span, "get_configured_client", lambda: recorder)
+    return recorder
+
+
+async def test_structure_records_success_span_with_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _record_spans(monkeypatch)
+    monkeypatch.setattr(
+        adapter_module,
+        "compute_cost_paise",
+        lambda model, *, input_tokens, output_tokens: 42,
+    )
+    transport = httpx.MockTransport(lambda request: _success_response(_mock_structure_response()))
+    adapter = _make_adapter(transport)
+
+    await adapter.structure(_structure_request())
+
+    span = recorder.spans[-1]
+    assert span["task_type"] == "structure"
+    assert span["status"] == "success"
+    assert span["model"] == "test-model"
+    assert span["input_tokens"] == 100
+    assert span["output_tokens"] == 50
+    assert span["cost_paise"] == 42
+
+
+async def test_structure_records_failed_span_on_contract_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _record_spans(monkeypatch)
+    transport = httpx.MockTransport(lambda request: _error_response(400))
+    adapter = _make_adapter(transport)
+
+    with pytest.raises(Ext002CallError):
+        await adapter.structure(_structure_request())
+
+    span = recorder.spans[-1]
+    assert span["task_type"] == "structure"
+    assert span["status"] == "failed"
+    assert "cost_paise" not in span
+
+
+async def test_structure_records_failed_span_on_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _record_spans(monkeypatch)
+    transport = httpx.MockTransport(lambda request: _network_error_request())
+    adapter = _make_adapter(transport, max_retries=1)
+
+    with pytest.raises(Ext002CallError):
+        await adapter.structure(_structure_request())
+
+    span = recorder.spans[-1]
+    assert span["task_type"] == "structure"
+    assert span["status"] == "failed"
+
+
+async def test_transcribe_records_failed_span_without_clip_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _record_spans(monkeypatch)
+    adapter = _make_adapter(httpx.MockTransport(lambda request: _success_response({})))
+
+    with pytest.raises(Ext002CallError):
+        await adapter.transcribe(
+            TranscribeRequest(
+                audio_bytes=None,
+                audio_ref="clip/1",
+                mode="voice",
+                context=_context(),
+            )
+        )
+
+    span = recorder.spans[-1]
+    assert span["task_type"] == "transcribe"
+    assert span["status"] == "failed"
+
+
+async def test_draft_rx_records_failed_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _record_spans(monkeypatch)
+    adapter = _make_adapter(httpx.MockTransport(lambda request: _success_response({})))
+
+    with pytest.raises(Ext002CallError):
+        await adapter.draft_rx(
+            DraftRxRequest(
+                doctor_input_ref="voice_note/1",
+                pre_summary_ref="pre_summary/2",
+                patient_history_summary="mock history",
+                context=_context(),
+            )
+        )
+
+    span = recorder.spans[-1]
+    assert span["task_type"] == "draft_rx"
+    assert span["status"] == "failed"

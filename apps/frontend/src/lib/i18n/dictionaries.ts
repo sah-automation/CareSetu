@@ -1053,12 +1053,40 @@ const en = {
     verifications: "Verifications",
     disputes: "Disputes",
     audit: "Audit",
+    // #708: the operator Observability console (plan-phase14 §9.2). A live
+    // entry, so it needs a label in both locales like every other destination.
+    observability: "Observability",
+    // #737: the Business lens destination inside the Observability console. The
+    // label lands here ahead of the sidebar destination that renders it (#744
+    // owns the console's IA): spec #717 decision 34 makes a new nav label a
+    // both-locales build gate, so shipping the English half alone would fail the
+    // parity test rather than quietly fall back.
+    business: "Business",
+    // #738: the Reliability lens destination, on the same terms as `business`
+    // above - both locales ship together or the parity test fails.
+    reliability: "Reliability",
+    // #743: the Product lens destination. Same both-locales gate as the two
+    // labels above (#717 decision 34).
+    product: "Product",
+    // #744: the Observability group's own sub-destination labels - its landing
+    // Overview, the four existing AI panels and the Batch 2 Settings
+    // placeholder. Both locales ship together (#717 decisions 27/34); the
+    // parity test plus the Dictionary type are the gate.
+    overview: "Overview",
+    cost: "Cost",
+    usage: "Usage",
+    quality: "Quality",
+    health: "Health",
+    settings: "Settings",
     // #538: section-group labels for the redesigned full-shell sidebar. Nav
     // items declare a group via NavItemDef.group; the sidebar composes ordered
     // labeled groups from these keys.
     sections: {
       work: "Work",
       account: "Account",
+      // #744: the operator console's Observability section (spec #717
+      // decision 28) - the disclosure parent's group membership.
+      observability: "Observability",
     },
     // #574: the sidebar's collapse control. Two flat keys, not one conditional
     // function - this namespace carries plain strings only, like `logOut`,
@@ -2204,6 +2232,213 @@ const en = {
       "Your pre-summary is ready. Resume choosing the doctor who will review it.",
     bookCta: "Book consultation",
   },
+
+  // operatorBusiness.* surface - spec #717, plan-phase14 §9.2: the operator
+  // Business lens page at /operator/observability/business.
+  //
+  // Its own namespace rather than a slice of `nav`: `nav.business` is the
+  // DESTINATION's label in the sidebar, and this namespace is the PAGE - every
+  // panel title, every figure label and every empty-state reason on it.
+  //
+  // Both locales ship together (spec #717 decision 34), and the parity test is
+  // the gate. The composable strings are FUNCTIONS, not fragments: "₹1,250
+  // spent · 25% of ₹5,000 cap" is one English sentence and a different word
+  // order in Hindi, so a fragment table would assemble English word order in
+  // both locales.
+  operatorBusiness: {
+    title: "Business",
+    description:
+      "Whether this spend is healthy, where it goes, what a unit of value costs, and who is heavy.",
+
+    // The window every panel below reports on. It drives the whole read, so it
+    // is a PAGE-level control rather than one filter per panel.
+    period: {
+      label: "Period",
+      today: "Today",
+      weekToDate: "Week to date",
+      monthToDate: "Month to date",
+      showing: (period: string) => `Currently showing: ${period}`,
+    },
+    window: (period: string, start: string, end: string) =>
+      `${period}, ${start} to ${end}`,
+
+    spend: {
+      title: "Spend against the monthly cap",
+      emptyTitle: "No AI spend recorded in this window",
+      emptyBody:
+        "No AI job ran in this window, so there is no spend to report.",
+      error: "Could not load the AI spend against the cap.",
+      spent: (amount: string) => `${amount} spent`,
+      capShare: (share: string, cap: string) => `${share} of ${cap} cap`,
+      projected: (amount: string) => `${amount} projected by month end`,
+      projectedOverCap: (amount: string) =>
+        `${amount} projected by month end, over cap`,
+      chart: {
+        ariaLabel:
+          "AI spend against the monthly cap, with the projected month-end burn",
+        consumed: "Consumed",
+        monthlyCap: "Monthly cap",
+        projectedMonthEnd: "Projected month end",
+        projectedOverCap: "Projected over cap",
+        noProjection: "no projection for this period",
+        projectedAt: (amount: string) => `projected month end ${amount}`,
+        projectedAtOverCap: (amount: string) =>
+          `projected month end ${amount}, over cap`,
+        description: (consumed: string, cap: string, projected: string) =>
+          `${consumed} consumed against a ${cap} cap, ${projected}`,
+      },
+    },
+
+    breakdown: {
+      title: "Where the spend goes",
+      emptyTitle: "No AI spend by task type in this window",
+      emptyBody:
+        "AI jobs ran in this window but none recorded a task type to bill against.",
+      error: "Could not load the AI spend breakdown.",
+      takeaway: (count: number, task: string | null, amount: string | null) =>
+        task === null
+          ? `${count} task types`
+          : `${count} task types · the largest is ${task} at ${amount}`,
+      chart: {
+        ariaLabel: "AI spend by task type",
+        series: "AI spend",
+        emptyDescription: "No AI spend by task type in this window.",
+        description: (rows: string) => `AI spend by task type: ${rows}`,
+      },
+    },
+
+    unitCosts: {
+      title: "What a unit of value costs",
+      emptyTitle: "No unit costs to price",
+      emptyBody:
+        "No unit cost was measured in this window, so there is nothing to price.",
+      error: "Could not load the AI unit costs.",
+      takeaway: (jobs: number, completed: number, failed: number) =>
+        `${jobs} AI jobs · ${completed} completed · ${failed} failed`,
+      perRequest: "Per request",
+      perCompletedTask: "Per completed task",
+      perPatient: "Per patient",
+      perDoctor: "Per doctor",
+      costOfPass: "Cost of pass",
+    },
+
+    margin: {
+      title: "Is it worth it?",
+      emptyTitle: "Revenue not captured yet",
+      emptyBody:
+        "The platform has not recorded revenue yet, so a margin cannot be computed. AI cost of goods is still counted above.",
+      error: "Could not load the AI margin.",
+      takeaway: (
+        revenue: string,
+        costOfGoods: string,
+        margin: string | null,
+      ) =>
+        margin === null
+          ? `${revenue} revenue · ${costOfGoods} AI cost of goods`
+          : `${revenue} revenue · ${costOfGoods} AI cost of goods · ${margin} gross margin`,
+      revenue: "Revenue",
+      costOfGoods: "AI cost of goods",
+      headlineMonthCostOfGoods: "AI cost of goods this month",
+      grossMargin: "Gross margin",
+      aiCostPct: "AI cost as a share of revenue",
+      tiersCaptured: "Revenue tiers captured",
+      // Why a margin figure is absent. These read as the VALUE of the row they
+      // stand in for, so they are phrases, not sentences.
+      reasons: {
+        revenueNotCaptured: "revenue not captured",
+        revenueZero: "revenue was zero in this period",
+      },
+    },
+
+    actors: {
+      title: "Who is heavy",
+      emptyTitle: "No attributed patients or doctors in this window",
+      emptyBody: "No patient or doctor has an AI spend edge in this window.",
+      error: "Could not load the AI spend attribution.",
+      takeaway: (patients: number, doctors: number) =>
+        `${patients} patients · ${doctors} doctors attributed`,
+      distribution: (median: string, p95: string) =>
+        `median ${median}, p95 ${p95}`,
+      patientsTitle: (distribution: string) =>
+        `Heaviest patients (${distribution})`,
+      doctorsTitle: (distribution: string) =>
+        `Heaviest doctors (${distribution})`,
+      jobs: (jobs: number) => `${jobs} jobs`,
+      patients: (patients: number) => `${patients} patients`,
+      noDoctorAttributed: "no doctor attributed",
+      noPatientsRecorded: "no patients recorded",
+      noActors: "No attributed actors in this window.",
+    },
+
+    providers: {
+      title: "Cost by provider",
+      emptyTitle: "No AI spend by provider in this window",
+      emptyBody:
+        "No AI job in this window recorded a provider, so there is no provider bill to break down.",
+      error: "Could not load the AI spend by provider.",
+      takeaway: (
+        count: number,
+        provider: string | null,
+        amount: string | null,
+      ) =>
+        provider === null
+          ? `${count} providers`
+          : `${count} providers · the largest is ${provider} at ${amount}`,
+      table: {
+        caption:
+          "Each provider's job count, spend, token volumes and cost per thousand tokens.",
+      },
+    },
+
+    models: {
+      title: "Cost by model",
+      emptyTitle: "No AI spend by model in this window",
+      emptyBody:
+        "No AI job in this window recorded a model, so there is no model bill to break down.",
+      error: "Could not load the AI spend by model.",
+      takeaway: (count: number, model: string | null, amount: string | null) =>
+        model === null
+          ? `${count} models`
+          : `${count} models · the largest is ${model} at ${amount}`,
+      table: {
+        caption:
+          "Each model's provider, job count, spend, token volumes and cost per thousand tokens.",
+      },
+    },
+
+    tokens: {
+      title: "Input versus output tokens",
+      emptyTitle: "No AI tokens in this window",
+      emptyBody:
+        "No AI job ran in this window, so there are no tokens to price.",
+      error: "Could not load the AI token costs.",
+      takeaway: (input: string, output: string) =>
+        `${input} input tokens · ${output} output tokens`,
+      inputTokens: "Input tokens",
+      outputTokens: "Output tokens",
+      perThousandInput: "Cost per 1,000 input tokens",
+      perThousandOutput: "Cost per 1,000 output tokens",
+      chart: {
+        ariaLabel: "AI input and output tokens by provider",
+        input: "Input tokens",
+        output: "Output tokens",
+        description: (rows: string) =>
+          `Input and output tokens by provider: ${rows}`,
+      },
+    },
+
+    // The two breakdown tables share every column but their key column.
+    table: {
+      provider: "Provider",
+      model: "Model",
+      jobs: "Jobs",
+      spend: "Spend",
+      inputTokens: "Input tokens",
+      outputTokens: "Output tokens",
+      perThousandInput: "Per 1k input",
+      perThousandOutput: "Per 1k output",
+    },
+  },
 };
 
 export type Dictionary = typeof en;
@@ -2219,6 +2454,21 @@ export type ServicesStrings = Dictionary["services"];
 export type ActionsStrings = Dictionary["actions"];
 export type RecentStrings = Dictionary["recent"];
 export type HealthStrings = Dictionary["health"];
+export type OperatorBusinessStrings = Dictionary["operatorBusiness"];
+
+/**
+ * Which `operatorBusiness.period` key each wire period is labelled with.
+ *
+ * The wire speaks in `today` / `week_to_date` / `month_to_date` and the
+ * dictionary speaks in prose, so the two are joined here rather than by a
+ * lookup at each call site: a `Record<BusinessPeriod, string>` of labels would
+ * need the label to exist in both languages before either could be read.
+ */
+export const BUSINESS_PERIOD_LABEL_KEY = {
+  today: "today",
+  week_to_date: "weekToDate",
+  month_to_date: "monthToDate",
+} as const satisfies Record<string, "today" | "weekToDate" | "monthToDate">;
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en,
@@ -2798,9 +3048,27 @@ export const STRINGS: Record<Lang, Dictionary> = {
       verifications: "सत्यापन",
       disputes: "विवाद",
       audit: "ऑडिट",
+      observability: "प्रेक्षण",
+      // #737: the Business lens destination. Both locales ship together - spec
+      // #717 decision 34, and the parity test is what holds them to it.
+      business: "व्यवसाय",
+      // #738: the Reliability lens destination, on the same terms as `business`.
+      reliability: "विश्वसनीयता",
+      // #743: the Product lens destination, on the same both-locales terms.
+      product: "उत्पाद",
+      // #744: the Observability group's sub-destination labels, shipping with
+      // their English halves or not at all (#717 decisions 27/34).
+      overview: "अवलोकन",
+      cost: "लागत",
+      usage: "उपयोग",
+      quality: "गुणवत्ता",
+      health: "स्वास्थ्य",
+      settings: "सेटिंग्स",
       sections: {
         work: "कार्य",
         account: "खाता",
+        // #744: the operator console's Observability section label.
+        observability: "प्रेक्षण",
       },
       // #574: the sidebar's collapse control, action-named like the English
       // pair above. Blueprint §9.2 line 578: neither locale ships alone.
@@ -4095,6 +4363,204 @@ export const STRINGS: Record<Lang, Dictionary> = {
       resumeBody:
         "आपका प्री-सारांश तैयार है। डॉक्टर चुनना फिर से शुरू करें जो इसकी जाँच करेगा।",
       bookCta: "परामर्श बुक करें",
+    },
+
+    operatorBusiness: {
+      title: "व्यवसाय",
+      description:
+        "यह खर्च स्वस्थ है या नहीं, यह कहाँ जा रहा है, एक इकाई की कीमत क्या है और भारी कौन है।",
+
+      period: {
+        label: "अवधि",
+        today: "आज",
+        weekToDate: "सप्ताह आरंभ से",
+        monthToDate: "माह आरंभ से",
+        showing: (period: string) => `दिखाया जा रहा है: ${period}`,
+      },
+      window: (period: string, start: string, end: string) =>
+        `${period}, ${start} से ${end}`,
+
+      spend: {
+        title: "मासिक बजट सीमा के मुकाबले खर्च",
+        emptyTitle: "इस अवधि में कोई AI खर्च दर्ज नहीं",
+        emptyBody:
+          "इस अवधि में कोई AI जॉब नहीं चला, इसलिए दिखाने को खर्च नहीं है।",
+        error: "AI खर्च और बजट सीमा लोड नहीं हो सकी।",
+        spent: (amount: string) => `${amount} खर्च हुआ`,
+        capShare: (share: string, cap: string) => `${cap} सीमा का ${share}`,
+        projected: (amount: string) => `माह के अंत तक ${amount} अनुमानित`,
+        projectedOverCap: (amount: string) =>
+          `माह के अंत तक ${amount} अनुमानित, सीमा से ऊपर`,
+        chart: {
+          ariaLabel: "मासिक बजट सीमा के मुकाबले AI खर्च, माह-अंत अनुमान के साथ",
+          consumed: "खर्च हुआ",
+          monthlyCap: "मासिक सीमा",
+          projectedMonthEnd: "माह-अंत अनुमान",
+          projectedOverCap: "सीमा से ऊपर अनुमान",
+          noProjection: "इस अवधि का कोई अनुमान नहीं",
+          projectedAt: (amount: string) => `माह-अंत अनुमान ${amount}`,
+          projectedAtOverCap: (amount: string) =>
+            `माह-अंत अनुमान ${amount}, सीमा से ऊपर`,
+          description: (consumed: string, cap: string, projected: string) =>
+            `${cap} सीमा के मुकाबले ${consumed} खर्च, ${projected}`,
+        },
+      },
+
+      breakdown: {
+        title: "खर्च कहाँ जा रहा है",
+        emptyTitle: "इस अवधि में कार्य प्रकार के हिसाब से कोई AI खर्च नहीं",
+        emptyBody:
+          "इस अवधि में AI जॉब चले, लेकिन किसी ने भी बिल करने के लिए कार्य प्रकार दर्ज नहीं किया।",
+        error: "AI खर्च का ब्योरा लोड नहीं हो सका।",
+        takeaway: (
+          count: number,
+          task: string | null,
+          amount: string | null,
+        ) =>
+          task === null
+            ? `${count} कार्य प्रकार`
+            : `${count} कार्य प्रकार · सबसे बड़ा ${task}, ${amount}`,
+        chart: {
+          ariaLabel: "कार्य प्रकार के हिसाब से AI खर्च",
+          series: "AI खर्च",
+          emptyDescription:
+            "इस अवधि में कार्य प्रकार के हिसाब से कोई AI खर्च नहीं।",
+          description: (rows: string) =>
+            `कार्य प्रकार के हिसाब से AI खर्च: ${rows}`,
+        },
+      },
+
+      unitCosts: {
+        title: "एक इकाई की कीमत क्या है",
+        emptyTitle: "दिखाने को कोई इकाई लागत नहीं",
+        emptyBody:
+          "इस अवधि में कोई इकाई लागत मापी नहीं गई, इसलिए दिखाने को कुछ नहीं है।",
+        error: "AI इकाई लागत लोड नहीं हो सकी।",
+        takeaway: (jobs: number, completed: number, failed: number) =>
+          `${jobs} AI जॉब · ${completed} पूरे · ${failed} असफल`,
+        perRequest: "प्रति अनुरोध",
+        perCompletedTask: "प्रति पूरा काम",
+        perPatient: "प्रति मरीज़",
+        perDoctor: "प्रति डॉक्टर",
+        costOfPass: "पास की लागत",
+      },
+
+      margin: {
+        title: "क्या यह कीमतदार है?",
+        emptyTitle: "राजस्व अभी दर्ज नहीं",
+        emptyBody:
+          "प्लेटफ़ॉर्म ने अभी राजस्व दर्ज नहीं किया है, इसलिए मार्जिन नहीं निकाला जा सकता। ऊपर AI माल की लागत फिर भी गिनी जा रही है।",
+        error: "AI मार्जिन लोड नहीं हो सका।",
+        takeaway: (
+          revenue: string,
+          costOfGoods: string,
+          margin: string | null,
+        ) =>
+          margin === null
+            ? `${revenue} राजस्व · ${costOfGoods} AI माल की लागत`
+            : `${revenue} राजस्व · ${costOfGoods} AI माल की लागत · ${margin} सकल मार्जिन`,
+        revenue: "राजस्व",
+        costOfGoods: "AI माल की लागत",
+        headlineMonthCostOfGoods: "इस माह की AI माल की लागत",
+        grossMargin: "सकल मार्जिन",
+        aiCostPct: "राजस्व में AI लागत का हिस्सा",
+        tiersCaptured: "दर्श राजस्व श्रेणियाँ",
+        reasons: {
+          revenueNotCaptured: "राजस्व दर्ज नहीं",
+          revenueZero: "इस अवधि में राजस्व शून्य था",
+        },
+      },
+
+      actors: {
+        title: "भारी कौन है",
+        emptyTitle: "इस अवधि में कोई मरीज़ या डॉक्टर जुड़ा नहीं",
+        emptyBody: "इस अवधि में किसी मरीज़ या डॉक्टर का AI खर्च जुड़ा नहीं है।",
+        error: "AI खर्च का श्रेय लोड नहीं हो सका।",
+        takeaway: (patients: number, doctors: number) =>
+          `${patients} मरीज़ · ${doctors} डॉक्टर जुड़े`,
+        distribution: (median: string, p95: string) =>
+          `माध्यिका ${median}, p95 ${p95}`,
+        patientsTitle: (distribution: string) =>
+          `सबसे भारी मरीज़ (${distribution})`,
+        doctorsTitle: (distribution: string) =>
+          `सबसे भारी डॉक्टर (${distribution})`,
+        jobs: (jobs: number) => `${jobs} जॉब`,
+        patients: (patients: number) => `${patients} मरीज़`,
+        noDoctorAttributed: "कोई डॉक्टर नहीं जुड़ा",
+        noPatientsRecorded: "कोई मरीज़ दर्ज नहीं",
+        noActors: "इस अवधि में कोई जुड़ा हुआ नहीं।",
+      },
+
+      providers: {
+        title: "प्रदाता के हिसाब से लागत",
+        emptyTitle: "इस अवधि में प्रदाता के हिसाब से कोई AI खर्च नहीं",
+        emptyBody:
+          "इस अवधि में किसी AI जॉब ने प्रदाता दर्ज नहीं किया, इसलिए प्रदाता का बिल नहीं है।",
+        error: "प्रदाता के हिसाब से AI खर्च लोड नहीं हो सका।",
+        takeaway: (
+          count: number,
+          provider: string | null,
+          amount: string | null,
+        ) =>
+          provider === null
+            ? `${count} प्रदाता`
+            : `${count} प्रदाता · सबसे बड़ा ${provider}, ${amount}`,
+        table: {
+          caption: "हर प्रदाता के जॉब, खर्च, टोकन और प्रति हज़ार टोकन लागत।",
+        },
+      },
+
+      models: {
+        title: "मॉडल के हिसाब से लागत",
+        emptyTitle: "इस अवधि में मॉडल के हिसाब से कोई AI खर्च नहीं",
+        emptyBody:
+          "इस अवधि में किसी AI जॉब ने मॉडल दर्ज नहीं किया, इसलिए मॉडल का बिल नहीं है।",
+        error: "मॉडल के हिसाब से AI खर्च लोड नहीं हो सका।",
+        takeaway: (
+          count: number,
+          model: string | null,
+          amount: string | null,
+        ) =>
+          model === null
+            ? `${count} मॉडल`
+            : `${count} मॉडल · सबसे बड़ा ${model}, ${amount}`,
+        table: {
+          caption:
+            "हर मॉडल का प्रदाता, जॉब, खर्च, टोकन और प्रति हज़ार टोकन लागत।",
+        },
+      },
+
+      tokens: {
+        title: "इनपुट बनाम आउटपुट टोकन",
+        emptyTitle: "इस अवधि में कोई AI टोकन नहीं",
+        emptyBody:
+          "इस अवधि में कोई AI जॉब नहीं चला, इसलिए दाम लगाने को टोकन नहीं हैं।",
+        error: "AI टोकन लागत लोड नहीं हो सकी।",
+        takeaway: (input: string, output: string) =>
+          `${input} इनपुट टोकन · ${output} आउटपुट टोकन`,
+        inputTokens: "इनपुट टोकन",
+        outputTokens: "आउटपुट टोकन",
+        perThousandInput: "प्रति 1,000 इनपुट टोकन लागत",
+        perThousandOutput: "प्रति 1,000 आउटपुट टोकन लागत",
+        chart: {
+          ariaLabel: "प्रदाता के हिसाब से AI इनपुट और आउटपुट टोकन",
+          input: "इनपुट टोकन",
+          output: "आउटपुट टोकन",
+          description: (rows: string) =>
+            `प्रदाता के हिसाब से इनपुट और आउटपुट टोकन: ${rows}`,
+        },
+      },
+
+      table: {
+        provider: "प्रदाता",
+        model: "मॉडल",
+        jobs: "जॉब",
+        spend: "खर्च",
+        inputTokens: "इनपुट टोकन",
+        outputTokens: "आउटपुट टोकन",
+        perThousandInput: "प्रति 1k इनपुट",
+        perThousandOutput: "प्रति 1k आउटपुट",
+      },
     },
   },
 };

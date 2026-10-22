@@ -24,6 +24,7 @@ import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import {
   fetchIntake,
   reRecordIntake,
+  recordComposerOpened,
   submitIntake,
   uploadIntakeMedia,
 } from "@/lib/intake/api";
@@ -69,6 +70,7 @@ vi.mock("@/lib/intake/api", () => ({
   uploadIntakeMedia: vi.fn(),
   savePatientEdits: vi.fn(),
   fetchPreSummary: vi.fn(),
+  recordComposerOpened: vi.fn(),
 }));
 
 vi.mock("@/lib/intake/recorder", () => ({
@@ -82,6 +84,7 @@ const upload = vi.mocked(uploadIntakeMedia);
 const submit = vi.mocked(submitIntake);
 const rerecord = vi.mocked(reRecordIntake);
 const pollIntake = vi.mocked(fetchIntake);
+const composerOpened = vi.mocked(recordComposerOpened);
 
 function fakeRecorder() {
   return {
@@ -188,6 +191,8 @@ beforeEach(() => {
   submit.mockReset();
   rerecord.mockReset();
   pollIntake.mockReset();
+  composerOpened.mockReset();
+  composerOpened.mockResolvedValue(undefined);
   FakeAudio.instances = [];
   URL.createObjectURL = vi.fn(
     () => "blob:mock-audio",
@@ -249,6 +254,29 @@ describe("VoiceIntakePage (inside the patient shell)", () => {
     expect(screen.getByTestId("mic-button")).toBeInTheDocument();
     expect(screen.getByTestId("mic-button")).not.toBeDisabled();
     expect(screen.getByTestId("duration")).toHaveTextContent("00:00");
+    expect(screen.getByTestId("status-line")).toHaveTextContent(
+      voice.statusIdle,
+    );
+  });
+});
+
+describe("VoiceIntakePage funnel entry (B4e, #721)", () => {
+  it("reports the composer opened once on mount, before anything is recorded", async () => {
+    render(<VoiceIntakePage />);
+    await flush();
+
+    expect(composerOpened).toHaveBeenCalledTimes(1);
+  });
+
+  it("survives a failed entry ping without showing the patient an error", async () => {
+    composerOpened.mockRejectedValue(new Error("analytics down"));
+
+    render(<VoiceIntakePage />);
+    await flush();
+
+    expect(composerOpened).toHaveBeenCalledTimes(1);
+    // Analytics is not load-bearing: the recorder surface is untouched.
+    expect(screen.getByTestId("mic-button")).toBeInTheDocument();
     expect(screen.getByTestId("status-line")).toHaveTextContent(
       voice.statusIdle,
     );

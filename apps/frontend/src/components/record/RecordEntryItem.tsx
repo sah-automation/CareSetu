@@ -27,7 +27,7 @@ import {
   TYPE_BADGE_KEY,
   type PrescriptionItem,
 } from "@/lib/record/timelineView";
-import { formatFeePaise } from "@/components/pick/DoctorPickCard";
+import { formatInrPaise } from "@/lib/money";
 
 type Lang = "en" | "hi";
 
@@ -178,7 +178,7 @@ function EntryDetail({
           {amountPaise !== null && (
             <Row
               label={labels.history.amount}
-              value={formatFeePaise(amountPaise)}
+              value={formatInrPaise(amountPaise)}
             />
           )}
           {orderRef !== null && (

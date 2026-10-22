@@ -20,6 +20,7 @@ import redis.asyncio as redis
 from redis.asyncio import Redis
 
 from app.config import Settings
+from observability.otel import record_cache_hit, record_cache_miss
 
 _LOG = logging.getLogger(__name__)
 
@@ -133,6 +134,7 @@ async def get_cached_search(
     """
     client = get_directory_redis_client()
     if client is None:
+        record_cache_miss("directory")
         return None
     key = _cache_key(
         query=query,
@@ -145,9 +147,16 @@ async def get_cached_search(
     try:
         data = await client.get(key)
         if data is None:
+            record_cache_miss("directory")
             return None
-        return _deserialize(data.decode() if isinstance(data, bytes) else data)
+        result = _deserialize(data.decode() if isinstance(data, bytes) else data)
+        if result is None:
+            record_cache_miss("directory")
+            return None
+        record_cache_hit("directory")
+        return result
     except Exception:
+        record_cache_miss("directory")
         _LOG.debug("Redis directory cache read failed; SQL fallback will apply", exc_info=True)
         return None
 

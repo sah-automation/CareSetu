@@ -80,7 +80,7 @@
 
 **Prerequisite:** PS-01 (the meter is only meaningful once real cost lands in `ai_jobs`).
 
-1. Keep `budget_meter.py`'s authoritative SQL read path intact - it is the Phase 14 cost-dashboard data source (`docs/plans/plan-post-phase14-observability.md` already owns cost telemetry and the nightly cost rollup).
+1. Keep `budget_meter.py`'s authoritative SQL read path intact - it is the Phase 14 cost-dashboard data source (`docs/plans/plan-phase14-observability.md` already owns cost telemetry and the nightly cost rollup).
 2. Default behavior: **never block an AI call on spend.** The `allows_ai_call` gate consulted at `pipeline.py:201` becomes advisory - the pipeline always proceeds; the meter only reports.
 3. No alert, no hook, no notification wiring now. Real cost in `ai_jobs` is the signal; Phase 14 builds its dashboard/alert off that SQL aggregate.
 4. Keep the budget `Settings` knob (`ai_monthly_budget_paise`) so a cap can be reintroduced later without a rewrite.

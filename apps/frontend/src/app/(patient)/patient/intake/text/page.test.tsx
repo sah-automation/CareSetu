@@ -24,7 +24,12 @@ import PatientGroupLayout from "@/app/(patient)/layout";
 import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
-import { fetchIntake, submitIntake, uploadIntakeMedia } from "@/lib/intake/api";
+import {
+  fetchIntake,
+  recordComposerOpened,
+  submitIntake,
+  uploadIntakeMedia,
+} from "@/lib/intake/api";
 import { openMicrophoneRecorder } from "@/lib/intake/recorder";
 
 vi.mock("next/navigation", () => ({
@@ -67,6 +72,7 @@ vi.mock("@/lib/intake/api", () => ({
   uploadIntakeMedia: vi.fn(),
   savePatientEdits: vi.fn(),
   fetchPreSummary: vi.fn(),
+  recordComposerOpened: vi.fn(),
 }));
 
 vi.mock("@/lib/intake/recorder", () => ({
@@ -78,6 +84,7 @@ const openMic = vi.mocked(openMicrophoneRecorder);
 const upload = vi.mocked(uploadIntakeMedia);
 const submit = vi.mocked(submitIntake);
 const pollIntake = vi.mocked(fetchIntake);
+const composerOpened = vi.mocked(recordComposerOpened);
 
 function fakeRecorder() {
   return {
@@ -140,6 +147,8 @@ beforeEach(() => {
   upload.mockReset();
   submit.mockReset();
   pollIntake.mockReset();
+  composerOpened.mockReset();
+  composerOpened.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -212,6 +221,41 @@ describe("TextIntakePage (inside the patient shell)", () => {
     expectVisible("submit-zone");
     expectVisible("warn-empty");
     expect(screen.getByTestId("btn-submit")).toBeDisabled();
+  });
+});
+
+describe("TextIntakePage funnel entry (B4e, #721)", () => {
+  it("reports the composer opened once on mount, before anything is typed", async () => {
+    render(<TextIntakePage />);
+    await flush();
+
+    expect(composerOpened).toHaveBeenCalledTimes(1);
+  });
+
+  it("survives a failed entry ping without showing the patient an error", async () => {
+    composerOpened.mockRejectedValue(new Error("analytics down"));
+    render(<TextIntakePage />);
+    await flush();
+
+    expect(composerOpened).toHaveBeenCalledTimes(1);
+    // Analytics is not load-bearing: the capture surface is untouched.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("btn-submit")).toBeDisabled();
+  });
+
+  it("still submits the intake after reporting the entry", async () => {
+    render(<TextIntakePage />);
+    await flush();
+    typeSymptoms("fever since two days");
+    submit.mockResolvedValue({ intake_id: 42, status: "captured" });
+
+    fireEvent.click(screen.getByTestId("btn-submit"));
+    await flush();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    // One entry ping and one submit: two distinct events, so a product manager
+    // can tell this abandon-less journey from one that walked away.
+    expect(composerOpened).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -23,7 +23,12 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import { fetchIntake, submitIntake, uploadIntakeMedia } from "@/lib/intake/api";
+import {
+  fetchIntake,
+  recordComposerOpened,
+  submitIntake,
+  uploadIntakeMedia,
+} from "@/lib/intake/api";
 import {
   type RecorderSession,
   openMicrophoneRecorder,
@@ -111,6 +116,15 @@ export default function TextIntakePage() {
     }
     setNoteStage("preview");
   }, [failWith]);
+
+  // The intake funnel's entry step (B4e, #721): report that the composer was
+  // reached, before anything is typed or captured, so an abandon here is as
+  // countable as a submit. One-shot per mount, analytics only - the rejection is
+  // swallowed deliberately: a patient must never see an error because a ping
+  // failed, and nothing about the capture below depends on it.
+  useEffect(() => {
+    void recordComposerOpened().catch(() => undefined);
+  }, []);
 
   // Live duration while recording, hard-capped at the voice-page 180s so a
   // runaway take is never recorded indefinitely (auto-stop at the cap).

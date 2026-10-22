@@ -22,9 +22,21 @@ facade-with-fakes seam:
 - ``request_rx_draft`` is the live Phase 8 drafting seam (PHASE-8 T05,
   #421): it resolves the intake language, delegates to the AI gateway
   ``draft_rx`` leg, and returns the typed ``RxDraftResult`` (accepted
-  criterion 4). Capture durability is structural - the row + outbox event
+  criterion 4). Since B4 (#722) the seam also METERS that call: a ``draft``
+  ``ai_jobs`` row is booked before the provider call and finalized with the
+  serving provider/model, tokens, paise cost and duration, publishing
+  ``ai_job.completed`` - or, on a provider failure, ``ai_job.failed`` - on the
+  same transaction, so the drafting leg's spend is countable like the
+  transcription and structuring legs (PS-03). A draft whose intake cannot be
+  read fails closed rather than spending tokens off the meter. Capture
+  durability is structural - the row + outbox event
   commit in one local transaction, so a later AI failure never rolls
   back the intake (accepted criterion 5).
+- ``record_composer_opened`` is the funnel's real ENTRY step (B4e #721): it
+  writes one ``intake.composer_opened`` outbox row in its own transaction and
+  nothing else - no intake row, no media ref, no clinical content - so a patient
+  who opens the composer and abandons is still countable. ``intake.started`` is
+  untouched and still fires at capture time.
 """
 
 from __future__ import annotations
@@ -35,14 +47,25 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
-from sqlalchemy.sql.dml import Insert
+from sqlalchemy.sql.dml import Insert, Update
+from sqlalchemy.sql.selectable import Select
 
-from modules.intake.adapters.ai_gateway import DraftRxRequest
+from modules.intake.adapters.ai_gateway import (
+    DraftRxRequest,
+    DraftRxResult,
+    Ext002CallError,
+    RxItem,
+)
 from modules.intake.adapters.ai_provider_mock import MockAiProvider
 from modules.intake.domain.events import (
+    EVENT_AI_JOB_COMPLETED,
+    EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
     EVENT_INTAKE_STARTED,
     IntakeCapturedPayload,
+    IntakeComposerOpenedPayload,
     IntakeStartedPayload,
 )
 from modules.intake.domain.exceptions import (
@@ -57,6 +80,7 @@ from modules.intake.intake_models import (
     RxDraftItem,
     StructuredFields,
 )
+from modules.intake.pricing import compute_cost_paise, resolve_pricing_table
 from modules.intake.schema.models import (
     intake_intakes,
     intake_media_refs,
@@ -111,6 +135,24 @@ def _engine(connection: AsyncMock) -> AsyncMock:
     engine = AsyncMock(spec=AsyncEngine)
     engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
     engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    return engine
+
+
+def _commit_probing_engine(connection: AsyncMock) -> AsyncMock:
+    """Like :func:`_engine`, but records how the transaction block exited.
+
+    A clean exit commits, an exception rolls back - without this a test cannot
+    tell a durably written job row from one the escaping error undid, which is
+    exactly the distinction a failed-but-metered draft turns on.
+    """
+
+    async def _exit(exc_type: object, exc: object, tb: object) -> bool:
+        connection.rolled_back = exc_type is not None
+        return False
+
+    engine = AsyncMock(spec=AsyncEngine)
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
+    engine.begin.return_value.__aexit__ = AsyncMock(side_effect=_exit)
     return engine
 
 
@@ -201,6 +243,207 @@ def _outbox_array(connection: AsyncMock, event_type: str) -> Insert | None:
         if stmt.compile().params["event_type"] == event_type:
             return stmt
     return None
+
+
+# ---------------------------------------------------------------------------
+# Draft metering harness (B4 #722)
+# ---------------------------------------------------------------------------
+
+
+class _Recorded:
+    """One executed statement with its compiled params, for read-back assertions."""
+
+    def __init__(self, kind: str, statement: object) -> None:
+        self.kind = kind
+        self.statement = statement
+        self.params = dict(statement.compile().params)
+
+
+class _DraftMeteringConnection:
+    """Records the drafting seam's writes so a test can read the meter back.
+
+    ``_connection`` above scripts results by call order, which cannot say what the
+    seam WROTE. This recorder answers the two selects the seam reads, hands back a
+    fresh job id for the ``ai_jobs`` insert, and classifies every statement the
+    seam executes - booking, finalization and outbox event - so the assertions run
+    against the real SQLAlchemy statements rather than a parallel fiction.
+    """
+
+    def __init__(self, *, ai_job_id: int = 42) -> None:
+        self._ai_job_id = ai_job_id
+        self.executed: list[_Recorded] = []
+        self.rolled_back = False
+
+    async def execute(self, statement: object) -> _FakeResult:
+        if isinstance(statement, Insert):
+            table = statement.table.name
+            if table == "intake_ai_jobs":
+                self.executed.append(_Recorded("insert_ai_job", statement))
+                job_id = self._ai_job_id
+                self._ai_job_id += 1
+                return _FakeResult(scalar=job_id)
+            if table == "intake_outbox":
+                self.executed.append(_Recorded("outbox", statement))
+                return _FakeResult()
+            self.executed.append(_Recorded("insert_other", statement))
+            return _FakeResult()
+        if isinstance(statement, Update):
+            self.executed.append(
+                _Recorded(
+                    "update_ai_job" if statement.table.name == "intake_ai_jobs" else "update_other",
+                    statement,
+                )
+            )
+            return _FakeResult()
+        if isinstance(statement, Select):
+            froms = statement.get_final_froms()
+            table = getattr(froms[0], "name", None) if froms else None
+            self.executed.append(_Recorded(f"select_{table}", statement))
+            if table == "intake_pre_summaries":
+                return _FakeResult(row=_pre_summary_row(pre_summary_id=5, intake_id=1))
+            if table == "intake_intakes":
+                return _FakeResult(row=_intake_row(intake_id=1, patient_id=7))
+            return _FakeResult(row=None)
+        self.executed.append(_Recorded("other", statement))
+        return _FakeResult()
+
+    def _statements(self, kind: str) -> list[dict[str, object]]:
+        return [r.params for r in self.executed if r.kind == kind]
+
+    def ai_job_booking(self) -> dict[str, object]:
+        return self._statements("insert_ai_job")[0]
+
+    def ai_job_update(self) -> dict[str, object]:
+        return self._statements("update_ai_job")[0]
+
+    def outbox_types(self) -> list[str]:
+        return [r.params["event_type"] for r in self.executed if r.kind == "outbox"]
+
+    def outbox_payload(self, event_type: str) -> dict[str, object]:
+        for record in self.executed:
+            if record.kind == "outbox" and record.params["event_type"] == event_type:
+                payload: dict[str, object] = record.params["payload"]
+                return payload
+        raise AssertionError(f"no {event_type} event was published")
+
+
+class _UsageReportingGateway:
+    """A ``draft_rx`` stub that reports real usage, or raises, like a provider.
+
+    ``MockAiProvider`` reports zero tokens (it is the free, deterministic default),
+    so the pricing assertion needs a gateway that behaves like a paid one.
+    """
+
+    def __init__(
+        self,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        error: BaseException | None = None,
+    ) -> None:
+        self._input_tokens = input_tokens
+        self._output_tokens = output_tokens
+        self._error = error
+
+    @property
+    def effective_provider(self) -> str:
+        return "paid-provider"
+
+    @property
+    def effective_model(self) -> str:
+        return "mock-model"
+
+    async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
+        if self._error is not None:
+            raise self._error
+        return DraftRxResult(
+            rx_items=[RxItem(name="paid medication", dose="1 tablet", duration="5 days")],
+            confidence=0.91,
+            input_tokens=self._input_tokens,
+            output_tokens=self._output_tokens,
+        )
+
+
+@pytest.mark.asyncio
+async def test_record_composer_opened_writes_only_the_entry_event_in_its_own_transaction() -> None:
+    """The funnel entry is an arrival fact: one outbox row, no clinical write.
+
+    There is no intake row, no media ref and nothing else on this path - the
+    patient has opened a screen and typed nothing, so the seam must not invent a
+    capture. One ``engine.begin()`` proves the event rides its own transaction
+    rather than joining a capture that may never happen (ADR-0002 S1).
+    """
+    connection = _connection([_outbox_result()])
+    facade = _facade(connection)
+
+    await facade.record_composer_opened(patient_id=7, trace_id="a" * 32)
+
+    facade._engine.begin.assert_called_once()
+    outboxes = _outbox_inserts(connection)
+    assert [stmt.compile().params["event_type"] for stmt in outboxes] == [
+        EVENT_INTAKE_COMPOSER_OPENED
+    ]
+    # Nothing beyond the outbox row: an opened composer must not create an
+    # intake, a media ref, a pre-summary or an AI job.
+    assert _inserts(connection) == outboxes
+
+
+@pytest.mark.asyncio
+async def test_record_composer_opened_keys_the_event_on_the_patient_and_the_trace_scope() -> None:
+    """The payload is the patient plus the platform's trace-context session scope.
+
+    ``session_key`` and ``trace_id`` coincide today because the platform's only
+    session scope is the request - the full derivation and its limits are set out
+    on ``IntakeComposerOpenedPayload``; both are carried so the product ledger's
+    two columns keep their own meanings.
+    """
+    connection = _connection([_outbox_result()])
+    facade = _facade(connection)
+
+    await facade.record_composer_opened(patient_id=7, trace_id="a" * 32)
+
+    stmt = _outbox_array(connection, EVENT_INTAKE_COMPOSER_OPENED)
+    assert stmt is not None
+    payload = IntakeComposerOpenedPayload.model_validate(stmt.compile().params["payload"])
+    assert payload.patient_id == 7
+    assert payload.session_key == "a" * 32
+    assert payload.trace_id == "a" * 32
+
+
+@pytest.mark.asyncio
+async def test_submit_intake_still_writes_intake_started_at_capture_time() -> None:
+    """``intake.started`` is retained unchanged and is NOT the funnel's entry.
+
+    #721 keeps this event exactly where it was - on the capture transaction,
+    with its existing payload - and only stops calling it the funnel's entry
+    step. A composer-opened publish and a capture publish therefore write two
+    different event types, and capture alone still writes ``intake.started``.
+    """
+    connection = _connection(
+        [
+            _outbox_result(),
+            _intake_id_result(intake_id=9),
+            _outbox_result(),
+            _outbox_result(),
+        ]
+    )
+    facade = _facade(connection)
+
+    await facade.record_composer_opened(patient_id=7, trace_id="a" * 32)
+    await facade.submit_intake(patient_id=7, mode="text", language="hi", text="sir dard hai")
+
+    published = [stmt.compile().params["event_type"] for stmt in _outbox_inserts(connection)]
+    assert published == [
+        EVENT_INTAKE_COMPOSER_OPENED,
+        EVENT_INTAKE_STARTED,
+        EVENT_INTAKE_CAPTURED,
+    ]
+    # The retained event keeps its existing payload shape - no session key, no
+    # trace id bolted on - so nothing downstream of #369 has to change.
+    started = IntakeStartedPayload.model_validate(
+        _outbox_array(connection, EVENT_INTAKE_STARTED).compile().params["payload"]  # type: ignore[union-attr]
+    )
+    assert set(started.model_dump(mode="json")) == {"patient_id", "mode", "language"}
 
 
 @pytest.mark.asyncio
@@ -593,12 +836,7 @@ async def test_get_pre_summary_none_when_no_pre_summary_refs_exist() -> None:
 
 @pytest.mark.asyncio
 async def test_request_rx_draft_delegates_to_ai_gateway() -> None:
-    connection = _connection(
-        [
-            _FakeResult(row=_pre_summary_row(pre_summary_id=5, intake_id=1)),
-            _FakeResult(row=_intake_row(intake_id=1, patient_id=7)),
-        ]
-    )
+    connection = _DraftMeteringConnection()
     gateway = MockAiProvider(confidence_level="clean")
     facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
 
@@ -629,23 +867,221 @@ async def test_request_rx_draft_delegates_to_ai_gateway() -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_rx_draft_defaults_language_to_en_when_intake_missing() -> None:
-    connection = _connection(
-        [_FakeResult(row=_pre_summary_row(pre_summary_id=5, intake_id=1)), _FakeResult(row=None)]
-    )
-    gateway = MockAiProvider(confidence_level="clean")
-    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
-
-    result = await facade.request_rx_draft(doctor_input_ref=101, pre_summary_ref=5)
-
-    assert result.rx_items[0].name == "mock medication"
-    assert gateway.calls[0].context.language == "en"
-
-
-@pytest.mark.asyncio
 async def test_request_rx_draft_raises_when_pre_summary_missing() -> None:
     connection = _connection([_FakeResult(row=None)])
     facade = _facade(connection)
 
     with pytest.raises(IntakeNotFoundError, match="pre-summary 5 not found"):
         await facade.request_rx_draft(doctor_input_ref=101, pre_summary_ref=5)
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_raises_when_its_intake_is_missing() -> None:
+    """A draft needs its intake for the metered job row, so it fails closed.
+
+    The ``intake_ai_jobs`` FK points at the intake, so a pre-summary whose intake
+    cannot be read is a dead reference: drafting against it would consume provider
+    tokens with no row to record them on (PS-03, #722). The seam refuses instead.
+    """
+    connection = _connection(
+        [_FakeResult(row=_pre_summary_row(pre_summary_id=5, intake_id=1)), _FakeResult(row=None)]
+    )
+    gateway = MockAiProvider(confidence_level="clean")
+    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
+
+    with pytest.raises(IntakeNotFoundError, match="intake 1 not found"):
+        await facade.request_rx_draft(doctor_input_ref=101, pre_summary_ref=5)
+
+    assert gateway.calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_writes_a_metered_draft_job_and_publishes_completed() -> None:
+    """A draft is a metered egress like any other leg (PS-03, B4 #722).
+
+    The seam books a ``draft`` ``ai_jobs`` row before the provider call, then
+    finalizes it with the effective serving provider/model, the provider's
+    reported tokens priced into ``cost_paise``, the call duration and the
+    confidence - and publishes ``ai_job.completed`` on the same connection, in the
+    same transaction, so MOD-013 accumulates the drafting leg's spend like the
+    transcription and structuring legs.
+    """
+    connection = _DraftMeteringConnection()
+    gateway = MockAiProvider(confidence_level="clean")
+    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
+
+    await facade.request_rx_draft(
+        doctor_input_ref=101,
+        pre_summary_ref=5,
+        history_summary="case notes for context",
+    )
+
+    booking = connection.ai_job_booking()
+    assert booking["intake_id"] == 1
+    assert booking["task_type"] == "draft"
+    assert booking["status"] == "running"
+
+    completion = connection.ai_job_update()
+    assert completion["status"] == "completed"
+    assert completion["provider"] == "mock"
+    assert completion["model"] == "mock-model"
+    # The mock provider reports no usage (the real-usage price assertion lives in
+    # ``test_request_rx_draft_prices_the_completed_job_from_reported_tokens``).
+    assert completion["input_tokens"] == 0
+    assert completion["output_tokens"] == 0
+    assert completion["cost_paise"] == 0
+    assert completion["duration_ms"] >= 0
+
+    event = connection.outbox_payload(EVENT_AI_JOB_COMPLETED)
+    assert event["task_type"] == "draft"
+    assert event["ai_job_id"] == 42
+    assert event["intake_id"] == 1
+    assert event["patient_id"] == 7
+    # No doctor on the job's own key on this call: the caller named none, so the
+    # job's own key is null and per-actor attribution rides the
+    # ``intake.doctor_assigned`` edge (#720) rather than a cross-schema read
+    # (ADR-0003). The drafting leg, which names its doctor, is covered below.
+    assert event["doctor_id"] is None
+    # The booking announced the enqueue before the completion closed it (#729), so
+    # the leg's queue row has both ends.
+    assert connection.outbox_types() == [EVENT_AI_JOB_QUEUED, EVENT_AI_JOB_COMPLETED]
+    queued = connection.outbox_payload(EVENT_AI_JOB_QUEUED)
+    assert queued["ai_job_id"] == 42
+    assert queued["intake_id"] == 1
+    assert queued["task_type"] == "draft"
+    assert queued["patient_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_carries_the_drafting_doctor_on_the_job() -> None:
+    """The drafting doctor rides the job's own key (ADR-0027 D3).
+
+    The attribution EDGE wins over the job's own key, and the job's own key is
+    the fallback that covers a pick the edge table has not recorded yet - so the
+    drafting leg has to carry the doctor at all, or that fallback is a field
+    nobody ever fills. It gets the doctor from the CALLER, which owns the
+    identity, never by reading the care schema (ADR-0003). The transcription and
+    structuring legs stay null: they run before a patient picks a doctor.
+    """
+    connection = _DraftMeteringConnection()
+    gateway = MockAiProvider(confidence_level="clean")
+    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
+
+    await facade.request_rx_draft(
+        doctor_input_ref=101,
+        pre_summary_ref=5,
+        doctor_id=42,
+    )
+
+    event = connection.outbox_payload(EVENT_AI_JOB_COMPLETED)
+    assert event["doctor_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_prices_the_completed_job_from_reported_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cost is the provider's reported usage priced per model, never a constant.
+
+    The mock provider reports nothing, so this drives a gateway that reports real
+    usage against a deployment-priced model and asserts the paise figure comes out
+    of the pricing helper.
+    """
+    monkeypatch.setenv("AI_PRICING_TABLE", "mock-model:0.02:0.06")
+    connection = _DraftMeteringConnection()
+    gateway = _UsageReportingGateway(input_tokens=800, output_tokens=200)
+    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
+
+    await facade.request_rx_draft(doctor_input_ref=101, pre_summary_ref=5)
+
+    completion = connection.ai_job_update()
+    assert completion["input_tokens"] == 800
+    assert completion["output_tokens"] == 200
+    assert completion["cost_paise"] == 28
+    assert completion["cost_paise"] == compute_cost_paise(
+        "mock-model",
+        input_tokens=800,
+        output_tokens=200,
+        table=resolve_pricing_table(),
+    )
+    event = connection.outbox_payload(EVENT_AI_JOB_COMPLETED)
+    assert event["input_tokens"] == 800
+    assert event["output_tokens"] == 200
+    assert event["cost_paise"] == completion["cost_paise"]
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_failure_records_the_job_failed_and_still_raises() -> None:
+    """A failed draft is metered as failed, then the caller still sees the error.
+
+    The booking is finalized ``failed`` and ``ai_job.failed`` is published, so the
+    aggregate counts the attempt; the transaction COMMITS before the provider error
+    escapes, so the failure is durably recorded rather than rolled back with it.
+    No token count is invented: the gateway's failure carries no usage, so none is
+    written.
+    """
+    connection = _DraftMeteringConnection()
+    gateway = _UsageReportingGateway(
+        input_tokens=0,
+        output_tokens=0,
+        error=Ext002CallError("provider timed out after 3 attempts", retries_exhausted=True),
+    )
+    facade = IntakeFacade(engine=_commit_probing_engine(connection), ai_gateway=gateway)
+
+    with pytest.raises(Ext002CallError, match="provider timed out"):
+        await facade.request_rx_draft(doctor_input_ref=101, pre_summary_ref=5)
+
+    failure = connection.ai_job_update()
+    assert failure["status"] == "failed"
+    assert failure["error_message"] == "Ext002CallError"
+    assert "input_tokens" not in failure
+    assert "cost_paise" not in failure
+
+    event = connection.outbox_payload(EVENT_AI_JOB_FAILED)
+    assert event["task_type"] == "draft"
+    assert event["reason"] == "Ext002CallError"
+    assert event["patient_id"] == 7
+    assert event["doctor_id"] is None
+    # The enqueue came FIRST (#729): queue depth is ``enqueued - completed -
+    # failed``, so a job that only published its failure would never have been
+    # counted as queued and the depth arithmetic would have no enqueue term.
+    assert connection.outbox_types() == [EVENT_AI_JOB_QUEUED, EVENT_AI_JOB_FAILED]
+    queued = connection.outbox_payload(EVENT_AI_JOB_QUEUED)
+    # The enqueue names the SAME job the close names - that identity is what makes
+    # the pair a queue in and a queue out rather than two unrelated events.
+    assert queued["ai_job_id"] == event["ai_job_id"]
+    assert queued["task_type"] == "draft"
+    assert queued["patient_id"] == 7
+    # NO doctor reference on the enqueue: at enqueue time the drafting doctor lives
+    # in the care schema (ADR-0003), so carrying one would be a null nobody reads.
+    assert "doctor_id" not in queued
+    # The transaction committed on the way out of the facade, so the recorded
+    # failure is not rolled back with the exception.
+    assert connection.rolled_back is False
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_books_exactly_one_job_per_call() -> None:
+    """One draft is one metered row - booked before the call, never twice.
+
+    The insert lands first so the attempt has a row to be finalized onto, and a
+    second booking would double-count the call in the aggregate. Note what this
+    does NOT claim: the booking shares the call's transaction (the same shape the
+    transcribe and structure legs use), so what durability it buys is the
+    ``ai_job.failed`` record committing with the escaping error, which the test
+    above pins.
+    """
+    connection = _DraftMeteringConnection()
+    gateway = _UsageReportingGateway(
+        input_tokens=0,
+        output_tokens=0,
+        error=Ext002CallError("provider rejected the request", retries_exhausted=False),
+    )
+    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
+
+    with pytest.raises(Ext002CallError):
+        await facade.request_rx_draft(doctor_input_ref=101, pre_summary_ref=5)
+
+    kinds = [r.kind for r in connection.executed]
+    assert kinds.count("insert_ai_job") == 1
+    assert kinds.index("insert_ai_job") < kinds.index("update_ai_job")

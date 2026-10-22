@@ -934,6 +934,13 @@ class PrescriptionFacade:
             doctor_input_ref=int(input_row.id),
             pre_summary_ref=int(case_row.pre_summary_id),
             history_summary=history_summary,
+            # The drafting doctor is THIS module's own fact: the doctor who owns
+            # the case is the one whose id the metered draft job is attributed to.
+            # It is handed over with the call because the intake module cannot
+            # read the care schema (ADR-0003) - and the job's own key is the
+            # fallback that covers a pick the attribution edge has not recorded
+            # yet (ADR-0027 D3).
+            doctor_id=doctor_id,
         )
 
         snapshot: DraftSnapshot = {

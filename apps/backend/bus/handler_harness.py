@@ -27,7 +27,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 from bus.envelope import Envelope
-from bus.ledger import record_consumed_event
+from bus.ledger import HANDLER_RESULT_ACTOR_KEY, record_consumed_event
 
 _T = TypeVar("_T", bound=BaseModel)
 
@@ -49,11 +49,21 @@ async def run_handler(
     handler_fn: Callable[[AsyncConnection, _T], Awaitable[None]],
     handler_name: str,
     schema: str,
+    actor_key_of: Callable[[_T], str | None] | None = None,
 ) -> None:
     """Run an event handler with the standard engine-lifecycle boilerplate.
 
     Handles payload extraction, engine creation, ``record_consumed_event``,
     delivery check, and engine disposal. The callback does the unique work.
+
+    ``actor_key_of`` is an OPTIONAL projection from the re-validated payload to a
+    pseudonymous actor key, for a consumer that counts distinct actors from its own
+    delivery record rather than from a table of its own (#729's recent-activity
+    figure). It is a function rather than a value because the ledger row is written
+    BEFORE the handler runs, so the key has to be derived from the payload this
+    harness has already validated - and returning ``None`` omits the key entirely.
+    The key is a one-way hash, never an identity reference, so the ledger stays
+    PHI-free; a handler with no actor behind it simply leaves the projection off.
     """
     raw_payload = envelope.payload
     payload = (
@@ -61,6 +71,11 @@ async def run_handler(
         if isinstance(raw_payload, payload_class)
         else payload_class.model_validate(raw_payload.model_dump())
     )
+    handler_result: dict[str, object] = {"handler": handler_name}
+    if actor_key_of is not None:
+        actor = actor_key_of(payload)
+        if actor is not None:
+            handler_result[HANDLER_RESULT_ACTOR_KEY] = actor
     engine = _delivery_engine()
     try:
         async with engine.begin() as connection:
@@ -68,7 +83,7 @@ async def run_handler(
                 connection,
                 schema,
                 envelope,
-                handler_result={"handler": handler_name},
+                handler_result=handler_result,
             )
             if not delivered:
                 return

@@ -1,0 +1,808 @@
+"""MOD-013: the product event ledger's funnel-step registry and its daily rollup (B4e #739).
+
+Spec #717 decisions 22-26 and 41. Two things live here, and neither of them is a
+table:
+
+* **The funnel-step registry.** A step is a :class:`ProductStep` entry naming the
+  event it is recorded from, the outcome that event means, the outcomes the step
+  MAY hold, and the actor kind it is attributed to. Registering one is how a LATER
+  phase adds a step - a single :func:`register_product_step` call, no migration, no
+  adapter edit, no consumer handler written by hand. The ledger and the daily
+  rollup are generic over the registry, which is what makes that true rather than
+  aspirational: nothing anywhere enumerates the steps.
+
+* **The daily rollups' pure core.** :func:`build_product_daily` recomputes one day's
+  per-step aggregates from that day's ledger rows, and :func:`build_product_actor_daily`
+  recomputes the same day's per-ACTOR aggregates, both in full, so the adapter can
+  upsert rather than increment.
+
+**Why the rollups exist at all.** The free Grafana tier keeps fourteen days, so a
+monthly active-user figure or a thirty-day retention cohort is not a query a vendor
+can answer - the data is gone before the question is asked. Those numbers have to
+live in the system of record, and they cannot live in the raw ledger either: a
+thirty-day window over a per-event table scans thirty days of events. So the ledger
+is the append-only record and the daily aggregates are what a long window reads
+(decisions 22, 24-26).
+
+**Two grains, because distinctness dies at the first one.** The per-step grain -
+``(funnel, step, outcome)`` - answers "which step loses people", and its
+``actor_count`` answers "how many distinct people were behind this step today".
+Neither can answer "did the people who arrived on day D come back on day D+7",
+because a retention cohort is a question about IDENTITIES spanning two days and a
+stored distinct count has already thrown the identities away: the only way back is
+to sum, and summing double-counts exactly the people who got furthest. So the second
+grain is per ``(actor_kind, actor_key)`` and per day (B4g #742), one row for each
+person who did a qualifying clinical action that day, and the cohort figures are
+derived from that row SET at read time rather than stored - a stored retention rate
+would be a second source of truth that goes stale the moment a day is recomputed.
+
+**The outcome vocabulary is closed.** ``completed``, ``abandoned``, ``errored`` and
+``re_recorded``, spelled as a ``Literal`` so a fourth state is a type error at the
+registration site rather than a CHECK-constraint violation raised from the database
+halfway through a consumer transaction. Two of those four are RULES rather than
+labels:
+
+* a degraded fallback is **errored**, never a quiet abandonment, so a broken path can
+  never be read as a normal drop-off (decision 24);
+* a re-record is **its own outcome**, so a corrected attempt is not scored as a
+  failure of the original (decision 25).
+
+**Active actors are derived from this ledger, never from a login.** There is no
+authentication, session or logout event in the registry and adding one is out of
+scope (decision 26, spec Out of Scope). Every actor key on a row comes from an
+identity reference the producer already publishes on a real clinical action, hashed
+through :func:`~modules.observability.domain.pseudonym.actor_key`, so "who was
+active" means "who did something clinical" by construction rather than by a filter
+some future read has to remember to apply.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel
+
+from bus.events import (
+    EVENT_CASE_CLOSED,
+    EVENT_CASE_CONSULT_COMPLETE,
+    EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
+    EVENT_INTAKE_RETRY_REQUESTED,
+    EVENT_PRE_SUMMARY_READY,
+    EVENT_PRESCRIPTION_APPROVED,
+    EVENT_PRESCRIPTION_DRAFT_CREATED,
+)
+from modules.observability.domain.pseudonym import ActorKind
+from observability.trace_ids import clamp_trace_id
+
+#: The outcome vocabulary, as constants for callers that compare or map. Annotated
+#: as the type rather than left as ``str`` so passing one of them to a step cannot
+#: fail the ``Literal`` check - the same trick ``domain.pseudonym`` uses for
+#: ``ACTOR_KIND_PATIENT``.
+PRODUCT_OUTCOME_COMPLETED: ProductOutcome = "completed"
+PRODUCT_OUTCOME_ABANDONED: ProductOutcome = "abandoned"
+PRODUCT_OUTCOME_ERRORED: ProductOutcome = "errored"
+PRODUCT_OUTCOME_RE_RECORDED: ProductOutcome = "re_recorded"
+
+#: The same vocabulary as a TYPE, so a step cannot declare or record a fifth state.
+#: Spelled as literals rather than built from the constants above, matching how
+#: ``domain.consumer`` types ``AiJobSpendStatus`` and how ``domain.pseudonym`` types
+#: ``ActorKind``: one list, written out, that a reader can check against the
+#: migration's CHECK constraint by eye.
+ProductOutcome = Literal["completed", "abandoned", "errored", "re_recorded"]
+
+#: The same vocabulary as an ORDERED TUPLE, for the places that have to enumerate it
+#: rather than type it: the ``/product/funnel`` route's ``Literal`` cannot be built
+#: from the ``Literal`` above, and a test asserts the two agree so a fifth state
+#: cannot reach the wire without reaching this list first. The migration's CHECK
+#: constraint is the third copy and this one is the one a reader can check by eye
+#: against :data:`PRODUCT_OUTCOME_*`.
+PRODUCT_OUTCOMES: tuple[ProductOutcome, ...] = (
+    PRODUCT_OUTCOME_COMPLETED,
+    PRODUCT_OUTCOME_ABANDONED,
+    PRODUCT_OUTCOME_ERRORED,
+    PRODUCT_OUTCOME_RE_RECORDED,
+)
+
+#: The funnel the registry describes today: a patient opening the composer through
+#: to a prescription approved or the case closed. Declared as data rather than
+#: threaded through every entry so a second funnel is a second constant, not a
+#: second rewrite.
+FUNNEL_INTAKE = "intake"
+
+#: The two steps that legitimately END a workflow, named rather than matched on
+#: position. A funnel that ran to an issued e-prescription and a funnel that ended
+#: with the case closed are BOTH successes, and a reader has to be able to tell them
+#: apart rather than see one folded into the other's number (#717 decision 23). They
+#: are named because the two outcomes are a business fact - an issued prescription and
+#: a closed case are different things a practice counts - and not a position in a
+#: list, so a step inserted before them must not silently relabel them.
+FUNNEL_TERMINAL_PRESCRIPTION = "prescription_approved"
+FUNNEL_TERMINAL_CASE_CLOSED = "case_closed"
+
+
+class ProductStepPayload(BaseModel):
+    """The base every funnel-step mirror inherits: the fields the ledger writes.
+
+    A superset, and deliberately so. ``run_handler`` re-validates the dispatched
+    producer payload into the mirror before the effect runs, so a mirror that
+    declared the producer's exact required fields would raise on any producer that
+    omits one - and an event this module must consume must never be the reason a
+    consumer transaction dies. Widening to ``None`` is the ADR-0003 pattern already
+    used by ``AiJobQueuedTelemetryPayload.task_type``.
+
+    What a missing field costs is bounded and honest: no ``trace_id`` means the row
+    carries a derived key instead (see :func:`product_event_keys`), and no
+    ``patient_id`` on a machine-driven step means the row records no actor at all -
+    which is what ``observability_product_events``' nullable actor pair is for.
+    """
+
+    #: Published by the producer when the request was traced. ``None`` for a
+    #: producer that does not publish one today; a producer that starts publishing
+    #: it needs no consumer change.
+    trace_id: str | None = None
+    #: The journey/session scope the producer published, when it has one.
+    session_key: str | None = None
+    #: The identity references a funnel step is attributed to. Hashed before they
+    #: are written, never stored raw.
+    patient_id: int | None = None
+    doctor_id: int | None = None
+    #: How long the step's own action took, in SECONDS, when the producer measured
+    #: it. Converted to integer milliseconds at the storage seam.
+    duration_s: float | None = None
+
+
+@dataclass(frozen=True)
+class ProductStep:
+    """A registry entry: one funnel step, the event it is recorded from, and its shape.
+
+    This is the whole of what a step IS. Everything else - which event types get a
+    consumer handler, what a ledger row carries, what a daily row aggregates - is
+    driven from here, which is what makes adding a step a registry line rather than
+    a schema change.
+
+    ``allowed_outcomes`` is the step's DECLARED vocabulary: the outcomes a reader may
+    filter this step by. ``outcome`` is what this subscription records for the one
+    event it is driven by, and it must be one of the declared outcomes - the guard
+    in :func:`register_product_step` is what makes a step that declares a vocabulary
+    it never uses impossible.
+    """
+
+    funnel: str
+    step: str
+    event_type: str
+    outcome: ProductOutcome
+    allowed_outcomes: tuple[ProductOutcome, ...]
+    #: Which actor this step is attributed to, or ``None`` for a step a machine
+    #: finished with no human behind it. A step that names a kind MUST have the
+    #: matching reference on its mirror, so an active-actor count can never be built
+    #: from a row that cannot say who it was.
+    actor_kind: ActorKind | None = None
+    #: Whether this step ENDS a workflow rather than leading to another one. Declared
+    #: per step because the intake funnel has TWO legitimate ends - the prescription
+    #: approved and the case closed - and a reader walking the funnel needs to know
+    #: that they branch from the last step before them rather than sit in a line
+    #: behind each other. Without it, ``case_closed`` would be scored as a conversion
+    #: of ``prescription_approved``, and a case closed without one would read as the
+    #: step after an issued prescription (#717 decision 23).
+    terminal: bool = False
+
+
+#: The live registry, in FUNNEL order - registration order IS the order a patient
+#: walks the steps. ``(funnel, step) -> step``, which is the ledger's own grain
+#: minus the outcome and the date.
+PRODUCT_STEP_REGISTRY: dict[tuple[str, str], ProductStep] = {}
+
+#: ``event_type -> step``. One entry per event type, enforced by
+#: :func:`register_product_step`, so one delivery can never be recorded as two
+#: steps of the same funnel.
+_EVENT_STEP_INDEX: dict[str, ProductStep] = {}
+
+#: Words that make an event an AUTHENTICATION, session or logout signal rather than a
+#: clinical action. Matched against a NAME SEGMENT - see :func:`_non_clinical_word`
+#: for why - so the platform's own namespacing cannot hide one and a clinical word that
+#: merely starts the same way cannot trip the rule.
+#:
+#: This is a REFUSAL, not a filter, and it exists because "who was active" is derived
+#: from this registry (decision 26). A login counts a person who opened a browser; a
+#: qualifying clinical action counts a person who did the work. The moment a login
+#: event could be registered, every adoption figure would quietly become a login
+#: count while still calling itself an active user - so the registry refuses the shape
+#: outright and the answer to "we need a login event for this" is a clinical action,
+#: which is what already exists.
+#:
+#: ``credential`` is here for the same reason and not by accident of spelling: a
+#: partner's credential lifecycle is an activation signal, never a care action, and
+#: counting it would inflate the doctor base with partners who never treated anyone.
+NON_CLINICAL_EVENT_WORDS: tuple[str, ...] = (
+    "auth",
+    "credential",
+    "login",
+    "logout",
+    "otp",
+    "password",
+    "session",
+)
+
+#: ``word`` plus the separator that opens a qualified name - ``auth_failed`` is an
+#: authentication attempt, ``authorized`` is an e-prescription that went out. Built
+#: from the vocabulary rather than written out so adding a word cannot add a second,
+#: differently-spelled list.
+_NON_CLINICAL_SEGMENT_PREFIXES: tuple[str, ...] = tuple(
+    f"{word}_" for word in NON_CLINICAL_EVENT_WORDS
+)
+
+
+def non_clinical_event_word(event_type: str) -> str | None:
+    """The :data:`NON_CLINICAL_EVENT_WORDS` entry ``event_type`` names, or ``None``.
+
+    Matched per SEGMENT - an exact segment, or one that opens with ``word_`` - and
+    lower-cased on both sides so the vocabulary is spelled in one case and a
+    differently-cased publisher is caught rather than quietly admitted.
+
+    Segment matching rather than a free substring is the whole design here. A bare
+    ``"auth" in event_type`` also refuses ``prescription.authorized`` and
+    ``pharmacy.authority``, and a prefix rule over the WHOLE name misses
+    ``patient.auth_failed`` because the platform namespaces authentication under
+    ``patient.``. Splitting on the dot gets both right: ``auth_failed`` is a
+    qualified ``auth``, and ``authorized`` is neither ``auth`` nor ``auth_``-shaped.
+
+    The line it does draw is at ``word_``: an event that calls itself
+    ``session_``-something is refused, because a session in this platform is an
+    authentication session and a clinical step wanting that word has to say what kind
+    of session it is (``counselling.held``) before it may join the registry.
+    """
+    for segment in event_type.lower().split("."):
+        if segment in NON_CLINICAL_EVENT_WORDS:
+            return segment
+        for prefix in _NON_CLINICAL_SEGMENT_PREFIXES:
+            if segment.startswith(prefix):
+                return prefix.removesuffix("_")
+    return None
+
+
+def register_product_step(step: ProductStep) -> ProductStep:
+    """Add ``step`` to the registry and return it.
+
+    Two claims are refused rather than silently allowed, because each one quietly
+    corrupts a funnel number:
+
+    * a duplicate ``(funnel, step)`` - two entries would write two rows for one
+      step and double its count, exactly the failure the rollup's full-row recompute
+      cannot repair once it has landed;
+    * a second entry for an event type already claimed - one delivery is one moment
+      of one journey, so recording it as two steps inflates both conversion and
+      abandonment. A product that genuinely needs one event in two funnels gets two
+      registries, which is a decision to make on purpose rather than by accident.
+
+    A declared ``outcome`` outside ``allowed_outcomes`` is refused too: a step whose
+    vocabulary and recorded outcome disagree describes itself one way and is counted
+    another, which is how "which step loses people" quietly answers a different
+    question from the one asked. That check keeps its original position, so a step
+    that breaks two rules at once still fails on the one that predates this ticket.
+
+    An event carrying a :data:`NON_CLINICAL_EVENT_WORDS` segment is refused for a
+    third reason: the registry is the ONLY definition of what counts as activity
+    (decision 26), so an authentication, session or logout event registered here
+    would not add a signal - it would REPLACE the clinical one every adoption figure
+    is built from.
+    """
+    scope = (step.funnel, step.step)
+    if scope in PRODUCT_STEP_REGISTRY:
+        raise ValueError(f"product step {step.funnel}.{step.step} is already registered")
+    if step.event_type in _EVENT_STEP_INDEX:
+        existing = _EVENT_STEP_INDEX[step.event_type]
+        raise ValueError(
+            f"event type {step.event_type!r} is already registered as product step "
+            f"{existing.funnel}.{existing.step}"
+        )
+    non_clinical = non_clinical_event_word(step.event_type)
+    if step.outcome not in step.allowed_outcomes:
+        raise ValueError(
+            f"product step {step.funnel}.{step.step} records outcome {step.outcome!r}, "
+            "which it does not declare in allowed_outcomes"
+        )
+    if non_clinical is not None:
+        raise ValueError(
+            f"event type {step.event_type!r} names {non_clinical!r} and is not a "
+            "qualifying clinical action; active users count clinical activity, not "
+            "authentication (decision 26)"
+        )
+    PRODUCT_STEP_REGISTRY[scope] = step
+    _EVENT_STEP_INDEX[step.event_type] = step
+    return step
+
+
+def product_steps() -> tuple[ProductStep, ...]:
+    """Every registered step, in funnel order (registration order)."""
+    return tuple(PRODUCT_STEP_REGISTRY.values())
+
+
+def product_step_for_event(event_type: str) -> ProductStep | None:
+    """The step ``event_type`` is recorded as, or ``None`` when it is not consumed."""
+    return _EVENT_STEP_INDEX.get(event_type)
+
+
+def is_active_actor_step(step: ProductStep) -> bool:
+    """Whether this step's rows make their actor an ACTIVE USER.
+
+    **A qualifying clinical action, never a login** (decision 26). The test is the
+    step's own ``actor_kind``: a step that names one is attributed to a person who
+    did clinical work - a patient who opened the composer or submitted an intake, a
+    doctor who completed a consult, drafted or approved a prescription - and a step
+    that names none (``re_recorded`` today) is a machine finishing a step on an
+    intake's behalf and contributes no actor.
+
+    Stating it as a predicate over the registry rather than as a filter a read
+    remembers is the whole point: "who was active" cannot drift into "who logged in"
+    because there is no login to count (:data:`NON_CLINICAL_EVENT_WORDS` refuses the
+    registration), and a step added later becomes a qualifying action by declaring an
+    actor kind, with no edit to any read.
+    """
+    return step.actor_kind is not None
+
+
+def active_actor_steps() -> tuple[ProductStep, ...]:
+    """Every registered step whose rows count toward an active-user figure.
+
+    Across all funnels, in registration order: "was anyone here" is a question about
+    the product, not about one funnel, and a second funnel's clinical steps have to
+    count without a read being taught about them.
+    """
+    return tuple(step for step in product_steps() if is_active_actor_step(step))
+
+
+def active_actor_step_names() -> tuple[str, ...]:
+    """The bare ``step`` names of :func:`active_actor_steps`, for a SQL ``IN`` list.
+
+    The registry's own vocabulary rather than a literal list, which is what makes a
+    new step a registry line: the active-user read reads these names off the registry
+    rather than naming steps itself. Empty when nothing qualifies, which the read
+    treats as "nobody was active" rather than as "no filter" - the two must not
+    collapse, or an empty registry would silently widen the set to every row.
+    """
+    return tuple(step.step for step in active_actor_steps())
+
+
+#: Separates the derived key from every other digest in the codebase, so a step key
+#: can never collide with an actor key or an AI-job spend digest.
+_STEP_KEY_DOMAIN = "caresetu.observability.product.step.v1"
+
+
+def derived_step_key(event_id: UUID) -> str:
+    """The stable trace/session key for a step whose producer published no trace.
+
+    Only ``intake.composer_opened`` publishes a ``trace_id`` today (#721); the
+    intake and care producers do not carry one on the events this module consumes,
+    and widening their payload contracts is theirs to make, not this ticket's to
+    invent. The ledger's ``trace_id``/``session_key`` are NOT NULL precisely because
+    an untraceable row is not useful - so a step with no published trace gets a
+    derived key rather than an empty column.
+
+    What it IS: a deterministic function of the delivered ``event_id``, so it is the
+    same on every replay and joins this row to its own delivery. What it is NOT: a
+    tracing-backend identifier, and nothing offers a deeplink built from one. When a
+    producer starts publishing a trace the published value replaces it on the next
+    delivery, with no schema change and no read-side branch.
+    """
+    return hashlib.sha256(f"{_STEP_KEY_DOMAIN}:{event_id}".encode()).hexdigest()
+
+
+def product_event_keys(payload: ProductStepPayload, *, event_id: UUID) -> tuple[str, str]:
+    """The ``(trace_id, session_key)`` pair one delivery's ledger row carries.
+
+    The published trace wins, so the join key the operator jumps to the tracing
+    backend with is the real one whenever the producer published it. The session key
+    falls back to the trace, which is the platform's own current session scope
+    (#721): ``session_key`` and ``trace_id`` coincide for a traced step, and stay
+    separate columns because they answer separate questions - which request to jump
+    to versus which steps belong to one session.
+
+    A step-to-step gap is therefore measured from the ledger's own timestamps, never
+    assumed from this key: it groups one request, not one journey.
+
+    Both halves are CLAMPED to the width the columns have (``VARCHAR(64)``), not
+    validated. The gateway already mints or rejects an unsafe client id before it
+    reaches here, so the clamp is the net under that gate: a producer that
+    publishes an over-long id would otherwise raise on length and take the whole
+    consumer transaction with it, losing every row in the batch. A truncated id
+    still correlates the rows of one step, which is what this key is for.
+    """
+    derived = derived_step_key(event_id)
+    trace_id = (payload.trace_id or "").strip() or derived
+    session_key = (payload.session_key or "").strip() or trace_id
+    return clamp_trace_id(trace_id), clamp_trace_id(session_key)
+
+
+def duration_ms_of(payload: ProductStepPayload) -> int | None:
+    """The step's own duration in whole milliseconds, or ``None`` when unmeasured.
+
+    Not every step marks a span, and a NULL says so; a zero would read as a step
+    that took no time at all. Negative durations cannot happen and are clamped
+    rather than rejected, because the column's own CHECK would reject them and the
+    whole transaction with them.
+    """
+    if payload.duration_s is None:
+        return None
+    return max(0, round(payload.duration_s * 1000))
+
+
+@dataclass(frozen=True)
+class ProductEventFact:
+    """One ``observability_product_events`` row, as the daily rollup reads it.
+
+    The ledger row reduced to what the aggregate needs: enough to count an event,
+    count the actor behind it, and total its duration, and nothing else.
+    """
+
+    occurred_at: datetime
+    funnel: str
+    step: str
+    outcome: ProductOutcome
+    actor_kind: ActorKind | None
+    actor_key: str | None
+    duration_ms: int | None
+
+
+@dataclass(frozen=True)
+class ProductDaily:
+    """One recomputed ``(funnel, step, outcome)`` day row of ``observability_product_daily``.
+
+    The table's UNIQUE key is ``(event_date, funnel, step, outcome)``;
+    ``event_date`` is supplied by the adapter, so this value carries the other three
+    plus the four counters.
+
+    **Counters only.** Abandonment rate, step-to-step conversion and success rate
+    are read-time divisions over exactly these columns (#740), so none of them is a
+    column here: a stored rate would be a second source of truth that goes stale the
+    moment the day is recomputed.
+
+    ``actor_count`` counts DISTINCT actor keys, which is not the same as the event
+    count - one patient who opened the composer and submitted is two events and one
+    active actor - so it is derived here rather than being summed from a column that
+    does not exist.
+    """
+
+    funnel: str
+    step: str
+    outcome: ProductOutcome
+    events: int
+    actor_count: int
+    total_duration_ms: int
+    duration_samples: int
+
+
+@dataclass
+class _ScopeTotals:
+    """The running counters for one ``(funnel, step, outcome)`` scope."""
+
+    events: int = 0
+    actors: set[str] = field(default_factory=set)
+    total_duration_ms: int = 0
+    duration_samples: int = 0
+
+    def add(self, fact: ProductEventFact) -> None:
+        self.events += 1
+        if fact.actor_kind is not None and fact.actor_key is not None:
+            # Both or neither, mirroring the ledger's own CHECK: a key with no kind
+            # behind it would inflate the distinct-actor count with something that is
+            # not an actor.
+            self.actors.add(fact.actor_key)
+        if fact.duration_ms is not None:
+            self.total_duration_ms += fact.duration_ms
+            self.duration_samples += 1
+
+
+def _facts_on(events: Sequence[ProductEventFact], target_date: date) -> Sequence[ProductEventFact]:
+    """The facts that happened ON ``target_date``, in UTC.
+
+    The adapter selects one day already, so this is a guard rather than a filter: a
+    row filed under the wrong day would otherwise be counted into whichever day the
+    pass happened to be rolling, and two passes would then disagree about it.
+    """
+    return tuple(fact for fact in events if fact.occurred_at.date() == target_date)
+
+
+def build_product_daily(
+    *, events: Sequence[ProductEventFact], target_date: date
+) -> tuple[ProductDaily, ...]:
+    """Recompute one day's per-step product aggregate from that day's ledger rows.
+
+    Every returned row is the WHOLE figure for its scope, derived from the day's
+    source rows and nothing else: the adapter upserts it on the table's UNIQUE key,
+    so a second pass over the same data lands on the identical row rather than adding
+    to it. That is the property a late-arriving funnel step depends on - an
+    incrementing rollup could never add a step that was written after the first pass
+    ran.
+
+    The output is sorted by ``(funnel, step, outcome)`` so two passes over the same
+    rows produce the same rows in the same order - order must not depend on arrival
+    for a recompute to be verifiable.
+    """
+    totals: dict[tuple[str, str, ProductOutcome], _ScopeTotals] = {}
+    for fact in _facts_on(events, target_date):
+        scope = (fact.funnel, fact.step, fact.outcome)
+        totals.setdefault(scope, _ScopeTotals()).add(fact)
+    return tuple(
+        ProductDaily(
+            funnel=scope[0],
+            step=scope[1],
+            outcome=scope[2],
+            events=total.events,
+            actor_count=len(total.actors),
+            total_duration_ms=total.total_duration_ms,
+            duration_samples=total.duration_samples,
+        )
+        for scope, total in sorted(totals.items())
+    )
+
+
+@dataclass(frozen=True)
+class ProductActorDaily:
+    """One recomputed per-actor day row of ``observability_product_actor_daily``.
+
+    The table's UNIQUE key is ``(event_date, actor_kind, actor_key)``; ``event_date``
+    is supplied by the adapter, so this value carries the other two plus the counter.
+
+    **Presence is the whole payload.** A cohort read asks whether this person was
+    here on some later day, and the answer is the existence of this row - so
+    ``events`` is carried for context and nothing divides by it. It is the count of
+    qualifying clinical actions the actor performed that day, which is not the same
+    number as ``1``: a patient who opened the composer and then submitted is two
+    events and still one cohort member.
+
+    ``actor_kind`` and ``actor_key`` are NOT nullable here, unlike
+    :class:`ProductEventFact`: this grain exists to hold people, so a fact with no
+    actor behind it is not a smaller row here, it is no row at all.
+    """
+
+    actor_kind: ActorKind
+    actor_key: str
+    events: int
+
+
+def build_product_actor_daily(
+    *, events: Sequence[ProductEventFact], target_date: date
+) -> tuple[ProductActorDaily, ...]:
+    """Recompute one day's per-actor aggregate from that day's ledger rows (B4g #742).
+
+    The actor-grain companion to :func:`build_product_daily`, and the table a
+    seven- and thirty-day retention cohort is derived from at read time. Same input,
+    same recompute-in-full contract: every returned row is the WHOLE figure for its
+    actor on its day, the adapter upserts on the table's UNIQUE key, and a second pass
+    over the same rows lands on the identical row instead of adding to it.
+
+    **Only the registry's qualifying clinical steps reach this table, and that is
+    what keeps one number's cohorts and another's DAU describing the same people.**
+    The set comes from :func:`active_actor_step_names` rather than from a list
+    written here, so it is the same definition ``/product/active-users`` counts over
+    (decision 26). A step a machine finished records no actor and is dropped by the
+    ``actor_kind``/``actor_key`` pair check rather than by a step-name filter, so a
+    machine row can never enter a cohort under some other name.
+
+    Output is sorted by ``(actor_kind, actor_key)`` for the same reason
+    :func:`build_product_daily` sorts: a recompute that produced its rows in planner
+    order would not be verifiable across two passes.
+    """
+    qualifying = active_actor_step_names()
+    counts: dict[tuple[ActorKind, str], int] = {}
+    for fact in _facts_on(events, target_date):
+        if fact.step not in qualifying:
+            continue
+        if fact.actor_kind is None or fact.actor_key is None:
+            # Both or neither, mirroring the ledger's own CHECK and the actor set's
+            # definition: a machine step contributes no person.
+            continue
+        key = (fact.actor_kind, fact.actor_key)
+        counts[key] = counts.get(key, 0) + 1
+    return tuple(
+        ProductActorDaily(actor_kind=kind, actor_key=actor_key, events=events_seen)
+        for (kind, actor_key), events_seen in sorted(counts.items())
+    )
+
+
+# --------------------------------------------------------------------- the registry
+
+#: The intake funnel, declared in the order a patient walks it. Every entry below is
+#: one registry line; adding a ninth step is one more.
+
+register_product_step(
+    ProductStep(
+        funnel=FUNNEL_INTAKE,
+        step="composer_opened",
+        event_type=EVENT_INTAKE_COMPOSER_OPENED,
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        # All three, because this is the funnel's HEAD: a patient who opens the
+        # composer and walks away is an ABANDONMENT of the entry step, and a capture
+        # that fails under them is an ERROR - the two must never share a number.
+        allowed_outcomes=(
+            PRODUCT_OUTCOME_COMPLETED,
+            PRODUCT_OUTCOME_ABANDONED,
+            PRODUCT_OUTCOME_ERRORED,
+        ),
+        actor_kind="patient",
+    )
+)
+
+register_product_step(
+    ProductStep(
+        funnel=FUNNEL_INTAKE,
+        step="intake_captured",
+        event_type=EVENT_INTAKE_CAPTURED,
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED, PRODUCT_OUTCOME_ERRORED),
+        actor_kind="patient",
+    )
+)
+
+register_product_step(
+    ProductStep(
+        funnel=FUNNEL_INTAKE,
+        step="pre_summary_ready",
+        event_type=EVENT_PRE_SUMMARY_READY,
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED, PRODUCT_OUTCOME_ERRORED),
+        actor_kind="patient",
+    )
+)
+
+register_product_step(
+    ProductStep(
+        funnel=FUNNEL_INTAKE,
+        step="consult_complete",
+        event_type=EVENT_CASE_CONSULT_COMPLETE,
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        allowed_outcomes=(
+            PRODUCT_OUTCOME_COMPLETED,
+            PRODUCT_OUTCOME_ABANDONED,
+            PRODUCT_OUTCOME_ERRORED,
+        ),
+        # The DOCTOR, not the patient: this is the clinical action that makes an
+        # active-actor count a people-shaped one rather than a login count in
+        # disguise, and a doctor's day has to be countable for that to be true.
+        actor_kind="doctor",
+    )
+)
+
+register_product_step(
+    ProductStep(
+        funnel=FUNNEL_INTAKE,
+        step="prescription_drafted",
+        event_type=EVENT_PRESCRIPTION_DRAFT_CREATED,
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED, PRODUCT_OUTCOME_ERRORED),
+        actor_kind="doctor",
+    )
+)
+
+register_product_step(
+    ProductStep(
+        funnel=FUNNEL_INTAKE,
+        step="prescription_approved",
+        event_type=EVENT_PRESCRIPTION_APPROVED,
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        allowed_outcomes=(PRODUCT_OUTCOME_COMPLETED,),
+        actor_kind="doctor",
+        # One of the funnel's two legitimate ENDS: the prescription was issued. A step
+        # that declares only ``completed`` cannot end any other way, which is what
+        # makes it a clean success terminal rather than a branch.
+        terminal=True,
+    )
+)
+
+register_product_step(
+    ProductStep(
+        funnel=FUNNEL_INTAKE,
+        step="case_closed",
+        event_type=EVENT_CASE_CLOSED,
+        outcome=PRODUCT_OUTCOME_COMPLETED,
+        allowed_outcomes=(
+            PRODUCT_OUTCOME_COMPLETED,
+            PRODUCT_OUTCOME_ABANDONED,
+            PRODUCT_OUTCOME_ERRORED,
+        ),
+        actor_kind="doctor",
+        # The OTHER legitimate end, and a case closed without an e-prescription is a
+        # completed consultation rather than a drop-off. It is terminal for the same
+        # reason ``prescription_approved`` is: nothing follows it in the walk.
+        terminal=True,
+    )
+)
+
+register_product_step(
+    ProductStep(
+        funnel=FUNNEL_INTAKE,
+        step="re_recorded",
+        event_type=EVENT_INTAKE_RETRY_REQUESTED,
+        outcome=PRODUCT_OUTCOME_RE_RECORDED,
+        # Exactly one, by decision 25. The re-record is never scored against the
+        # original attempt, so a step whose whole vocabulary were ``completed``
+        # and ``errored`` would be counting a correction as a failure.
+        allowed_outcomes=(PRODUCT_OUTCOME_RE_RECORDED,),
+        # No actor kind: ``intake.retry_requested`` carries no identity reference -
+        # it names an intake, a round and a reason. The ledger's nullable actor pair
+        # exists for exactly this, and inventing a patient key would be inventing an
+        # identity the producer never asserted.
+        actor_kind=None,
+    )
+)
+
+
+# ------------------------------------------------------------- the funnel's shape
+
+
+def registered_steps(funnel: str = FUNNEL_INTAKE) -> tuple[ProductStep, ...]:
+    """Every step registered for ``funnel``, in registration order.
+
+    The whole registry as one question asks it: :func:`funnel_stages` answers "which
+    steps does a reader walk" and this answers "which steps exist", and a reader that
+    needs the second - to count every row the ledger holds for the funnel, including
+    the ones no journey walks through - must not re-derive it by filtering the registry
+    itself.
+    """
+    return tuple(step for (scope, _), step in PRODUCT_STEP_REGISTRY.items() if scope == funnel)
+
+
+def funnel_stages(funnel: str = FUNNEL_INTAKE) -> tuple[ProductStep, ...]:
+    """The steps a reader WALKS, in the order they are walked.
+
+    Not the same list as :func:`product_steps`, for two reasons, and both of them are
+    what keeps a funnel from scoring something twice:
+
+    * a step that records the ``re_recorded`` outcome is not a stage. The re-record is
+      a correction of an attempt, not a stage the attempt passes through, so counting
+      it as one would either add a stage after every terminal or push the walk's end
+      past the ends of the journey. It stays registered - its rows are still written
+      and still counted - and a read reports it on its own;
+    * the terminal steps stay IN the walk, because a funnel whose reader cannot see
+      the step a workflow ended on cannot tell a completed consultation from an
+      abandoned one. They are flagged ``terminal`` rather than removed, so
+      :func:`stage_predecessor` knows they branch rather than queue.
+
+    Registration order is walk order, the same claim :func:`product_steps` makes and
+    for the same reason: the registry IS the funnel, so a step inserted in the wrong
+    place is a one-line mistake rather than a set of queries that quietly disagree.
+    """
+    return tuple(
+        step for step in registered_steps(funnel) if step.outcome != PRODUCT_OUTCOME_RE_RECORDED
+    )
+
+
+def stage_predecessor(
+    step: ProductStep, stages: Sequence[ProductStep] | None = None
+) -> ProductStep | None:
+    """The step whose count is this one's conversion denominator, or ``None``.
+
+    **This is the denominator convention of the funnel read, stated in one place
+    rather than chosen per query.** A step's denominator is the nearest step BEFORE it
+    in the walk that is not itself terminal - so the first stage has none, and both
+    terminals share the last non-terminal stage as theirs.
+
+    Terminal steps are skipped rather than used because they end a branch: with
+    ``prescription_approved`` as the denominator of ``case_closed``, every case closed
+    without an issued prescription would read as a step after one, and the funnel
+    would score a legitimate end as a drop-off. That is the conflation decision 23
+    exists to prevent, and it is why ``terminal`` is declared on the step rather than
+    inferred from position.
+
+    The convention does NOT require a step to have passed its predecessor. The ledger
+    records what happened, not a promise about order, and a step reached without the
+    previous one produces a conversion above ``1`` rather than being clamped - a
+    number above one is a fact about the window, and silently capping it is how a
+    funnel starts lying.
+    """
+    walk = tuple(stages) if stages is not None else funnel_stages(step.funnel)
+    names = [stage.step for stage in walk]
+    try:
+        index = names.index(step.step)
+    except ValueError:
+        return None
+    for candidate in reversed(walk[:index]):
+        if not candidate.terminal:
+            return candidate
+    return None

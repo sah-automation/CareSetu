@@ -48,23 +48,20 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
-import { createHmac } from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
+
+import {
+  BACKEND_BASE_URL as BACKEND,
+  BOOTSTRAP_OPERATOR_PHONE,
+  BOOTSTRAP_SEED_INFO_PATH,
+  readBootstrapSeedInfo,
+  requireMockOtp,
+  totpCode,
+} from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 test.setTimeout(180_000);
 
 const FRONTEND = "http://localhost:3000";
-const BACKEND = "http://localhost:8000";
-const BOOTSTRAP_OPERATOR_PHONE = "+919000000002";
-const SEED_INFO_PATH = path.join(
-  process.cwd(),
-  "apps",
-  "backend",
-  "var",
-  "e2e-bootstrap-operator.json",
-);
 
 function randomPhone(): string {
   return `9${String(Math.floor(Math.random() * 1_000_000_000)).padStart(
@@ -83,86 +80,7 @@ let doctorPartnerId: number | null = null;
 // The intake the patient submits and the doctor opens, created by test 2.
 let intakeId: number | null = null;
 
-interface BootstrapSeedInfo {
-  phone: string;
-  totp_secret: string;
-}
-
-// The e2e backend boot writes the bootstrap operator's MFA facts here
-// (scripts/e2e-backend.cjs). Read them once at the operator leg so a fresh
-// boot always refreshes the attestation.
-function readBootstrapSeedInfo(): BootstrapSeedInfo {
-  if (!fs.existsSync(SEED_INFO_PATH)) {
-    throw new Error(
-      `missing ${SEED_INFO_PATH} - restart the e2e backend boot so seed_demo.py ` +
-        "stashes the bootstrap operator's MFA facts",
-    );
-  }
-  return JSON.parse(
-    fs.readFileSync(SEED_INFO_PATH, "utf8"),
-  ) as BootstrapSeedInfo;
-}
-
-// ---- RFC 6238 TOTP, no external deps (node:crypto only) ----
-
-function base32Decode(input: string): Buffer {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  const clean = input.toUpperCase().replace(/[\s=]/g, "");
-  let out = Buffer.alloc(0);
-  let buffer = 0n;
-  let bits = 0n;
-  for (const char of clean) {
-    const index = alphabet.indexOf(char);
-    if (index === -1) {
-      throw new Error(`invalid base32 character ${JSON.stringify(char)}`);
-    }
-    buffer = (buffer << 5n) | BigInt(index);
-    bits += 5n;
-    if (bits >= 8n) {
-      bits -= 8n;
-      out = Buffer.concat([out, Buffer.from([Number(buffer >> bits) & 0xff])]);
-      buffer &= (1n << bits) - 1n;
-    }
-  }
-  return out;
-}
-
-function totpCode(secret: string, windowOffset = 0): string {
-  const counter = Math.floor(Date.now() / 1000 / 30) + windowOffset;
-  const counterBytes = Buffer.alloc(8);
-  counterBytes.writeBigUInt64BE(BigInt(counter));
-  const digest = createHmac("sha1", base32Decode(secret))
-    .update(counterBytes)
-    .digest();
-  const offset = digest[digest.length - 1] & 0x0f;
-  const binary =
-    ((digest[offset] & 0x7f) << 24) |
-    ((digest[offset + 1] << 16) |
-      (digest[offset + 2] << 8) |
-      digest[offset + 3]);
-  return String(binary % 1_000_000).padStart(6, "0");
-}
-
 // ---- Shared HTTP helpers ----
-
-async function readMockOtp(
-  request: APIRequestContext,
-  number: string,
-): Promise<string> {
-  const url = `${BACKEND}/v1/auth/dev/otp?${new URLSearchParams({
-    phone: `+91${number}`,
-  })}`;
-  const response = await request.get(url);
-  expect(response.status(), "dev mock-OTP read-back should answer 200").toBe(
-    200,
-  );
-  const body = (await response.json()) as { code: string | null };
-  expect(
-    body.code,
-    `mock SMS should have sent a code to +91${number}`,
-  ).not.toBeNull();
-  return body.code as string;
-}
 
 function bearer(jwt: string): Record<string, string> {
   return { Authorization: `Bearer ${jwt}` };
@@ -195,7 +113,7 @@ async function operatorLogin(
     }
   }
   throw new Error(
-    `operator MFA login refused (wrong TOTP or stale seed in ${SEED_INFO_PATH})`,
+    `operator MFA login refused (wrong TOTP or stale seed in ${BOOTSTRAP_SEED_INFO_PATH})`,
   );
 }
 
@@ -208,7 +126,7 @@ async function registerPatient(
     data: { phone },
   });
   expect(register.status(), "patient register should succeed").toBe(200);
-  const otp = await readMockOtp(request, number);
+  const otp = await requireMockOtp(request, `+91${number}`);
   const verify = await request.post(`${BACKEND}/v1/auth/verify`, {
     data: { phone, otp },
   });
@@ -299,7 +217,7 @@ async function confirmPartnerPhone(
   await expect(page.getByText(/^Demo OTP: \d{6}$/)).toBeVisible({
     timeout: 30_000,
   });
-  const code = await readMockOtp(request, number);
+  const code = await requireMockOtp(request, `+91${number}`);
   await page.getByTestId("pr-confirm-otp").fill(code);
   await page.getByTestId("pr-confirm-submit").click();
   await page.waitForURL("**/partner/status/pending", { timeout: 60_000 });
@@ -457,7 +375,7 @@ async function activeDoctorLogin(
       });
     });
 
-  const code = await readMockOtp(request, number);
+  const code = await requireMockOtp(request, `+91${number}`);
   await page.getByTestId("partner-otp").fill(code);
   await page.getByTestId("staff-submit").click();
   await page.waitForURL("**/doctor", { timeout: 60_000 });

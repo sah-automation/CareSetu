@@ -7,7 +7,7 @@ registration seam; it routes ``intake.captured`` here via
 pre_summary) lives here. This is a pure extraction refactor (T01, #365): zero
 behavioral change from the prior single-file layout.
 
-T04 (#381) adds config-driven bookkeeping: ``_insert_ai_job`` accepts the
+T04 (#381) adds config-driven bookkeeping: ``insert_ai_job`` accepts the
 configured provider/model as a pre-call booking (provider + placeholder model);
 after a successful structure call the pipeline reads the effective serving
 provider and model off the ``AiGateway`` port and passes them to
@@ -52,14 +52,19 @@ from modules.intake.adapters.ai_gateway import (
     StructureRequest,
     TranscribeRequest,
 )
+from modules.intake.adapters.ai_jobs import (
+    complete_ai_job,
+    configured_plan,
+    fail_ai_job,
+    failure_reason,
+    insert_ai_job,
+    is_timeout,
+)
 from modules.intake.adapters.ai_provider_ext import Ext002CallError
 from modules.intake.adapters.media_store import IntakeMediaStore, build_media_store
 from modules.intake.budget_meter import BudgetMeter
 from modules.intake.domain.events import (
-    AiTaskType,
     ai_egress_recorded_envelope,
-    ai_job_completed_envelope,
-    ai_job_failed_envelope,
     intake_retry_requested_envelope,
     pre_summary_low_confidence_envelope,
     pre_summary_ready_envelope,
@@ -75,9 +80,7 @@ from modules.intake.domain.state_machine import (
 )
 from modules.intake.intake_models import INTAKE_SCHEMA, StructuredFields
 from modules.intake.outbox import INTAKE_OUTBOX_TABLE
-from modules.intake.pricing import compute_cost_paise
 from modules.intake.schema.models import (
-    intake_ai_jobs,
     intake_intakes,
     intake_media_refs,
     intake_pre_summaries,
@@ -255,6 +258,7 @@ async def _run_structuring_pipeline(
             return
 
         settings = get_settings()
+        configured_provider, configured_model = configured_plan()
         gateway = _adapters.build_ai_gateway(settings)
 
         # Resolve the transcript before any job is created, so an unstructurable
@@ -307,12 +311,13 @@ async def _run_structuring_pipeline(
             # the structure leg) so a successful call finalizes THIS row with
             # the effective (serving) provider/model + metered tokens/cost/
             # duration (PS-03) and a failed call marks the same row failed.
-            transcribe_job_id = await _insert_ai_job(
+            transcribe_job_id = await insert_ai_job(
                 connection,
                 intake_id,
-                provider=settings.ai_provider.strip().lower(),
-                model=settings.ai_model or _adapters.MOCK_AI_MODEL,
+                provider=configured_provider,
+                model=configured_model,
                 task_type="transcribe",
+                patient_id=row.patient_id,
             )
             try:
                 audio_bytes = await media_store.read(object_key=audio_key)
@@ -327,12 +332,17 @@ async def _run_structuring_pipeline(
                 )
                 transcribe_elapsed_ms = int((time.monotonic() - transcribe_started) * 1000)
             except (Ext002CallError, ValidationError, OSError, InvalidTag) as exc:
-                await _fail_job(
+                await fail_ai_job(
                     connection,
                     ai_job_id=transcribe_job_id,
                     intake_id=intake_id,
+                    patient_id=row.patient_id,
+                    doctor_id=None,
                     task_type="transcribe",
-                    reason=_failure_reason(exc),
+                    reason=failure_reason(exc),
+                    provider=configured_provider,
+                    model=configured_model,
+                    timeout=is_timeout(exc),
                 )
                 await _degrade_to_raw_review(
                     connection,
@@ -340,7 +350,7 @@ async def _run_structuring_pipeline(
                     state=structing,
                     reason=(
                         "AI voice transcription failed (transcribe unsupported "
-                        f"or provider outage): {_failure_reason(exc)}"
+                        f"or provider outage): {failure_reason(exc)}"
                     ),
                 )
                 return
@@ -348,7 +358,7 @@ async def _run_structuring_pipeline(
                 await media_store.close()
 
             # A successful transcribe is a metered, audited egress (PS-03): the
-            # job row is finalized by the shared ``_complete_ai_job`` leg shape
+            # job row is finalized by the shared ``complete_ai_job`` leg shape
             # with the effective serving values and the real token usage priced
             # into cost_paise. The clip's departure for EXT-002 is disclosed
             # under the checked grant via ``_audit_egress`` (the consent
@@ -362,10 +372,12 @@ async def _run_structuring_pipeline(
             effective_transcribe_model = (
                 gateway.effective_model or settings.ai_model or _adapters.MOCK_AI_MODEL
             )
-            await _complete_ai_job(
+            await complete_ai_job(
                 connection,
                 ai_job_id=transcribe_job_id,
                 intake_id=intake_id,
+                patient_id=row.patient_id,
+                doctor_id=None,
                 task_type="transcribe",
                 provider=effective_transcribe_provider,
                 model=effective_transcribe_model,
@@ -373,6 +385,7 @@ async def _run_structuring_pipeline(
                 elapsed_ms=transcribe_elapsed_ms,
                 input_tokens=transcribe_result.input_tokens,
                 output_tokens=transcribe_result.output_tokens,
+                low_confidence=False,
             )
             await _audit_egress(
                 consent_facade,
@@ -442,11 +455,12 @@ async def _run_structuring_pipeline(
                 )
             )
 
-        ai_job_id = await _insert_ai_job(
+        ai_job_id = await insert_ai_job(
             connection,
             intake_id,
-            provider=settings.ai_provider.strip().lower(),
-            model=settings.ai_model or _adapters.MOCK_AI_MODEL,
+            provider=configured_provider,
+            model=configured_model,
+            patient_id=row.patient_id,
         )
         try:
             started = time.monotonic()
@@ -476,12 +490,17 @@ async def _run_structuring_pipeline(
                 duration=structure_result.duration,
             )
         except (Ext002CallError, ValidationError) as exc:
-            await _fail_job(
+            await fail_ai_job(
                 connection,
                 ai_job_id=ai_job_id,
                 intake_id=intake_id,
+                patient_id=row.patient_id,
+                doctor_id=None,
                 task_type="structure",
-                reason=_failure_reason(exc),
+                reason=failure_reason(exc),
+                provider=configured_provider,
+                model=configured_model,
+                timeout=is_timeout(exc),
             )
             await _degrade_to_raw_review(
                 connection,
@@ -489,7 +508,7 @@ async def _run_structuring_pipeline(
                 state=structing,
                 reason=(
                     "AI provider call failed after retry/timeout or malformed "
-                    f"output: {_failure_reason(exc)}"
+                    f"output: {failure_reason(exc)}"
                 ),
             )
             return
@@ -528,44 +547,6 @@ async def _run_structuring_pipeline(
         await gate_engine.dispose()
 
 
-async def _insert_ai_job(
-    connection: AsyncConnection,
-    intake_id: int,
-    *,
-    provider: str,
-    model: str,
-    task_type: str = "structure",
-) -> int:
-    """Create the running ai_jobs row for this pass (markable failed on error).
-
-    The row is a booking marked BEFORE the provider call, so its provider/model
-    are the configured plan (provider + placeholder model). A later successful
-    leg finalization (``_complete_ai_job``) overwrites them with the effective
-    serving values; a failure path only touches status/error_message.
-    ``task_type`` defaults to ``structure`` (the success-path charge); the
-    transcribe leg books a ``transcribe`` row (success or failure) with the
-    SAME pre-call shape.
-    """
-    job_insert = await connection.execute(
-        intake_ai_jobs.insert()
-        .values(
-            intake_id=intake_id,
-            task_type=task_type,
-            provider=provider,
-            model=model,
-            status="running",
-            attempts=1,
-        )
-        .returning(intake_ai_jobs.c.id)
-    )
-    return int(job_insert.scalar_one())
-
-
-def _failure_reason(exc: BaseException) -> str:
-    """A short, PHI-free operational failure reason for the job + event."""
-    return type(exc).__name__
-
-
 async def _degrade_to_raw_review(
     connection: AsyncConnection,
     intake_id: int,
@@ -592,42 +573,6 @@ async def _degrade_to_raw_review(
         )
     )
     logger.warning("intake %s degraded to raw doctor review: %s", intake_id, reason)
-
-
-async def _fail_job(
-    connection: AsyncConnection,
-    *,
-    ai_job_id: int,
-    intake_id: int,
-    task_type: str,
-    reason: str,
-) -> None:
-    """Mark the ai_jobs row ``failed`` and publish ``ai_job.failed``.
-
-    Runs in the SAME transaction as the intake degradation, so a timeout/
-    malformed-output failure durably records the failed job and its bus event
-    alongside the raw-review transition (ADR-0002 §1).
-    """
-    await connection.execute(
-        intake_ai_jobs.update()
-        .where(intake_ai_jobs.c.id == ai_job_id)
-        .values(
-            status="failed",
-            error_message=reason,
-            updated_at=datetime.now(UTC),
-        )
-    )
-    await write_outbox(
-        connection,
-        INTAKE_SCHEMA,
-        INTAKE_OUTBOX_TABLE,
-        ai_job_failed_envelope(
-            ai_job_id=ai_job_id,
-            intake_id=intake_id,
-            task_type=task_type,  # type: ignore[arg-type]
-            reason=reason,
-        ),
-    )
 
 
 async def _audit_egress(
@@ -670,58 +615,6 @@ async def _audit_egress(
     )
 
 
-async def _complete_ai_job(
-    connection: AsyncConnection,
-    *,
-    ai_job_id: int,
-    intake_id: int,
-    task_type: AiTaskType,
-    provider: str,
-    model: str,
-    confidence: float,
-    elapsed_ms: int,
-    input_tokens: int,
-    output_tokens: int,
-) -> None:
-    """Persist a successful AI job + publish ``ai_job.completed`` (shared leg shape).
-
-    The completed row carries the effective (serving) provider/model, the
-    provider confidence, the provider's reported token usage priced into
-    ``cost_paise`` by the per-model pricing helper (#399), and the call latency;
-    then ``ai_job.completed`` is emitted. Runs in the SAME transaction as the
-    ledger dedupe so a pass is a metered row per leg that ran - never a silent,
-    unlogged egress (PS-03). Shared by the transcribe leg
-    (``task_type="transcribe"``, #401) and the structure leg
-    (``task_type="structure"``) so the completion shape cannot drift between them.
-    """
-    cost_paise = compute_cost_paise(model, input_tokens=input_tokens, output_tokens=output_tokens)
-    await connection.execute(
-        intake_ai_jobs.update()
-        .where(intake_ai_jobs.c.id == ai_job_id)
-        .values(
-            status="completed",
-            provider=provider,
-            model=model,
-            confidence=Decimal(str(confidence)),
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_paise=cost_paise,
-            duration_ms=elapsed_ms,
-            updated_at=datetime.now(UTC),
-        )
-    )
-    await write_outbox(
-        connection,
-        INTAKE_SCHEMA,
-        INTAKE_OUTBOX_TABLE,
-        ai_job_completed_envelope(
-            ai_job_id=ai_job_id,
-            intake_id=intake_id,
-            task_type=task_type,
-        ),
-    )
-
-
 async def _finalize_pipeline(
     connection: AsyncConnection,
     *,
@@ -745,7 +638,7 @@ async def _finalize_pipeline(
     ``intake_pre_summaries`` row is written with the provider confidence +
     honesty fields, the intake moves to ``ready_for_review``, and
     ``pre_summary.ready`` + ``ai_job.completed`` are emitted via the shared
-    ``_complete_ai_job`` leg. A low-confidence outcome ALSO publishes
+    ``complete_ai_job`` leg. A low-confidence outcome ALSO publishes
     ``pre_summary.low_confidence`` (AMB-006) - the honesty cue that structurally
     forces doctor review before the pre-summary can finalize (ADR-0001).
     ``input_tokens``/``output_tokens`` are the provider's reported usage off the
@@ -806,10 +699,12 @@ async def _finalize_pipeline(
                 pre_summary_id=pre_summary_id,
             ),
         )
-    await _complete_ai_job(
+    await complete_ai_job(
         connection,
         ai_job_id=ai_job_id,
         intake_id=intake_id,
+        patient_id=patient_id,
+        doctor_id=None,
         task_type="structure",
         provider=provider,
         model=model,
@@ -817,4 +712,5 @@ async def _finalize_pipeline(
         elapsed_ms=elapsed_ms,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        low_confidence=low_conf,
     )

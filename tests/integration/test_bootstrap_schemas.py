@@ -2,8 +2,8 @@
 
 Verifies the acceptance criteria that need a live database:
 
-  1. ``alembic upgrade head`` creates all 11 private module schemas (ADR-0003
-layout); the only tables they may hold are the five ``iam`` tables added
+  1. ``alembic upgrade head`` creates all 12 private module schemas (ADR-0003
+      layout); the only tables they may hold are the five ``iam`` tables added
       by ``v1.0__init_iam`` (PHASE-2 T1, #52) plus the operator-MFA table from
       ``v4.1__iam_roles_mfa`` (PHASE-5 T1, #244), the health record core added
       by ``v2.0__init_health`` (PHASE-3 T2, #211), the MOD-011 audit ledger
@@ -22,6 +22,8 @@ layout); the only tables they may hold are the five ``iam`` tables added
       (``v8.8__iam_patient_profiles``) and the PIN centroid reference dataset
       the doctor profile's practice position resolves against
       (``v8.16__pin_centroid_table_and_seed``, #601).
+      Phase 14A adds the MOD-013 observability telemetry schema
+      (``v9.0__init_observability``, #701).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -57,6 +59,7 @@ OUTBOX_COLUMNS = {
     "status",
     "attempts",
     "next_attempt_at",
+    "traceparent",
 }
 LEDGER_COLUMNS = {"event_id", "event_type", "processed_at", "handler_result"}
 
@@ -131,6 +134,27 @@ EXPECTED_CARE_TABLES = {
     "care.consumed_events",
 }
 
+EXPECTED_OBSERVABILITY_TABLES = {
+    "observability.observability_ai_usage_daily",
+    "observability.observability_ai_cost_budget",
+    "observability.observability_ai_provider_health",
+    "observability.observability_ai_job_spend",
+    "observability.observability_ai_queue_open",
+    "observability.observability_care_attribution_edges",
+    "observability.observability_attribution_daily",
+    "observability.observability_business_daily",
+    "observability.observability_alert_events",
+    "observability.observability_rollup_runs",
+    "observability.observability_error_events",
+    "observability.observability_http_minute",
+    "observability.observability_product_events",
+    "observability.observability_product_daily",
+    "observability.observability_product_actor_daily",
+    "observability.observability_evaluation_scores",
+    "observability.observability_outbox",
+    "observability.consumed_events",
+}
+
 
 def _alembic_config(database_url: str) -> Config:
     config = Config(str(ALEMBIC_INI))
@@ -192,9 +216,7 @@ async def _materialize_template(database_url: str, schema: str) -> None:
         await engine.dispose()
 
 
-def test_upgrade_head_creates_all_eleven_module_schemas(
-    database_url: str, reachable_db: None
-) -> None:
+def test_upgrade_head_creates_all_module_schemas(database_url: str, reachable_db: None) -> None:
     config = _alembic_config(database_url)
 
     upgraded = False
@@ -206,7 +228,7 @@ def test_upgrade_head_creates_all_eleven_module_schemas(
         system_schemas = {"public", "information_schema"}
         non_system = {s for s in schemas if not s.startswith("pg_") and s not in system_schemas}
         assert non_system == set(MODULE_SCHEMAS), (
-            f"expected exactly the 11 module schemas after upgrade, missing: "
+            f"expected exactly the 12 module schemas after upgrade, missing: "
             f"{set(MODULE_SCHEMAS) - non_system}, "
             f"unexpected: {non_system - set(MODULE_SCHEMAS)}"
         )
@@ -221,13 +243,15 @@ def test_upgrade_head_creates_all_eleven_module_schemas(
             | EXPECTED_NOTIFY_TABLES
             | EXPECTED_INTAKE_TABLES
             | EXPECTED_CARE_TABLES
+            | EXPECTED_OBSERVABILITY_TABLES
         )
         assert set(tables) == expected_tables, (
             "only the iam + health + consent + audit + partner + notify + "
-            "intake + care schemas may hold tables after upgrade head "
+            "intake + care + observability schemas may hold tables after "
+            "upgrade head "
             "(v1.0__init_iam, v2.0__init_health, v2.1__init_consent, "
             "v3.0__init_audit, v4.0__init_partner, v5.0__init_notify, "
-            "v7.0__init_intake, v8.0__init_care), "
+            "v7.0__init_intake, v8.0__init_care, v9.0__init_observability), "
             f"unexpected: {set(tables) - expected_tables}, "
             f"missing: {expected_tables - set(tables)}"
         )

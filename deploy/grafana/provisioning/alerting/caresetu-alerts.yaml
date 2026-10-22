@@ -1,0 +1,187 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: caresetu-observability
+    folder: CareSetu
+    interval: 1m
+    rules:
+      - uid: caresetu-active-series
+        title: Active series approaching the free-tier ceiling
+        condition: B
+        for: 10m
+        noDataState: NoData
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "Active series is within 80 percent of Grafana Cloud's free-tier ceiling of 10000. Exceeding it drops telemetry silently, so shed a label now."
+        data:
+          - refId: A
+            datasourceUid: $GRAFANA_USAGE_DATASOURCE_UID
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: max(grafanacloud_instance_active_series)
+              instant: true
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 8000.0
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              refId: B
+              type: threshold
+      - uid: caresetu-error-capture-dead
+        title: Error capture stalled
+        condition: B
+        for: 10m
+        noDataState: NoData
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "No requests recorded in ten minutes: the capture path itself is down."
+        data:
+          - refId: A
+            datasourceUid: $GRAFANA_METRICS_DATASOURCE_UID
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: "sum(rate(histogram_count(caresetu_http_server_duration[10m])))"
+              instant: true
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1.0
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              refId: B
+              type: threshold
+      - uid: caresetu-outbox-dead-letter
+        title: Outbox rows dead-lettered
+        condition: B
+        for: 5m
+        noDataState: NoData
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: The dispatcher dead-lettered an outbox row; a delivery gave up.
+        data:
+          - refId: A
+            datasourceUid: $GRAFANA_METRICS_DATASOURCE_UID
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: "increase(caresetu_outbox_dead_lettered_total[15m])"
+              instant: true
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0.0
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    type: sum
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              refId: B
+              type: threshold
+      - uid: caresetu-inflight-saturation
+        title: Request concurrency saturated
+        condition: B
+        for: 10m
+        noDataState: NoData
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: In-flight requests are sustained high; the service is near saturation.
+        data:
+          - refId: A
+            datasourceUid: $GRAFANA_METRICS_DATASOURCE_UID
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: max(caresetu_http_server_inflight)
+              instant: true
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 50.0
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              refId: B
+              type: threshold

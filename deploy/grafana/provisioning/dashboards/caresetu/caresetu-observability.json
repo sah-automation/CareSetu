@@ -1,0 +1,425 @@
+{
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT minute_ts AS time, sum(requests) AS requests FROM observability.observability_http_minute WHERE $__timeFilter(minute_ts) GROUP BY minute_ts ORDER BY minute_ts",
+          "refId": "A"
+        }
+      ],
+      "title": "Request throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT minute_ts AS time, sum(errors)::float / nullif(sum(requests), 0) AS error_rate FROM observability.observability_http_minute WHERE $__timeFilter(minute_ts) GROUP BY minute_ts ORDER BY minute_ts",
+          "refId": "A"
+        }
+      ],
+      "title": "Error rate (5xx over all)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT minute_ts AS time, status_class, sum(requests) AS requests FROM observability.observability_http_minute WHERE $__timeFilter(minute_ts) GROUP BY minute_ts, status_class ORDER BY minute_ts",
+          "refId": "A"
+        }
+      ],
+      "title": "Requests by status class",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT provider, success_rate FROM observability.observability_ai_provider_health ORDER BY provider",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider success rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT provider, p50_duration_ms, p95_duration_ms, p99_duration_ms FROM observability.observability_ai_provider_health ORDER BY provider",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider latency (p50/p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT provider, rate_limit_count, timeout_count FROM observability.observability_ai_provider_health ORDER BY provider",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider throttling and timeouts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(now(), '1m'), queue, count(*) AS depth FROM observability.observability_ai_queue_open GROUP BY queue ORDER BY queue",
+          "refId": "A"
+        }
+      ],
+      "title": "AI queue depth by leg",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(now(), '1m'), queue, EXTRACT(EPOCH FROM (now() - min(enqueued_at))) AS age_seconds FROM observability.observability_ai_queue_open GROUP BY queue ORDER BY queue",
+          "refId": "A"
+        }
+      ],
+      "title": "Oldest open AI queue age",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT usage_date AS time, provider, sum(cost_paise) AS cost_paise FROM observability.observability_ai_usage_daily WHERE $__timeFilter(usage_date) GROUP BY usage_date, provider ORDER BY usage_date",
+          "refId": "A"
+        }
+      ],
+      "title": "AI usage and spend (per day)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 10,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT event_date AS time, funnel, step, sum(events) AS events FROM observability.observability_product_daily WHERE $__timeFilter(event_date) GROUP BY event_date, funnel, step ORDER BY event_date",
+          "refId": "A"
+        }
+      ],
+      "title": "Product funnel events (per day)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 11,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT metric_date AS time, metric_key, (value->>'count')::float AS value FROM observability.observability_business_daily WHERE $__timeFilter(metric_date) AND value ? 'count' ORDER BY metric_date",
+          "refId": "A"
+        }
+      ],
+      "title": "Business daily registry",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "caresetu-observability-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "id": 12,
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "caresetu-observability-postgres"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(created_at, '1h') AS time, severity, count(*) AS open_alerts FROM observability.observability_alert_events WHERE status = 'open' GROUP BY 1, severity ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Open alerts by severity",
+      "type": "timeseries"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": [
+    "caresetu",
+    "observability"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "caresetu",
+          "value": "caresetu"
+        },
+        "label": "Service",
+        "name": "service",
+        "query": "caresetu",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "production",
+          "value": "production"
+        },
+        "label": "Environment",
+        "name": "env",
+        "query": "production",
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "CareSetu Observability",
+  "uid": "caresetu-observability"
+}

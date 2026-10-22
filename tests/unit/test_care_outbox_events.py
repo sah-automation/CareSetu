@@ -125,6 +125,26 @@ def _intake_facade(connection: AsyncMock, gateway: MockAiProvider | None = None)
     return IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
 
 
+def _draft_seam_connection() -> AsyncMock:
+    """Script the intake drafting seam's five executes, in order (B4 #722).
+
+    The seam reads its pre-summary, reads the intake, books the ``draft``
+    ``ai_jobs`` row, finalizes it and publishes the metering event - all on one
+    connection. This suite only cares that the care-side event rode the same
+    transaction, so the metering statements are given throwaway results.
+    """
+    return _connection(
+        [
+            _FakeResult(row=_pre_summary_row()),
+            _FakeResult(row=_intake_row()),
+            _FakeResult(scalar=1),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+
+
 def _case_facade(
     case_connection: AsyncMock,
     intake_facade: IntakeFacade,
@@ -256,7 +276,7 @@ def _pre_summary_row(*, pre_summary_id: int = 5, intake_id: int = 1) -> object:
 
 
 def _intake_row(*, intake_id: int = 1, language: str = "en") -> object:
-    return SimpleNamespace(id=intake_id, language=language)
+    return SimpleNamespace(id=intake_id, patient_id=7, language=language)
 
 
 def _single_outbox(connection: AsyncMock) -> Insert:
@@ -332,9 +352,7 @@ class TestDraftCreatedOutbox:
                 _FakeResult(),
             ]
         )
-        intake_conn = _connection(
-            [_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())]
-        )
+        intake_conn = _draft_seam_connection()
         engine = _engine(care_conn)
         facade = _rx_facade(
             care_conn,

@@ -69,7 +69,9 @@ from modules.care.schema.models import (
 )
 from modules.health.facade import RecordEntryView, RecordTimeline
 from modules.intake.adapters.ai_provider_mock import MockAiProvider
+from modules.intake.domain.events import EVENT_AI_JOB_COMPLETED
 from modules.intake.facade import IntakeFacade
+from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 
 NOW = datetime.now(UTC)
 
@@ -128,6 +130,28 @@ def _engine(connection: AsyncMock) -> AsyncMock:
 
 def _intake_facade(connection: AsyncMock, gateway: MockAiProvider | None = None) -> IntakeFacade:
     return IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
+
+
+def _draft_seam_connection() -> AsyncMock:
+    """Script the intake drafting seam's executes, in order (B4 #722, B5 #729).
+
+    The seam reads its pre-summary, reads the intake, books the ``draft``
+    ``ai_jobs`` row, ANNOUNCES the enqueue (#729), finalizes the job and publishes
+    the completion event - all on one connection. This care suite only cares that
+    the seam got far enough to return a draft, so the metering statements are given
+    throwaway results; the queue announcement is one of them, since the enqueue and
+    the completion ride the same transaction either way.
+    """
+    return _connection(
+        [
+            _FakeResult(row=_pre_summary_row()),
+            _FakeResult(row=_intake_row()),
+            _FakeResult(scalar=1),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
 
 
 class _FakeHealthFacade:
@@ -283,8 +307,8 @@ def _pre_summary_row(*, pre_summary_id: int = 5, intake_id: int = 1) -> object:
     return SimpleNamespace(id=pre_summary_id, intake_id=intake_id)
 
 
-def _intake_row(*, intake_id: int = 1, language: str = "en") -> object:
-    return SimpleNamespace(id=intake_id, language=language)
+def _intake_row(*, intake_id: int = 1, patient_id: int = 7, language: str = "en") -> object:
+    return SimpleNamespace(id=intake_id, patient_id=patient_id, language=language)
 
 
 def _assigned_partner_row(
@@ -328,7 +352,7 @@ async def test_create_ai_draft_stores_immutable_snapshot_and_publishes() -> None
             _FakeResult(),
         ]
     )
-    intake_conn = _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())])
+    intake_conn = _draft_seam_connection()
     gateway = MockAiProvider()
     health = _FakeHealthFacade(_timeline(entry_types=["rx"]))
     facade = _care_facade(care_conn, _intake_facade(intake_conn, gateway), health)
@@ -359,6 +383,43 @@ async def test_create_ai_draft_stores_immutable_snapshot_and_publishes() -> None
 
 
 @pytest.mark.asyncio
+async def test_create_ai_draft_names_the_drafting_doctor_to_the_intake_seam() -> None:
+    """The care module hands its doctor to the drafting seam (ADR-0027 D3).
+
+    The drafting doctor is this module's own fact - the doctor who owns the
+    case - and the intake module cannot read it (ADR-0003), so it is named in the
+    call. It lands on the metered job's own key, which is the fallback that
+    covers a pick the attribution edge has not recorded yet.
+    """
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row()),
+            _FakeResult(row=None),
+            _FakeResult(row=_doctor_input_row()),
+            _FakeResult(scalar=201),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+    intake_conn = _draft_seam_connection()
+    facade = _care_facade(
+        care_conn,
+        _intake_facade(intake_conn, MockAiProvider()),
+        _FakeHealthFacade(_timeline(entry_types=["rx"])),
+    )
+
+    await facade.create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
+
+    completed = [
+        p["payload"]
+        for p in _insert_params(_statements(intake_conn), INTAKE_OUTBOX_TABLE)
+        if p["event_type"] == EVENT_AI_JOB_COMPLETED
+    ]
+    assert len(completed) == 1
+    assert completed[0]["doctor_id"] == 42
+
+
+@pytest.mark.asyncio
 async def test_create_ai_draft_reads_history_only_via_consented_path() -> None:
     care_conn = _connection(
         [
@@ -370,7 +431,7 @@ async def test_create_ai_draft_reads_history_only_via_consented_path() -> None:
             _FakeResult(),
         ]
     )
-    intake_conn = _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())])
+    intake_conn = _draft_seam_connection()
     gateway = MockAiProvider()
     health = _FakeHealthFacade(_timeline(entry_types=["rx", "prescription"]))
     facade = _care_facade(care_conn, _intake_facade(intake_conn, gateway), health)
@@ -420,7 +481,7 @@ async def test_create_ai_draft_regenerate_increments_attempt_no() -> None:
             _FakeResult(),
         ]
     )
-    intake_conn = _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())])
+    intake_conn = _draft_seam_connection()
     facade = _care_facade(
         care_conn,
         _intake_facade(intake_conn, MockAiProvider()),
@@ -452,7 +513,7 @@ async def test_create_ai_draft_clears_prior_working_revision() -> None:
             _FakeResult(),
         ]
     )
-    intake_conn = _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())])
+    intake_conn = _draft_seam_connection()
     facade = _care_facade(
         care_conn,
         _intake_facade(intake_conn, MockAiProvider()),

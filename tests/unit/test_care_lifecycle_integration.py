@@ -162,6 +162,26 @@ def _intake_facade(connection: AsyncMock, gateway: MockAiProvider | None = None)
     return IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
 
 
+def _draft_seam_connection() -> AsyncMock:
+    """Script the intake drafting seam's five executes, in order (B4 #722).
+
+    The seam reads its pre-summary, reads the intake, books the ``draft``
+    ``ai_jobs`` row, finalizes it and publishes the metering event - all on one
+    connection. This suite only cares about the care-side workflow around it, so
+    the metering statements are given throwaway results.
+    """
+    return _connection(
+        [
+            _FakeResult(row=_pre_summary_row()),
+            _FakeResult(row=_intake_row()),
+            _FakeResult(scalar=1),
+            _FakeResult(),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+
+
 def _case_facade(case_connection: AsyncMock, intake_facade: IntakeFacade) -> CaseConsoleFacade:
     return CaseConsoleFacade(
         engine=_engine(case_connection),
@@ -285,7 +305,7 @@ def _pre_summary_row(*, pre_summary_id: int = 5, intake_id: int = 1) -> object:
 
 
 def _intake_row(*, intake_id: int = 1, language: str = "en") -> object:
-    return SimpleNamespace(id=intake_id, language=language)
+    return SimpleNamespace(id=intake_id, patient_id=7, language=language)
 
 
 def _timeline(*, entry_types: list[str] | None = None) -> RecordTimeline:
@@ -338,7 +358,7 @@ class TestHappyPath:
         draft = await _rx_facade(
             draft_conn,
             _intake_facade(
-                _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())]),
+                _draft_seam_connection(),
                 MockAiProvider(),
             ),
         ).create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
@@ -436,7 +456,7 @@ class TestRejectionPath:
         draft = await _rx_facade(
             draft_conn,
             _intake_facade(
-                _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())]),
+                _draft_seam_connection(),
                 MockAiProvider(),
             ),
         ).create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
@@ -474,12 +494,13 @@ class TestRejectionPath:
                 _FakeResult(),
                 _FakeResult(),
                 _FakeResult(),
+                _FakeResult(),
             ]
         )
         redraft = await _rx_facade(
             redraft_conn,
             _intake_facade(
-                _connection([_FakeResult(row=_pre_summary_row()), _FakeResult(row=_intake_row())]),
+                _draft_seam_connection(),
                 MockAiProvider(),
             ),
         ).create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")

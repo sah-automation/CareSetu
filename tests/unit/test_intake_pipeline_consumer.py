@@ -398,8 +398,8 @@ async def test_completed_job_carries_real_tokens_and_priced_cost() -> None:
             ),
         ),
         patch(
-            "modules.intake.pricing.PRICING_TABLE",
-            {
+            "modules.intake.pricing.resolve_pricing_table",
+            return_value={
                 "mock-model": ModelPrice(
                     price_in_paise=Decimal("0.02"), price_out_paise=Decimal("0.04")
                 )
@@ -453,8 +453,8 @@ async def test_transcribe_success_is_metered_and_audited_as_an_egress() -> None:
             ),
         ),
         patch(
-            "modules.intake.pricing.PRICING_TABLE",
-            {
+            "modules.intake.pricing.resolve_pricing_table",
+            return_value={
                 "mock-model": ModelPrice(
                     price_in_paise=Decimal("0.02"), price_out_paise=Decimal("0.04")
                 )

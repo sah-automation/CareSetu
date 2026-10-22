@@ -32,18 +32,32 @@
 // the expanded branch of the width ternary changed, and the pinned collapsed
 // assertions were left alone. No design token was added or re-valued - both
 // widths remain literal stock spacing utilities, as #560 requires.
+//
+// #745: the operator rail returns to 240px (`w-60`). Its Observability
+// disclosure indents nine sub-labels under a guide rail, and the doctor's
+// 208px floor - sized for the unindented "Profile & Settings" - no longer
+// clears the longest indented sub-label. The widening is operator-only, so the
+// doctor and partner rails keep #575's 208px, and the collapsed `w-16` (and
+// therefore the flyout's `left-16`) is untouched for all roles.
 
-import { useId, useRef, useState } from "react";
+import {
+  Fragment,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FocusEvent,
+} from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ChevronLeft, ChevronRight, LogOut } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, LogOut } from "lucide-react";
 
 import { useAuth } from "@/lib/auth/AuthContext";
-import { STRINGS } from "@/lib/i18n/dictionaries";
+import { STRINGS, type Lang } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
-import { NAV_CONFIG, sidebarSections } from "./nav-config";
+import { NAV_CONFIG, isNavItemActive, sidebarSections } from "./nav-config";
 import {
   ActiveIndicator,
   CountPill,
@@ -78,16 +92,17 @@ export function Sidebar({
     <aside
       className={cn(
         "sticky top-0 hidden h-dvh shrink-0 flex-col overflow-y-auto border-r border-hairline bg-surface transition-[width] duration-200 lg:flex",
-        // The expanded rail is 208px (#575), down from 240px, so more of the
-        // clinical workspace is visible. The longest nav label is
+        // The doctor/partner expanded rail is 208px (#575), down from 240px, so
+        // more of the clinical workspace is visible. The longest nav label is
         // `Profile & Settings` at ~116px in text-sm (~95px in Hindi, whose
         // conjuncts stack), and the row spends a fixed 72px on nav p-2, row
         // px-3, the 20px icon and gap-3, so the floor is 188px. w-48 (192px)
         // clears that floor by 4px, which is not a margin; 208px is the next
-        // stock step and leaves 17% of headroom. The collapsed `w-16` rail is
-        // deliberately untouched, and the collapsed flyout's `left-16` below
-        // depends on it staying 64px.
-        collapsed ? "w-16" : "w-52",
+        // stock step and leaves 17% of headroom. The operator rail is 240px
+        // (#745) because its indent+guide-rail push the sub-labels past the
+        // 208px floor. The collapsed `w-16` rail is deliberately untouched, and
+        // the collapsed flyout's `left-16` below depends on it staying 64px.
+        collapsed ? "w-16" : role === "operator" ? "w-60" : "w-52",
       )}
       data-collapsed={collapsed || undefined}
       data-testid="sidebar"
@@ -127,13 +142,27 @@ export function Sidebar({
         </button>
       </div>
 
-      <nav className="flex-1 space-y-4 p-2" data-testid="sidebar-nav">
-        {sections.map((section) => (
-          <SidebarSectionGroup
-            key={section.labelKey ?? "ungrouped"}
-            section={section}
-            collapsed={collapsed}
-          />
+      {/* #745: the navigation landmark is named. The name is the same one the
+          public header's primary nav already uses ("Primary"), a shared
+          landmark identity rather than a per-role string. */}
+      <nav
+        className="flex-1 space-y-4 p-2"
+        aria-label="Primary"
+        data-testid="sidebar-nav"
+      >
+        {sections.map((section, index) => (
+          <Fragment key={section.labelKey ?? "ungrouped"}>
+            {/* #745: hairline dividers separate the operator's Work and
+                Observability groups. They are operator-only so the doctor's
+                Work/Account split keeps its pre-#745 spacing. */}
+            {role === "operator" && index > 0 && (
+              <div
+                className="border-t border-hairline"
+                data-testid="sidebar-section-divider"
+              />
+            )}
+            <SidebarSectionGroup section={section} collapsed={collapsed} />
+          </Fragment>
         ))}
       </nav>
 
@@ -181,14 +210,248 @@ function SidebarSectionGroup({
           {label}
         </p>
       )}
-      {section.items.map((item) =>
-        collapsed ? (
-          <CollapsedNavItem key={item.key} item={item} />
+      {section.items.map((item) => {
+        // #745: an item carrying children is a disclosure parent. Expanded it
+        // is a toggle + sub-menu; collapsed it is an icon whose flyout lists
+        // its sub-destinations so the group stays navigable in the rail.
+        if (collapsed) {
+          return item.children?.length ? (
+            <CollapsedGroupNavItem key={item.key} item={item} />
+          ) : (
+            <CollapsedNavItem key={item.key} item={item} />
+          );
+        }
+        return item.children?.length ? (
+          <DisclosureNavItem key={item.key} item={item} />
         ) : (
           <NavItemLink key={item.key} item={item} variant="sidebar" />
-        ),
+        );
+      })}
+    </div>
+  );
+}
+
+// #745: the expanded Observability disclosure. A hand-rolled controlled
+// disclosure - no dependency is installed (the component-library research
+// directs keeping the sidebar hand-rolled, decision 30). The header is a
+// button, not a link: nine sub-destinations would otherwise sit behind a
+// control that also navigates, and the group's own landing is the Overview
+// child (decision 28's resolved reading in nav-config.ts). Its expanded state
+// is exposed to assistive technology via `aria-expanded`/`aria-controls`, and
+// the chevron rotates with that same state.
+//
+// The expanded state is per-navigation as far as the route is concerned: the
+// group opens itself when the operator is inside it, and a manual collapse
+// sticks until they leave and re-enter. That default is deliberate - a
+// disclosure that starts open would put nine rows back in the rail and defeat
+// the reason it exists.
+function DisclosureNavItem({ item }: { item: NavItemDef }) {
+  const pathname = usePathname();
+  const { lang } = useLang();
+  const label = STRINGS[lang].nav[item.labelKey];
+  const Icon = item.icon;
+  const active = isNavItemActive(item, pathname);
+  const [open, setOpen] = useState(active);
+  const submenuId = useId();
+  const children = item.children ?? [];
+
+  useEffect(() => {
+    if (active) setOpen(true);
+  }, [active]);
+
+  return (
+    <div data-testid={`sidebar-group-${item.key}`}>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={submenuId}
+        // The parent reads as the current group while any sub-destination is
+        // current - the same shared predicate (#744) the collapsed rail and the
+        // phone sheet consume, so the surfaces can never disagree about where
+        // the operator is. The value is "true", not "page": the parent is a
+        // disclosure toggle, not the destination, and the destination row
+        // carries `aria-current="page"`. Two elements claiming the current
+        // page inside one navigation set is the classic aria-current
+        // anti-pattern (the current page gets announced twice).
+        aria-current={active ? "true" : undefined}
+        data-active={active || undefined}
+        data-testid={`nav-${item.key}`}
+        onClick={() => setOpen((value) => !value)}
+        className={cn(
+          "relative flex min-h-11 w-full items-center gap-3 whitespace-nowrap rounded px-3 py-2 text-sm",
+          active
+            ? "bg-accent-soft font-semibold text-accent-strong"
+            : "font-medium text-txt-sub hover:bg-accent-soft hover:text-txt",
+        )}
+      >
+        {active && <ActiveIndicator />}
+        <Icon size={20} className="shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <ChevronDown
+          size={16}
+          aria-hidden="true"
+          data-testid={`${item.key}-disclosure-chevron`}
+          className={cn("shrink-0 transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {/* The guide rail: a hairline left border aligned under the parent's
+          icon, with the rows inset past it. Existing tokens only. The menu
+          stays mounted and toggles a class rather than the `hidden` attribute
+          (the same shape the doctor-profile disclosure uses), so the toggle's
+          `aria-controls` always resolves to a real element. */}
+      <ul
+        id={submenuId}
+        data-testid={`sidebar-group-${item.key}-menu`}
+        className={cn(
+          "mt-1 ml-5 space-y-1 border-l border-hairline pl-1",
+          !open && "hidden",
+        )}
+      >
+        {children.map((child) => (
+          <li key={child.key}>
+            <NavItemLink item={child} variant="sidebar-sub" />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// #745: the collapsed-rail form of a disclosure parent. The icon itself is a
+// link to the group landing (so the group is one click away), and its hover /
+// focus flyout lists every sub-destination so the group stays navigable while
+// the rail is collapsed. Unlike the single-destination flyout above it is NOT
+// a tooltip: role=tooltip may not contain interactive content, and this one
+// carries links. Focus-within keeps it open while tabbing through those links.
+function CollapsedGroupNavItem({ item }: { item: NavItemDef }) {
+  const pathname = usePathname();
+  const { lang } = useLang();
+  const [flyoutOpen, setFlyoutOpen] = useState(false);
+  const [flyoutTop, setFlyoutTop] = useState(0);
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const label = STRINGS[lang].nav[item.labelKey];
+  const Icon = item.icon;
+  const active = isNavItemActive(item, pathname);
+  const children = item.children ?? [];
+
+  function openFlyout() {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (rect) setFlyoutTop(rect.top + rect.height / 2);
+    setFlyoutOpen(true);
+  }
+
+  // Keep the flyout open while focus is anywhere inside the group; close it
+  // only when focus leaves for something outside.
+  function closeOnFocusOut(event: FocusEvent<HTMLDivElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setFlyoutOpen(false);
+    }
+  }
+
+  return (
+    <div
+      className="relative flex w-11 items-center justify-center"
+      data-testid={`sidebar-group-${item.key}-collapsed`}
+      onMouseEnter={openFlyout}
+      onMouseLeave={() => setFlyoutOpen(false)}
+      onFocus={openFlyout}
+      onBlur={closeOnFocusOut}
+    >
+      <Link
+        href={item.href}
+        aria-label={label}
+        // The collapsed rail reads the same group-level marker as the expanded
+        // toggle and the phone sheet: the group is current ("true"), the
+        // destination inside it is the page ("page").
+        aria-current={active ? "true" : undefined}
+        data-active={active || undefined}
+        data-testid={`nav-${item.key}`}
+        className="block w-11"
+      >
+        <span
+          ref={anchorRef}
+          aria-hidden="true"
+          className={cn(
+            "relative flex h-11 w-11 shrink-0 items-center justify-center rounded",
+            active
+              ? "bg-accent-soft text-accent-strong"
+              : "text-txt-sub hover:bg-accent-soft hover:text-txt",
+          )}
+        >
+          {active && <ActiveIndicator />}
+          <Icon size={20} className="shrink-0" />
+        </span>
+      </Link>
+      {flyoutOpen && (
+        <div
+          style={{ top: flyoutTop }}
+          className="fixed left-16 z-50 -translate-y-1/2 rounded-md border border-hairline bg-surface p-2 text-sm text-txt shadow-card"
+          data-testid="sidebar-flyout"
+        >
+          <p
+            className={cn(
+              "px-2 pb-1 whitespace-nowrap",
+              active
+                ? "font-semibold text-accent-strong"
+                : "font-medium text-txt-sub",
+            )}
+          >
+            {label}
+          </p>
+          <ul className="space-y-0.5">
+            {children.map((child) => (
+              <li key={child.key}>
+                <CollapsedFlyoutChild child={child} lang={lang} />
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
+  );
+}
+
+// #745: one flyout row for a collapsed group. The Soon form reuses the shared
+// dimmed/non-interactive convention so a coming-soon sub-destination cannot
+// become tappable just because it moved into an overflow surface.
+function CollapsedFlyoutChild({
+  child,
+  lang,
+}: {
+  child: NavItemDef;
+  lang: Lang;
+}) {
+  const pathname = usePathname();
+  const label = STRINGS[lang].nav[child.labelKey];
+  // The flyout row is a real destination, so it carries the page-level marker
+  // the expanded sub-menu row carries. The collapsed group's own link is the
+  // group marker ("true"), so exactly one element in the rail claims the page.
+  const active = isNavItemActive(child, pathname);
+
+  if (child.soon) {
+    return (
+      <span
+        aria-disabled="true"
+        className="flex cursor-not-allowed items-center gap-2 rounded px-2 py-1.5 whitespace-nowrap text-txt-sub opacity-60"
+        data-soon="true"
+        data-testid={`nav-${child.key}`}
+      >
+        <span className="min-w-0 truncate">{label}</span>
+        <SoonBadge />
+      </span>
+    );
+  }
+
+  return (
+    <Link
+      href={child.href}
+      aria-current={active ? "page" : undefined}
+      data-active={active || undefined}
+      data-testid={`nav-${child.key}`}
+      className="flex items-center gap-2 rounded px-2 py-1.5 whitespace-nowrap text-txt-sub hover:bg-accent-soft hover:text-txt"
+    >
+      <span className="min-w-0 truncate">{label}</span>
+    </Link>
   );
 }
 
@@ -219,7 +482,7 @@ function CollapsedNavItem({ item }: { item: NavItemDef }) {
 
   const label = STRINGS[lang].nav[item.labelKey];
   const Icon = item.icon;
-  const active = !item.soon && pathname === item.href;
+  const active = isNavItemActive(item, pathname);
 
   function openFlyout() {
     const rect = anchorRef.current?.getBoundingClientRect();

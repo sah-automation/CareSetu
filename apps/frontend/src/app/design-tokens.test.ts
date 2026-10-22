@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { globSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import tailwindConfig from "../../tailwind.config";
 // Contract gates for PHASE-2.6 T02 (#193, FEAT-006): resolved brand tokens,
 // Mukta typography, single palette source, reduced-motion kill switch.
 // Extended by #564 with the class-attribute colour gate.
+// Extended by #759 with the Tailwind content-scan gate.
 
 type ThemeToken = { path: string; value: string };
 
@@ -816,6 +817,42 @@ describe("class colour-utility detector self-test (#564 red/green proof)", () =>
         'it("sends text-only intake without any note", async () => {});',
       ),
     ).toEqual([]);
+  });
+});
+
+describe("Tailwind content scan (#759)", () => {
+  // The content globs decide which files Tailwind reads for class candidates.
+  // A test file is a candidate source like any other, so a planted fixture
+  // that names a colour outside the theme (the
+  // "text-[theme(colors.brand.ink)]" case above) makes Tailwind warn on
+  // every build. The exclusion is what keeps the build output clean.
+  const contentPatterns = (): string[] => {
+    const content = tailwindConfig.content;
+    const files = Array.isArray(content) ? content : content.files;
+    return files.filter((f): f is string => typeof f === "string");
+  };
+
+  it("keeps test files out of the scanned content", () => {
+    const patterns = contentPatterns();
+    const included = patterns.filter((p) => !p.startsWith("!"));
+    // The exclusion is spelled without the "!" because Node's own glob takes
+    // exclusions separately, and it does not accept a negated pattern.
+    const excluded = patterns
+      .filter((p) => p.startsWith("!"))
+      .map((p) => p.slice(1));
+
+    // The globs are relative to the frontend package directory, which is
+    // where Tailwind resolves them from.
+    const packageRoot = fileURLToPath(here("../../"));
+    const scanned = globSync(included, { cwd: packageRoot, exclude: excluded });
+
+    expect(
+      scanned.filter((f) => /\.test\.(ts|tsx)$/.test(f)),
+      "a test file is in the Tailwind content scan",
+    ).toEqual([]);
+    // The scan must still cover the app, or the exclusion would be silencing
+    // a warning by breaking the build instead.
+    expect(scanned.length).toBeGreaterThan(200);
   });
 });
 

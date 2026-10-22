@@ -15,14 +15,7 @@ import { BadgeCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { providerProfileHref } from "@/lib/directory/links";
 import type { DirectoryEntry } from "@/lib/directory/search";
-
-export function formatFeePaise(paise: number): string {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 0,
-  }).format(paise / 100);
-}
+import { formatInrPaise } from "@/lib/money";
 
 interface DoctorPickCardProps {
   entry: DirectoryEntry;
@@ -64,7 +57,7 @@ export function DoctorPickCard({
 
   const fee =
     entry.consultation_fee !== null
-      ? formatFeePaise(entry.consultation_fee)
+      ? formatInrPaise(entry.consultation_fee)
       : feeNotSetLabel;
 
   return (

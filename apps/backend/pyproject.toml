@@ -34,6 +34,41 @@ dependencies = [
     # multipart/form-data parsing for the patient intake audio upload surface
     # (PHASE-7 T12, #356): FastAPI's UploadFile/File requires python-multipart.
     "python-multipart>=0.0.9",
+    # Structured logging (PHASE-14A A1, #694; plan-phase14 §4): one logging
+    # configuration shared by the API, the worker, and the outbox dispatcher.
+    # ``LOG_FORMAT`` selects the renderer - JSON for production, a readable
+    # console line for dev - and a redaction processor strips PHI/secrets by key
+    # before emit. No-op-safe when setup fails (mirrors the Langfuse pattern).
+    "structlog>=24.1",
+    # Sentry SDK for exception tracking (PHASE-14A A4, #696; plan-phase14 §4):
+    # initialised at both composition roots only when ``SENTRY_DSN`` is set;
+    # events carry release = git SHA and a request ``trace_id``, and a
+    # ``before_send`` hook reuses A1's key denylist to scrub PHI/secrets before
+    # an event leaves the process. A no-op when unset - never blocks boot.
+    "sentry-sdk>=2.0",
+    # OpenTelemetry SDK + HTTP OTLP exporter + request-path instrumentation
+    # (PHASE-14A A3a, #697; plan-phase14 §5): server spans (FastAPI), DB spans
+    # (SQLAlchemy async engine) and outbound spans (httpx). The HTTP exporter
+    # is the production path - gRPC is frequently blocked on PaaS free tiers
+    # (Render). Gated on OTEL_ENABLED; inert when unset.
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    # The version floor is not arbitrary: the FastAPI instrumentor had an open
+    # unbounded-cardinality advisory (GHSA-5rv5-6h4r-h22v / CVE-2023-43810),
+    # an unsanitised-custom-method label DoS, fixed in 0.41b0. The collector
+    # config in deploy/otel-collector/ is the cardinality firewall and the
+    # mitigation (PHASE-14 T32, #749); re-check the advisory before the next
+    # bump and keep this floor above the fixed release.
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
+    # Declared for the tests that read the GitHub Actions workflows as data
+    # (PHASE-14A B5b, #705). The nightly rollup's schedule, secret gate and
+    # permissions are asserted by parsing the YAML, so the package is imported
+    # directly by test code rather than resolved transitively through
+    # ``uvicorn[standard]``.
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -42,6 +77,12 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=5",
     "mypy>=1.11",
+    # Type stubs for PyYAML (PHASE-14 T32, #749): the collector-config lint
+    # parses ``deploy/otel-collector/config.yaml`` as data, and ``mypy
+    # --strict`` needs the stubs to type that import (PyYAML ships none).
+    # Dev-only, alongside mypy itself: the runtime import of ``yaml`` is
+    # covered by ``pyyaml`` in the main dependency list.
+    "types-PyYAML>=6.0",
     "jiwer>=3.0",
 ]
 

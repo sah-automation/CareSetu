@@ -8,9 +8,15 @@ dependency beyond the declared stack (cost floor ``NFR-001``).
 import math
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
 DEFAULT_APP_ENVIRONMENT = "production"
+# The app's human-maintained version (PHASE-14A A4, #696): the default Sentry
+# ``release`` when ``OTEL_SERVICE_VERSION`` is unset, also handed to FastAPI.
+# The deploy pipeline sets ``OTEL_SERVICE_VERSION`` to the git SHA so production
+# releases are SHA-tagged; never hardcode a SHA here.
+APP_VERSION = "0.1.0"
 DEFAULT_SMS_PROVIDER = "mock"
 DEFAULT_SMS_TIMEOUT_SECONDS = 10.0
 DEFAULT_SMS_MAX_RETRIES = 3
@@ -114,6 +120,11 @@ DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON = "30 1 * * *"
 # cloud endpoint for the CareSetu project. Overridable via ``LANGFUSE_HOST``
 # (e.g. a self-hosted instance). Tracing is a no-op until both keys are supplied.
 DEFAULT_LANGFUSE_HOST = "https://us.cloud.langfuse.com"
+# The daily metrics pull's request timeout (#750): one aggregate request per
+# nightly run, so the ceiling only has to survive a slow vendor answer, not a
+# retry loop. Configuration like every other outbound timeout - one env var
+# moves it (third-party-integration-standards 1, coding-standards 9.1).
+DEFAULT_LANGFUSE_TIMEOUT_SECONDS = 30.0
 # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
 # knob with a fail-closed default (mock). The real provider is gated to
 # staging/production by ``__post_init__`` - a real key in dev/test is refused
@@ -141,10 +152,91 @@ DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # meter never blocks: the knob stays so a hard cap can be reintroduced later
 # without a rewrite. Rs 2,000 / month = 200,000 paise.
 DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
+# Per-model AI pricing (PHASE-14A B1, #699): the metered cost of a completed AI
+# call is ``input_tokens * price_in + output_tokens * price_out`` in paise per
+# token, looked up by the serving model. It is a comma-separated list of
+# ``model:price_in_paise:price_out_paise`` entries - deployment configuration,
+# never hardcoded (coding-standards §9.1), because a model's rate tracks the
+# provider and tier. The default prices the free mock at an explicit 0 so it is
+# a KNOWN free model (never flagged); a model absent from the table is UNKNOWN,
+# so its 0 cost is logged (visible, not hidden) until its rate is configured.
+DEFAULT_AI_PRICING_TABLE = "mock-model:0:0"
 DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""
 DEFAULT_AI_FALLBACK_API_KEY = ""
 DEFAULT_AI_FALLBACK_MODEL = ""
+# Observability gates (PHASE-14A A5, #693; plan-phase14 §4, Appendix A.2):
+# every vendor gate is additive and disabled by default so local dev, tests and
+# CI are unchanged until one is set. Nothing reads these yet - later batch
+# tickets A1 (structlog), A2 (trace propagation), A3 (OTel) and A4 (Sentry)
+# consume them. ``LOG_FORMAT`` is the two-value log renderer selector.
+DEFAULT_LOG_FORMAT = "console"
+DEFAULT_SENTRY_TRACES_SAMPLE_RATE = 0.0
+DEFAULT_OTEL_TRACES_SAMPLER_RATIO = 1.0
+# Days one nightly observability rollup invocation may cover (PHASE-14A B5b, #705).
+# Ninety trailing days comfortably spans MOD-013's whole retained history at
+# launch scale while keeping a single scheduled pass bounded; the trimmed surplus
+# is rolled by the next invocation, never skipped.
+DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES = 90
+# PHASE-14A B8 (#726). The gateway error seam buffers captured server errors in a
+# bounded in-process deque and the worker drains it on an interval, so two numbers
+# describe the capture path rather than living as constants inside it.
+# ``ERROR_CAPTURE_MAX_RECORDS`` is the buffer ceiling: a thousand records ride out
+# a drain interval through a spike, and a storm past that DISCARDS the oldest
+# rather than growing - an unbounded buffer turns an error storm into an
+# out-of-memory kill, which is worse than the outage it was recording. It is
+# declared HERE and imported by ``observability.error_capture``, the other way
+# round from every other default: the buffer needs a ceiling before any
+# composition root has run to configure one, and ``app.config`` may not import the
+# ``observability`` package - its ``__init__`` reaches back into this module for
+# ``APP_VERSION``, so the dependency runs config -> capture and never the reverse
+# (coding-standards §9.2).
+# ``ERROR_DRAIN_INTERVAL_SECONDS`` is how often the drain fires; a short interval
+# keeps the operator's feed close to live without a write per request.
+DEFAULT_ERROR_CAPTURE_MAX_RECORDS = 1000
+DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS = 30
+# PHASE-14A B9 (#727). The gateway counts every answered request into a per-minute
+# bucket in process, and the worker folds those buckets into one row per route per
+# minute - so two numbers describe the counter rather than living as constants
+# inside it.
+# ``HTTP_COUNTER_MAX_SERIES`` is the ceiling on how many DISTINCT
+# ``(minute, route template, method, status class)`` buckets may be waiting for a
+# drain at once. It is not a request ceiling: a thousand requests to one route in
+# one minute are ONE series, which is the whole point of the design (#717
+# decision 15). A few thousand series is a few hundred routes' worth of a couple
+# of minutes' traffic - far more than the drain interval ever lets accumulate -
+# and past it the OLDEST minute is discarded and counted rather than the map
+# growing, because an unbounded map turns a traffic spike into an out-of-memory
+# kill, the same argument the error buffer is bounded on. Declared HERE, and
+# imported by ``observability.http_counter`` rather than restated, for the same
+# dependency reason as ``ERROR_CAPTURE_MAX_RECORDS`` above: ``app.config`` may not
+# import the ``observability`` package (its ``__init__`` reaches back here for
+# ``APP_VERSION``), so the dependency runs config -> counter and never the reverse.
+# ``HTTP_COUNTER_DRAIN_INTERVAL_SECONDS`` is how often the fold runs. The grain is
+# a minute, so a cadence at or above that is what bounds the write cost at one
+# row per route per minute; draining faster cannot add information and draining
+# slower leaves the operator's "recent past" stale.
+DEFAULT_HTTP_COUNTER_MAX_SERIES = 5000
+DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS = 60
+# MOD-013's ALERT THRESHOLDS (Batch 3, #717; plan-phase14 §11). Every one of
+# these is a LIMIT a deployment may have to move - a bigger budget, a busier
+# queue, a stricter provider - so each is configuration (coding-standards §9.1)
+# rather than a constant buried in the rule that reads it. The four values that
+# are deliberately NOT here are the ones a decision record pins: the seven-day
+# cost baseline (ADR-0027 D8), the 1% error-rate objective, the 100-request
+# floor and the 30 s AI latency objective (ADR-0030 D1, D3). A pinned
+# objective is a promise, not a knob, and §9.2 is explicit that only an
+# ADR-pinned threshold may stay a constant.
+DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT = 80
+DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE = Decimal("0.5")
+DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD = Decimal("0.2")
+DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD = 500
+DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS = 900
+# ADR-0027 D8 asks for "a CONFIGURED multiple" of the actor's own trailing
+# average, so this one was always meant to be an environment edit.
+DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE = Decimal("3")
+DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS = 3
+DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT = 1
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -281,6 +373,7 @@ class Settings:
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = DEFAULT_LANGFUSE_HOST
+    langfuse_timeout_seconds: float = DEFAULT_LANGFUSE_TIMEOUT_SECONDS
     # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
     # knob (mock is the fail-closed default); the real provider key/base URL/
     # model. ``__post_init__`` refuses a real provider in dev/test unless demo
@@ -299,10 +392,120 @@ class Settings:
     ai_circuit_breaker_threshold: int = DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD
     ai_circuit_breaker_cooldown_seconds: float = DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS
     ai_monthly_budget_paise: int = DEFAULT_AI_MONTHLY_BUDGET_PAISE
+    # Per-model pricing table (PHASE-14A B1, #699): ``model:price_in:price_out``
+    # entries in paise per token, parsed by :func:`parse_ai_pricing_table`. The
+    # default prices the free mock at 0; a paid deployment sets its serving
+    # model's rate here or in the environment.
+    ai_pricing_table: str = DEFAULT_AI_PRICING_TABLE
     ai_fallback_provider: str = DEFAULT_AI_FALLBACK_PROVIDER
     ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
     ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
     ai_fallback_model: str = DEFAULT_AI_FALLBACK_MODEL
+    # Observability gates (PHASE-14A A5, #693; plan-phase14 §4): all additive
+    # and disabled by default, so boot and tests are unchanged until a gate is
+    # set. ``log_format`` selects the structlog renderer (A1); ``sentry_*``
+    # gates error tracking (A4); ``otel_*`` gate the OTLP exporter, headers and
+    # parent-based sampler ratio (A3); ``otel_service_version`` is the git-SHA
+    # source shared by A3 and A4; ``metrics_enabled`` gates the optional
+    # Prometheus ``/metrics`` surface (A3); ``observability_enabled`` is the
+    # MOD-013 aggregate-consumer gate (B-tickets, plan-phase14 §4), reserved for
+    # a future opt-in - it is not yet read at runtime, because the composition
+    # root registers every module's handlers unconditionally
+    # (worker/main.py ``_MODULE_REGISTERS``); ``grafana_url`` is the browsable
+    # Grafana base the operator ``/deeplinks`` read links out to (C1b #707).
+    log_format: str = DEFAULT_LOG_FORMAT
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = DEFAULT_SENTRY_TRACES_SAMPLE_RATE
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = ""
+    otel_exporter_otlp_headers: tuple[str, ...] = ()
+    otel_traces_sampler_ratio: float = DEFAULT_OTEL_TRACES_SAMPLER_RATIO
+    otel_service_version: str = ""
+    metrics_enabled: bool = False
+    observability_enabled: bool = False
+    # Browsable Grafana base URL (C1b #707): the Grafana Cloud stack the OTLP
+    # endpoint above exports into. NOT derived from
+    # ``otel_exporter_otlp_endpoint`` - that host is an ingest endpoint, not
+    # something an operator can open - and empty by default, so an unconfigured
+    # deployment answers the ``/deeplinks`` read with an absent link.
+    grafana_url: str = ""
+    # Ceiling on the dates one nightly rollup invocation may cover (B5b #705,
+    # `worker/rollup.py`). A first-run backfill of a long history, or a catch-up
+    # after a long outage, is trimmed to the OLDEST `max_dates` days and the rest
+    # is picked up by the next invocation, so no single pass is unbounded while
+    # nothing is skipped. A limit, so configuration (coding-standards §9.1), not a
+    # constant.
+    observability_rollup_max_dates: int = DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
+    # The gateway error-capture seam's own gate (B8 #726, gated #753): off (the
+    # default) means no server error is captured at all - the catch-all seam and
+    # the gateway middleware answer exactly as they would without the feature,
+    # and the worker skips the error-buffer drain job. On, the seam is armed and
+    # the ceiling below applies.
+    error_capture_enabled: bool = False
+    # Ceiling on the in-process error-capture buffer (B8 #726). The gateway error
+    # seam appends one record per server error and the worker drains the buffer on
+    # ``error_drain_interval_seconds``; a full buffer DISCARDS its oldest record, so
+    # this is the point past which the error stream becomes incomplete rather than
+    # the point past which the process becomes unsafe. A limit, so configuration
+    # (coding-standards §9.1), not a constant.
+    error_capture_max_records: int = DEFAULT_ERROR_CAPTURE_MAX_RECORDS
+    # How often the worker drains the error buffer, in seconds. Bounded below only
+    # by "must be positive": a zero interval is a busy loop against the database.
+    error_drain_interval_seconds: int = DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS
+    # Ceiling on the in-process per-minute HTTP counter (B9 #727). Every answered
+    # request increments one ``(minute, route, method, status class)`` bucket and
+    # the worker folds them into ``observability_http_minute`` on
+    # ``http_counter_drain_interval_seconds``; at the ceiling the OLDEST minute is
+    # discarded and counted, so this is the point past which throughput for the
+    # dropped minutes is missing rather than the point past which the process
+    # becomes unsafe. A limit, so configuration (coding-standards §9.1).
+    http_counter_max_series: int = DEFAULT_HTTP_COUNTER_MAX_SERIES
+    # The per-minute HTTP counter's own gate (B9 #727, gated #753): off (the
+    # default) means no request is counted at all - the gateway middleware is not
+    # installed, the seam counts nothing, and the worker skips the fold job. On,
+    # the counter is armed and the ceiling above applies. Off by default, like
+    # every gate in this block: a deployment opts in per feature, and the inert
+    # path is proven by the CI gate job so it cannot rot.
+    http_counter_enabled: bool = False
+    # How often the worker folds the per-minute counter into the observability
+    # schema, in seconds. Bounded below only by "must be positive": a zero
+    # interval is a busy loop against the database.
+    http_counter_drain_interval_seconds: int = DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
+    # MOD-013's alert thresholds: the LIMITS each rollup rule compares against.
+    # They are configuration rather than constants in the rule that reads them
+    # (coding-standards §9.1), so a deployment moves a threshold by an
+    # environment edit and never by a code change. The defaults are the values
+    # plan-phase14 §11 names.
+    observability_budget_alert_threshold_pct: int = DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT
+    observability_breaker_open_success_rate: Decimal = (
+        DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE
+    )
+    observability_provider_health_drop_threshold: Decimal = (
+        DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD
+    )
+    observability_outbox_backlog_threshold: int = DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD
+    observability_queue_age_threshold_seconds: int = (
+        DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS
+    )
+    observability_cost_outlier_multiple: Decimal = DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE
+    observability_cost_outlier_min_baseline_days: int = (
+        DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS
+    )
+    observability_provider_rate_limit_alert_count: int = (
+        DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT
+    )
+    # Batch-3 observability feature gates (#753): additive and disabled by
+    # default, one gate per feature that shipped in this batch, so a deployment
+    # opts in per feature and local dev / tests / CI run without them. The A5
+    # gate block above is untouched: ``observability_enabled`` stays reserved.
+    # ``evaluation_enabled`` runs the #751 code-evaluator batch as part of the
+    # daily Langfuse pull (``worker/langfuse_metrics.py``); with it off the
+    # pull still runs and only the evaluators are skipped. ``annotation_queue_enabled``
+    # feeds the #752 doctor-review annotation queue from review-outcome events;
+    # with it off the outcome seats still record their funnel/business effects
+    # and only the annotation write is skipped (``modules.observability.adapters``).
+    evaluation_enabled: bool = False
+    annotation_queue_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -437,6 +640,42 @@ class Settings:
             raise ValueError("ai_circuit_breaker_threshold must be positive")
         if self.ai_monthly_budget_paise <= 0:
             raise ValueError("ai_monthly_budget_paise must be positive")
+        if self.observability_rollup_max_dates <= 0:
+            raise ValueError("observability_rollup_max_dates must be positive")
+        if self.error_capture_max_records <= 0:
+            raise ValueError("error_capture_max_records must be positive")
+        if self.error_drain_interval_seconds <= 0:
+            raise ValueError("error_drain_interval_seconds must be positive")
+        if self.http_counter_max_series <= 0:
+            raise ValueError("http_counter_max_series must be positive")
+        if self.http_counter_drain_interval_seconds <= 0:
+            raise ValueError("http_counter_drain_interval_seconds must be positive")
+        if not 0 < self.observability_budget_alert_threshold_pct <= 100:
+            # A percentage outside 0-100 is not a percentage: at zero the alert
+            # would fire on every day the platform spends anything, and above
+            # 100 it could never fire at all.
+            raise ValueError("observability_budget_alert_threshold_pct must be in (0, 100]")
+        if not 0 < self.observability_breaker_open_success_rate <= 1:
+            raise ValueError("observability_breaker_open_success_rate must be in (0, 1]")
+        if not 0 < self.observability_provider_health_drop_threshold < 1:
+            # A drop of a whole success rate is not a drop; a threshold of zero
+            # would fire on any movement at all.
+            raise ValueError("observability_provider_health_drop_threshold must be in (0, 1)")
+        if self.observability_outbox_backlog_threshold <= 0:
+            raise ValueError("observability_outbox_backlog_threshold must be positive")
+        if self.observability_queue_age_threshold_seconds <= 0:
+            raise ValueError("observability_queue_age_threshold_seconds must be positive")
+        if self.observability_cost_outlier_multiple <= 1:
+            # A multiple of one or less fires on every day merely ABOVE the
+            # actor's own average, which is what half of any week looks like.
+            raise ValueError("observability_cost_outlier_multiple must be greater than 1")
+        if self.observability_cost_outlier_min_baseline_days <= 0:
+            raise ValueError("observability_cost_outlier_min_baseline_days must be positive")
+        if self.observability_provider_rate_limit_alert_count <= 0:
+            # Zero refusals is the ABSENCE of the condition, not a mild form of
+            # it; a threshold of zero would make the alert permanent.
+            raise ValueError("observability_provider_rate_limit_alert_count must be positive")
+        parse_ai_pricing_table(self.ai_pricing_table)
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
         if self.redis_consent_ttl_seconds <= 0:
@@ -470,6 +709,8 @@ class Settings:
                 "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must both be set or "
                 "both empty; refusing to initialise Langfuse with a partial key pair."
             )
+        if not math.isfinite(self.langfuse_timeout_seconds) or self.langfuse_timeout_seconds <= 0:
+            raise ValueError("langfuse_timeout_seconds must be finite and positive")
         intake_backend = self.intake_media_backend.strip().lower()
         if intake_backend not in {"local", "supabase"}:
             raise ValueError(
@@ -533,6 +774,35 @@ class Settings:
                     "profile_media_backend='supabase' requires "
                     "SUPABASE_SERVICE_ROLE_KEY from the environment"
                 )
+        log_format = self.log_format.strip().lower()
+        if log_format not in {"console", "json"}:
+            raise ValueError(
+                f"unsupported log_format {self.log_format!r}; expected 'console' or 'json'"
+            )
+        if (
+            not math.isfinite(self.sentry_traces_sample_rate)
+            or not 0 <= self.sentry_traces_sample_rate <= 1
+        ):
+            raise ValueError(
+                "sentry_traces_sample_rate must be finite and between 0 and 1 inclusive"
+            )
+        if self.sentry_traces_sample_rate > 0 and not self.sentry_dsn.strip():
+            raise ValueError(
+                "sentry_traces_sample_rate>0 requires SENTRY_DSN; refusing a sample "
+                "rate with no Sentry DSN (fail-closed)."
+            )
+        if (
+            not math.isfinite(self.otel_traces_sampler_ratio)
+            or not 0 <= self.otel_traces_sampler_ratio <= 1
+        ):
+            raise ValueError(
+                "otel_traces_sampler_ratio must be finite and between 0 and 1 inclusive"
+            )
+        if self.otel_enabled and not self.otel_exporter_otlp_endpoint.strip():
+            raise ValueError(
+                "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
+                "environment (fail-closed)."
+            )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -572,6 +842,22 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _env_decimal(name: str, default: Decimal) -> Decimal:
+    """Parse a decimal environment variable, falling back to ``default``.
+
+    Decimal rather than float because the thresholds that use it are RATIOS
+    compared for equality against a rolled figure: a float would carry a
+    binary approximation into a comparison the operator reads as exact.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return Decimal(raw.strip())
+    except InvalidOperation as exc:
+        raise ValueError(f"{name} must be a decimal number; got {raw!r}") from exc
+
+
 def _env_csv(name: str) -> tuple[str, ...]:
     """Parse a comma-separated environment variable into trimmed entries.
 
@@ -582,6 +868,37 @@ def _env_csv(name: str) -> tuple[str, ...]:
     if raw is None:
         return ()
     return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def parse_ai_pricing_table(raw: str) -> dict[str, tuple[Decimal, Decimal]]:
+    """Parse an ``AI_PRICING_TABLE`` value into per-model paise-per-token rates.
+
+    Format: comma-separated ``model:price_in:price_out`` entries, each price in
+    paise per token as a decimal (sub-paise fractions are allowed). Empty
+    entries are skipped; a malformed entry raises ``ValueError`` so a bad table
+    fails closed at boot rather than silently pricing a model at 0.
+    """
+    table: dict[str, tuple[Decimal, Decimal]] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = [part.strip() for part in entry.split(":")]
+        if len(parts) != 3 or not parts[0]:
+            raise ValueError(
+                f"malformed AI pricing entry {entry!r}; expected 'model:price_in:price_out'"
+            )
+        try:
+            price_in = Decimal(parts[1])
+            price_out = Decimal(parts[2])
+        except InvalidOperation as exc:
+            raise ValueError(
+                f"malformed AI pricing entry {entry!r}; rates must be decimal paise-per-token"
+            ) from exc
+        if price_in < 0 or price_out < 0:
+            raise ValueError(f"AI pricing rates must be non-negative: {entry!r}")
+        table[parts[0]] = (price_in, price_out)
+    return table
 
 
 def get_settings() -> Settings:
@@ -712,6 +1029,9 @@ def get_settings() -> Settings:
         langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
         langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
         langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
+        langfuse_timeout_seconds=_env_float(
+            "LANGFUSE_TIMEOUT_SECONDS", DEFAULT_LANGFUSE_TIMEOUT_SECONDS
+        ),
         ai_provider=os.environ.get("AI_PROVIDER", DEFAULT_AI_PROVIDER),
         ai_model=os.environ.get("AI_MODEL", DEFAULT_AI_MODEL),
         ai_asr_model=os.environ.get("AI_ASR_MODEL", DEFAULT_AI_ASR_MODEL),
@@ -731,8 +1051,74 @@ def get_settings() -> Settings:
         ai_monthly_budget_paise=_env_int(
             "AI_MONTHLY_BUDGET_PAISE", DEFAULT_AI_MONTHLY_BUDGET_PAISE
         ),
+        ai_pricing_table=os.environ.get("AI_PRICING_TABLE", DEFAULT_AI_PRICING_TABLE),
         ai_fallback_provider=os.environ.get("AI_FALLBACK_PROVIDER", DEFAULT_AI_FALLBACK_PROVIDER),
         ai_fallback_base_url=os.environ.get("AI_FALLBACK_BASE_URL", DEFAULT_AI_FALLBACK_BASE_URL),
         ai_fallback_api_key=os.environ.get("AI_FALLBACK_API_KEY", DEFAULT_AI_FALLBACK_API_KEY),
         ai_fallback_model=os.environ.get("AI_FALLBACK_MODEL", DEFAULT_AI_FALLBACK_MODEL),
+        log_format=os.environ.get("LOG_FORMAT", DEFAULT_LOG_FORMAT),
+        sentry_dsn=os.environ.get("SENTRY_DSN", ""),
+        sentry_traces_sample_rate=_env_float(
+            "SENTRY_TRACES_SAMPLE_RATE", DEFAULT_SENTRY_TRACES_SAMPLE_RATE
+        ),
+        otel_enabled=_env_bool("OTEL_ENABLED", False),
+        otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+        otel_exporter_otlp_headers=_env_csv("OTEL_EXPORTER_OTLP_HEADERS"),
+        otel_traces_sampler_ratio=_env_float(
+            "OTEL_TRACES_SAMPLER_RATIO", DEFAULT_OTEL_TRACES_SAMPLER_RATIO
+        ),
+        otel_service_version=os.environ.get("OTEL_SERVICE_VERSION", ""),
+        grafana_url=os.environ.get("GRAFANA_URL", ""),
+        metrics_enabled=_env_bool("METRICS_ENABLED", False),
+        observability_enabled=_env_bool("OBSERVABILITY_ENABLED", False),
+        observability_rollup_max_dates=_env_int(
+            "OBSERVABILITY_ROLLUP_MAX_DATES", DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES
+        ),
+        error_capture_enabled=_env_bool("ERROR_CAPTURE_ENABLED", False),
+        error_capture_max_records=_env_int(
+            "ERROR_CAPTURE_MAX_RECORDS", DEFAULT_ERROR_CAPTURE_MAX_RECORDS
+        ),
+        error_drain_interval_seconds=_env_int(
+            "ERROR_DRAIN_INTERVAL_SECONDS", DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS
+        ),
+        http_counter_enabled=_env_bool("HTTP_COUNTER_ENABLED", False),
+        http_counter_max_series=_env_int(
+            "HTTP_COUNTER_MAX_SERIES", DEFAULT_HTTP_COUNTER_MAX_SERIES
+        ),
+        http_counter_drain_interval_seconds=_env_int(
+            "HTTP_COUNTER_DRAIN_INTERVAL_SECONDS", DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
+        ),
+        observability_budget_alert_threshold_pct=_env_int(
+            "OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT",
+            DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT,
+        ),
+        observability_breaker_open_success_rate=_env_decimal(
+            "OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE",
+            DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE,
+        ),
+        observability_provider_health_drop_threshold=_env_decimal(
+            "OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD",
+            DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD,
+        ),
+        observability_outbox_backlog_threshold=_env_int(
+            "OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD",
+            DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD,
+        ),
+        observability_queue_age_threshold_seconds=_env_int(
+            "OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS",
+            DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS,
+        ),
+        observability_cost_outlier_multiple=_env_decimal(
+            "OBSERVABILITY_COST_OUTLIER_MULTIPLE", DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE
+        ),
+        observability_cost_outlier_min_baseline_days=_env_int(
+            "OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS",
+            DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS,
+        ),
+        observability_provider_rate_limit_alert_count=_env_int(
+            "OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT",
+            DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT,
+        ),
+        evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
+        annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),
     )

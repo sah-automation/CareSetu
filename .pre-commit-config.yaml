@@ -65,6 +65,13 @@ repos:
         additional_dependencies: []
         pass_filenames: false
         always_run: true
+      - id: check-otel-collector-config
+        name: otel collector cardinality firewall lint (PHASE-14 T32 #749)
+        entry: python apps/backend/scripts/check_otel_collector_config.py
+        language: python
+        additional_dependencies: [pyyaml>=6]
+        pass_filenames: false
+        always_run: true
       - id: check-em-dashes
         name: no-em-dash gate (Ticket #49)
         entry: python apps/backend/scripts/check_em_dashes.py

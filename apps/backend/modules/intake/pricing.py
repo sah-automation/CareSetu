@@ -6,13 +6,16 @@ launch-pricing formula::
 
     cost_paise = input_tokens * price_in + output_tokens * price_out
 
-The per-model price table (``PRICING_TABLE``) prices PAID models only, in paise
-per token. A model with no entry costs 0: free models are simply absent so their
-real (zero) usage records 0 naturally, and an unknown model records 0 rather
-than inventing a price - a paid model MUST carry an entry or its cost never
-reaches the meter. The budget meter (:mod:`modules.intake.budget_meter`)
-aggregates ``intake_ai_jobs.cost_paise`` as the authoritative monthly AI spend
-(NFR-001), so this helper is what makes metered spend reflect real usage.
+The per-model price table (``PRICING_TABLE``) is populated from deployment
+config (PHASE-14A B1, #699): ``AI_PRICING_TABLE`` / :data:`app.config.DEFAULT_AI_PRICING_TABLE`
+carries ``model:price_in:price_out`` rates in paise per token, so a paid model's
+rate is an environment edit, never a code change (coding-standards §9.1). A
+model with an explicit entry prices at its real rate - 0 for a KNOWN free
+model; a model with NO entry is UNKNOWN and also costs 0, but the miss is
+logged (warning) so a missing price is visible, never silently zero. The budget
+meter (:mod:`modules.intake.budget_meter`) aggregates
+``intake_ai_jobs.cost_paise`` as the authoritative monthly AI spend (NFR-001),
+so this helper is what makes metered spend reflect real usage.
 
 Prices are ``Decimal`` paise per token so sub-paise cost fractions survive the
 integer ``cost_paise`` column; a fractional paise rounds half-up to the nearest
@@ -21,38 +24,91 @@ paise.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
-#: Per-model launch prices in paise per token, for PAID models only. Free
-#: models carry no entry so their usage records 0 naturally; an unknown model
-#: (no entry) also costs 0 - a paid model must carry an entry or it is never
-#: metered. The table is deliberately empty at launch (the mock is free):
-#: shipping a real paid model's price is deployment configuration, never
-#: hardcoded (coding-standards §9.1) - it lands in Settings/env alongside the
-#: model's ``AI_MODEL`` knob, mirroring how ``DEFAULT_MONTHLY_BUDGET_PAISE``
-#: (budget_meter.py + config.py) is the code-side default until configured.
-PRICING_TABLE: Mapping[str, ModelPrice] = {}
+from app.config import (
+    DEFAULT_AI_PRICING_TABLE,
+    get_settings,
+    parse_ai_pricing_table,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """Paise-per-token price of one paid model (the launch-pricing formula)."""
+    """Paise-per-token price of one model (the launch-pricing formula).
+
+    An explicit price of 0 marks a KNOWN free model (metered 0, never flagged);
+    a model absent from ``PRICING_TABLE`` is UNKNOWN - also 0, but flagged so a
+    missing rate is visible rather than silent.
+    """
 
     price_in_paise: Decimal
     price_out_paise: Decimal
 
 
-def compute_cost_paise(model: str, *, input_tokens: int, output_tokens: int) -> int:
+def _to_pricing_table(
+    rates: Mapping[str, tuple[Decimal, Decimal]],
+) -> dict[str, ModelPrice]:
+    return {
+        model: ModelPrice(price_in_paise=price_in, price_out_paise=price_out)
+        for model, (price_in, price_out) in rates.items()
+    }
+
+
+#: The code-side default per-model table, built from the deployment config
+#: constant (``model:price_in:price_out`` paise-per-token entries). Free is an
+#: explicit 0 entry so it is a known-free model, never flagged; an unknown
+#: model has no entry, prices 0, and is flagged. The effective table is
+#: resolved lazily from Settings/env by :func:`resolve_pricing_table` so a
+#: deployment's rates apply without a restart-freezing import.
+PRICING_TABLE: Mapping[str, ModelPrice] = _to_pricing_table(
+    parse_ai_pricing_table(DEFAULT_AI_PRICING_TABLE)
+)
+
+
+def resolve_pricing_table() -> Mapping[str, ModelPrice]:
+    """The effective table for this process: config/env rates, code default fallback.
+
+    Read from ``get_settings()`` so an ``AI_PRICING_TABLE`` value takes effect
+    without the module import freezing an incomplete table (the pipeline already
+    reads Settings at its own call sites this way). An empty configured table
+    (``AI_PRICING_TABLE=""``) falls back to the code-side ``PRICING_TABLE`` so
+    the free mock stays known-free until a deployment prices a model.
+    """
+    raw = get_settings().ai_pricing_table.strip()
+    if not raw:
+        return PRICING_TABLE
+    return _to_pricing_table(parse_ai_pricing_table(raw))
+
+
+def compute_cost_paise(
+    model: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    table: Mapping[str, ModelPrice] | None = None,
+) -> int:
     """Cost in paise of one metered call, from the provider's token usage.
 
-    ``input_tokens * price_in + output_tokens * price_out`` off
-    ``PRICING_TABLE``; a model with no entry (free, or unknown) costs 0
-    naturally rather than inventing a price.
+    ``input_tokens * price_in + output_tokens * price_out`` off the resolved
+    pricing table (or an injected ``table`` for pure unit testing). A model with
+    no entry (unknown) costs 0 naturally rather than inventing a price, and the
+    miss is logged as a warning so a missing rate is visible, not silently
+    hidden. ``int -> int`` so the ``cost_paise`` column contract is unchanged.
     """
-    price = PRICING_TABLE.get(model)
+    effective = resolve_pricing_table() if table is None else table
+    price = effective.get(model)
     if price is None:
+        logger.warning(
+            "AI pricing: no rate configured for model %r; metering 0 paise. "
+            "Add it to AI_PRICING_TABLE (model:price_in:price_out).",
+            model,
+        )
         return 0
     total = (
         Decimal(input_tokens) * price.price_in_paise
@@ -61,4 +117,9 @@ def compute_cost_paise(model: str, *, input_tokens: int, output_tokens: int) -> 
     return int(total.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
-__all__ = ["PRICING_TABLE", "ModelPrice", "compute_cost_paise"]
+__all__ = [
+    "PRICING_TABLE",
+    "ModelPrice",
+    "compute_cost_paise",
+    "resolve_pricing_table",
+]

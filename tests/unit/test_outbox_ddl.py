@@ -23,6 +23,7 @@ EXPECTED_MODULE_SCHEMAS = (
     "settlement",
     "notify",
     "audit",
+    "observability",
 )
 
 
@@ -43,6 +44,7 @@ def test_outbox_table_contract() -> None:
         "status",
         "attempts",
         "next_attempt_at",
+        "traceparent",
     }
     assert list(table.primary_key.columns) == [table.c.id]
     assert not table.c.event_id.nullable
@@ -50,6 +52,7 @@ def test_outbox_table_contract() -> None:
     assert isinstance(table.c.payload.type, JSONB)
     assert table.c.status.server_default is not None
     assert table.c.attempts.server_default is not None
+    assert table.c.traceparent.nullable
     assert OUTBOX_STATUSES == ("pending", "inflight", "dead_letter")
 
 

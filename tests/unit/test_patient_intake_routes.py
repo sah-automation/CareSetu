@@ -214,6 +214,130 @@ class StubIntakeFacade:
         self._maybe_raise()
         return self.pick_result
 
+    async def record_composer_opened(self, **kwargs: object) -> None:
+        self.called_with.append(("record_composer_opened", dict(kwargs)))
+        self._maybe_raise()
+
+
+# ---------------------------------------------------------------------------
+# Tests: record_composer_opened (the funnel entry step, B4e #721)
+# ---------------------------------------------------------------------------
+
+
+def _composer_opened_calls(facade: StubIntakeFacade) -> list[dict[str, object]]:
+    """The facade calls the entry seam made, with the minted trace id stripped."""
+    calls = [kwargs for name, kwargs in facade.called_with if name == "record_composer_opened"]
+    for kwargs in calls:
+        # The minted id is a per-request uuid4 hex; its exact value is not the
+        # contract, its shape and provenance are (see the X-Request-Id test).
+        trace_id = kwargs["trace_id"]
+        assert isinstance(trace_id, str)
+        assert len(trace_id) == 32
+        assert all(char in "0123456789abcdef" for char in trace_id)
+    return [{**kwargs, "trace_id": "<request-trace-id>"} for kwargs in calls]
+
+
+def test_composer_opened_records_the_entry_and_answers_204() -> None:
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/composer-opened",
+        headers=_bearer(_token()),
+    )
+
+    # 204 with no body: the route has nothing to say back, which is also the
+    # strongest statement it can make that it took in nothing.
+    assert response.status_code == 204
+    assert response.content == b""
+    assert _composer_opened_calls(facade) == [{"patient_id": 7, "trace_id": "<request-trace-id>"}]
+
+
+def test_composer_opened_rejects_a_body_instead_of_dropping_it() -> None:
+    """api-standards §3 strict mode, enforced rather than assumed.
+
+    This is also the proof that the patient is the authenticated subject and
+    never something the client asserts: ``ComposerOpenedRequest`` forbids every
+    field, so ``patient_id: 999`` is refused outright rather than overriding the
+    token's subject 7, and a client cannot smuggle clinical content into an entry
+    event that records an arrival. Declaring the endpoint bodyless by omitting a
+    body model would leave FastAPI ignoring the payload, so a mis-wired client
+    could believe it recorded a patient id or some symptoms when it recorded
+    neither. The empty ``extra="forbid"`` model turns that silence into a 422.
+    """
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/composer-opened",
+        json={"patient_id": 999, "text": "Mujhe sar dard hai"},
+        headers=_bearer(_token()),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    # A refused body is not a recorded entry.
+    assert facade.called_with == []
+
+
+def test_composer_opened_accepts_an_empty_object() -> None:
+    """A client that sends ``{}`` is fine - there is nothing required to fill."""
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post("/v1/intake/composer-opened", json={}, headers=_bearer(_token()))
+
+    assert response.status_code == 204
+    assert len(_composer_opened_calls(facade)) == 1
+
+
+def test_composer_opened_unauthenticated_rejected() -> None:
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post("/v1/intake/composer-opened")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_UNAUTHENTICATED"
+    # An anonymous arrival is not a patient arrival, so nothing is recorded.
+    assert facade.called_with == []
+
+
+def test_composer_opened_partner_scope_rejected() -> None:
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/composer-opened",
+        headers=_bearer(_token(scope="partner")),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert facade.called_with == []
+
+
+def test_composer_opened_honours_a_client_supplied_request_id() -> None:
+    """The gateway's single trace-id read point is the session key's source.
+
+    ``X-Request-Id`` is already how the platform scopes a request, so a client
+    that already carries one gets its own value on the entry event rather than a
+    minted one - the route resolves it through ``resolve_trace_id`` instead of
+    minting a second id of its own.
+    """
+    facade = StubIntakeFacade()
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/intake/composer-opened",
+        headers={**_bearer(_token()), "X-Request-Id": "client-supplied-trace"},
+    )
+
+    assert response.status_code == 204
+    assert facade.called_with == [
+        ("record_composer_opened", {"patient_id": 7, "trace_id": "client-supplied-trace"})
+    ]
+
 
 # ---------------------------------------------------------------------------
 # Tests: submit_intake
@@ -975,6 +1099,29 @@ def test_upload_media_exhausted_cap_answers_429_with_retry_after() -> None:
     assert body_429["code"] == "RATE_LIMIT_EXCEEDED"
     assert body_429["trace_id"]
     assert body_429["details"] == {}
+    assert response.headers["Retry-After"] == "60"
+
+
+def test_composer_opened_exhausted_cap_answers_429_with_retry_after() -> None:
+    """The funnel entry is a row write, so it answers the same strict tier (#721).
+
+    It carries no clinical content, but it writes an outbox row on every call
+    and shares its budget with the capture writes it feeds - so a client looping
+    the composer cannot spray outbox rows unbounded.
+    """
+    client = _rate_limited_client(max_requests=2)
+    headers = _bearer(_token())
+
+    assert client.post("/v1/intake/composer-opened", headers=headers).status_code == 204
+    assert client.post("/v1/intake/composer-opened", headers=headers).status_code == 204
+
+    response = client.post("/v1/intake/composer-opened", headers=headers)
+
+    assert response.status_code == 429
+    body = response.json()
+    assert body["code"] == "RATE_LIMIT_EXCEEDED"
+    assert body["trace_id"]
+    assert body["details"] == {}
     assert response.headers["Retry-After"] == "60"
 
 

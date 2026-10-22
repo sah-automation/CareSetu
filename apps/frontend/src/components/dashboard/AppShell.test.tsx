@@ -34,6 +34,7 @@ import * as axe from "axe-core";
 
 import { AppShell } from "./AppShell";
 import { maskedPhone } from "./BottomTabs";
+import { NAV_CONFIG, splitMobileTabs } from "./nav-config";
 import { DoctorProfileProvider } from "@/lib/doctor/DoctorProfileContext";
 import {
   ProfileProvider,
@@ -728,17 +729,17 @@ describe.each(["doctor", "partner", "operator"] as const)(
     it("renders the role's nav-config entries with active highlighting", () => {
       setup();
 
-      const expected = {
-        doctor: ["queue", "cases", "patients", "profile"],
-        partner: ["orders", "history", "settlements", "profile"],
-        operator: ["home", "verifications", "disputes", "audit"],
-      }[role];
-
-      expected.forEach((key) => {
-        expect(screen.getByTestId(`nav-${key}`)).toBeInTheDocument();
-        expect(screen.getByTestId(`tab-${key}`)).toBeInTheDocument();
-      });
-      expect(screen.getByTestId(`nav-${expected[0]}`)).toHaveAttribute(
+      const config = NAV_CONFIG[role];
+      // Walk the configuration rather than a hand-kept list: every destination
+      // is in the sidebar (nav-<key>), and the phone bar columns are exactly
+      // what the split helper keeps off the More sheet (#746).
+      for (const item of config) {
+        expect(screen.getByTestId(`nav-${item.key}`)).toBeInTheDocument();
+      }
+      for (const item of splitMobileTabs(config).tabs) {
+        expect(screen.getByTestId(`tab-${item.key}`)).toBeInTheDocument();
+      }
+      expect(screen.getByTestId(`nav-${config[0].key}`)).toHaveAttribute(
         "aria-current",
         "page",
       );
@@ -767,6 +768,194 @@ describe.each(["doctor", "partner", "operator"] as const)(
     });
   },
 );
+
+// #744: the operator's Observability disclosure parent reads as current while
+// the operator is anywhere inside the group. #746 moved the group off the phone
+// bar, so the two surfaces are now the sidebar row and the More-sheet row - the
+// one shared predicate keeps them from disagreeing about where the operator is.
+describe("AppShell operator Observability parent (#744)", () => {
+  function openMore() {
+    fireEvent.click(screen.getByTestId("more-trigger"));
+    return screen.getByTestId("more-sheet");
+  }
+
+  it("marks the parent current on a nested sub-destination in both surfaces", () => {
+    renderShell("operator", "/operator/observability/business");
+
+    // The group row is the current group ("true") in both surfaces; the
+    // destination row below it is the current page ("page"). One element per
+    // navigation set may claim the current page.
+    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(screen.getByTestId("nav-business")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    const sheet = openMore();
+    expect(within(sheet).getByTestId("more-observability")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(within(sheet).getByTestId("more-business")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
+
+  it("stays unlit on a sibling that merely shares a string prefix", () => {
+    renderShell("operator", "/operator/observability-archive");
+
+    expect(screen.getByTestId("nav-observability")).not.toHaveAttribute(
+      "aria-current",
+    );
+    const sheet = openMore();
+    expect(within(sheet).getByTestId("more-observability")).not.toHaveAttribute(
+      "aria-current",
+    );
+  });
+});
+
+// #746: the phone bar keeps a small fixed set plus More, and the More sheet
+// mirrors the sidebar exactly - every destination in the configuration, grouped
+// and indented, so nothing is unreachable on a phone. The assertions walk the
+// configuration rather than listing names: a hard-coded list would pass while
+// the sheet silently dropped a destination.
+describe("AppShell operator mobile More sheet (#746)", () => {
+  function openMore(pathname = "/operator/observability/business") {
+    renderShell("operator", pathname);
+    fireEvent.click(screen.getByTestId("more-trigger"));
+    return screen.getByTestId("more-sheet");
+  }
+
+  it("reaches every destination in the configuration, grouped and indented", () => {
+    const sheet = openMore();
+
+    for (const item of NAV_CONFIG.operator) {
+      expect(within(sheet).getByTestId(`more-${item.key}`)).toBeInTheDocument();
+      for (const child of item.children ?? []) {
+        expect(
+          within(sheet).getByTestId(`more-${child.key}`),
+        ).toBeInTheDocument();
+      }
+    }
+
+    // Group headers mirror the sidebar's sections.
+    expect(within(sheet).getByTestId("more-section-work")).toHaveTextContent(
+      "Work",
+    );
+    expect(
+      within(sheet).getByTestId("more-section-observability"),
+    ).toHaveTextContent("Observability");
+
+    // Indentation: the sub-destinations sit inside the parent group's menu.
+    const menu = within(sheet).getByTestId("more-group-observability-menu");
+    expect(within(menu).getByTestId("more-business")).toHaveAttribute(
+      "href",
+      "/operator/observability/business",
+    );
+    expect(within(menu).getByTestId("more-overview")).toHaveAttribute(
+      "href",
+      "/operator/observability",
+    );
+  });
+
+  it("keeps coming-soon destinations non-interactive and dimmed", () => {
+    const sheet = openMore();
+
+    const disputes = within(sheet).getByTestId("more-disputes");
+    expect(disputes.tagName).toBe("SPAN");
+    expect(disputes).toHaveAttribute("aria-disabled", "true");
+    // Dimmed, with the same Soon badge the sidebar shows: the shared
+    // coming-soon convention, not a second rendering.
+    expect(disputes.className).toContain("opacity-60");
+    expect(within(disputes).getByTestId("soon-badge")).toBeInTheDocument();
+    // A live top-level destination and live sub-destinations stay real links.
+    // #747: Settings is a live placeholder shell, so it is a link, not a
+    // coming-soon stub like the Work entries that still lack pages.
+    expect(within(sheet).getByTestId("more-home").tagName).toBe("A");
+    expect(within(sheet).getByTestId("more-business").tagName).toBe("A");
+    const settings = within(sheet).getByTestId("more-settings");
+    expect(settings.tagName).toBe("A");
+    expect(settings).toHaveAttribute(
+      "href",
+      "/operator/observability/settings",
+    );
+  });
+
+  it("keeps a disclosure parent off the phone bar, behind More", () => {
+    renderShell("operator", "/operator");
+
+    expect(screen.getByTestId("more-trigger")).toBeInTheDocument();
+    expect(screen.queryByTestId("tab-observability")).not.toBeInTheDocument();
+    for (const key of ["home", "verifications", "disputes", "audit"]) {
+      expect(screen.getByTestId(`tab-${key}`)).toBeInTheDocument();
+    }
+  });
+});
+
+// #745: the grouped operator sidebar end to end through the shell - the
+// disclosure's sub-destinations render under their parent while the operator is
+// inside the group, and the collapsed rail still offers a way back in.
+describe("AppShell operator grouped sidebar (#745)", () => {
+  it("renders the Observability sub-destinations under their parent inside the group", () => {
+    renderShell("operator", "/operator/observability/business");
+
+    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    const group = screen.getByTestId("sidebar-group-observability");
+    for (const key of [
+      "overview",
+      "business",
+      "product",
+      "reliability",
+      "cost",
+      "usage",
+      "quality",
+      "health",
+      "settings",
+    ]) {
+      expect(within(group).getByTestId(`nav-${key}`)).toBeInTheDocument();
+    }
+  });
+
+  it("renders every sub-destination as a live link inside the sub-menu", () => {
+    renderShell("operator", "/operator/observability/business");
+
+    const settings = within(
+      screen.getByTestId("sidebar-group-observability-menu"),
+    ).getByTestId("nav-settings");
+    // #747: Settings is a live placeholder shell, so it is a real link rather
+    // than the coming-soon span it used to be. No operator sub-destination is
+    // coming-soon any more.
+    expect(settings.tagName).toBe("A");
+    expect(settings).toHaveAttribute(
+      "href",
+      "/operator/observability/settings",
+    );
+  });
+
+  it("keeps the collapsed rail a route into the group", () => {
+    localStorage.setItem("caresetu.sidebar.operator", "collapsed");
+    renderShell("operator", "/operator");
+
+    const anchor = screen.getByTestId("nav-observability");
+    expect(anchor.tagName).toBe("A");
+    expect(anchor).toHaveAttribute("href", "/operator/observability");
+
+    fireEvent.mouseEnter(
+      screen.getByTestId("sidebar-group-observability-collapsed"),
+    );
+    expect(
+      within(screen.getByTestId("sidebar-flyout")).getByRole("link", {
+        name: "Business",
+      }),
+    ).toHaveAttribute("href", "/operator/observability/business");
+  });
+});
 
 // #567: the whole thread, end to end, with no prop hand-fed at any step. The
 // doctor shell knows its own role (its route group pins it), so the account
@@ -1072,7 +1261,9 @@ describe("full-shell collapse preference persistence", () => {
 
     const sidebar = screen.getByTestId("sidebar");
     expect(sidebar.getAttribute("data-collapsed")).toBeNull();
-    expect(sidebar.className).toContain("w-52");
+    // #745: the operator rail widens to 240px for the disclosure's indented
+    // sub-labels; the collapsed width below is what must stay unchanged.
+    expect(sidebar.className).toContain("w-60");
 
     fireEvent.click(screen.getByTestId("sidebar-toggle"));
 

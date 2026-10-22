@@ -24,7 +24,10 @@ from bus.events import (
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
+    EVENT_AI_JOB_QUEUED,
     EVENT_INTAKE_CAPTURED,
+    EVENT_INTAKE_COMPOSER_OPENED,
+    EVENT_INTAKE_DOCTOR_ASSIGNED,
     EVENT_INTAKE_RETRY_REQUESTED,
     EVENT_INTAKE_STARTED,
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
@@ -43,7 +46,10 @@ from modules.intake.domain.events import (
     AiEgressRecordedPayload,
     AiJobCompletedPayload,
     AiJobFailedPayload,
+    AiJobQueuedPayload,
     IntakeCapturedPayload,
+    IntakeComposerOpenedPayload,
+    IntakeDoctorAssignedPayload,
     IntakeRetryRequestedPayload,
     IntakeStartedPayload,
     PreSummaryLowConfidencePayload,
@@ -110,7 +116,10 @@ def register_handlers(registry: HandlerRegistry) -> None:
         (EVENT_PRE_SUMMARY_LOW_CONFIDENCE, PreSummaryLowConfidencePayload),
         (EVENT_AI_JOB_COMPLETED, AiJobCompletedPayload),
         (EVENT_AI_JOB_FAILED, AiJobFailedPayload),
+        (EVENT_AI_JOB_QUEUED, AiJobQueuedPayload),
         (EVENT_AI_EGRESS_RECORDED, AiEgressRecordedPayload),
+        (EVENT_INTAKE_DOCTOR_ASSIGNED, IntakeDoctorAssignedPayload),
+        (EVENT_INTAKE_COMPOSER_OPENED, IntakeComposerOpenedPayload),
     ):
         registry.register_payload_model(event_type, payload_model)
 

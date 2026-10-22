@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import posixpath
+import time
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
@@ -52,6 +53,8 @@ from modules.intake.adapters.ai_gateway import (
     TranscribeResult,
     post_with_backoff,
 )
+from modules.intake.pricing import compute_cost_paise
+from observability.langfuse_span import set_span_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +150,43 @@ class OpenAiCompatibleAdapter:
     def effective_model(self) -> str:
         """The configured model name sent in the chat-completions body."""
         return self._model
+
+    def _record_span(
+        self,
+        task_type: str,
+        *,
+        status: str,
+        started: float,
+        model: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        confidence: float | None = None,
+    ) -> None:
+        """Best-effort attach the allow-listed span metadata (PHASE-14A B2, #700).
+
+        Goes through the allow-list seam so a non-allow-listed field is rejected
+        before it can reach Langfuse; enrichment never raises into the AI call
+        path (``set_span_metadata`` swallows). A no-op when Langfuse is off.
+        """
+        serving_model = model or self._model
+        cost_paise: int | None = None
+        if input_tokens is not None and output_tokens is not None:
+            cost_paise = compute_cost_paise(
+                serving_model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        set_span_metadata(
+            task_type=task_type,
+            provider=self.effective_provider,
+            model=serving_model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            cost_paise=cost_paise,
+            confidence=confidence,
+            status=status,
+        )
 
     def _build_messages(
         self,
@@ -329,57 +369,106 @@ class OpenAiCompatibleAdapter:
                 retries_exhausted=False,
             ) from exc
 
-    @observe
+    @observe(name="ai_transcribe", capture_input=False, capture_output=False)
     async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
+        started = time.monotonic()
         if request.audio_bytes is None:
             logger.error("OpenAI-compatible transcribe called without the audio clip bytes")
+            self._record_span("transcribe", status="failed", started=started, model=self._asr_model)
             raise Ext002CallError(
                 "OpenAI-compatible transcribe requires the audio clip bytes "
                 "(audio_bytes); no bytes supplied",
                 retries_exhausted=False,
             )
         filename = _clip_filename(request.audio_ref)
-        data = await self._post(
-            "/audio/transcriptions",
-            data={
-                "model": self._asr_model,
-                "language": request.context.language,
-            },
-            files={"file": (filename, request.audio_bytes, _clip_mime_type(filename))},
-        )
-        prompt_tokens, completion_tokens = self._extract_transcription_usage_tokens(data)
-        if prompt_tokens or completion_tokens:
-            logger.info(
-                "OpenAI-compatible transcribe tokens: prompt=%d completion=%d",
-                prompt_tokens,
-                completion_tokens,
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        try:
+            data = await self._post(
+                "/audio/transcriptions",
+                data={
+                    "model": self._asr_model,
+                    "language": request.context.language,
+                },
+                files={"file": (filename, request.audio_bytes, _clip_mime_type(filename))},
             )
-        return self._parse_transcribe_response(
-            data,
-            request.context.language,
+            prompt_tokens, completion_tokens = self._extract_transcription_usage_tokens(data)
+            if prompt_tokens or completion_tokens:
+                logger.info(
+                    "OpenAI-compatible transcribe tokens: prompt=%d completion=%d",
+                    prompt_tokens,
+                    completion_tokens,
+                )
+            result = self._parse_transcribe_response(
+                data,
+                request.context.language,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+            )
+        except Ext002CallError:
+            self._record_span(
+                "transcribe",
+                status="failed",
+                started=started,
+                model=self._asr_model,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+            )
+            raise
+        self._record_span(
+            "transcribe",
+            status="success",
+            started=started,
+            model=self._asr_model,
             input_tokens=prompt_tokens,
             output_tokens=completion_tokens,
+            confidence=result.confidence,
         )
+        return result
 
-    @observe
+    @observe(name="ai_structure", capture_input=False, capture_output=False)
     async def structure(self, request: StructureRequest) -> StructureResult:
+        started = time.monotonic()
         messages = self._build_messages(request.transcript, request.context)
-        data = await self._post_chat(messages)
-        prompt_tokens, completion_tokens = self._extract_usage_tokens(data)
-        if prompt_tokens or completion_tokens:
-            logger.info(
-                "OpenAI-compatible structure tokens: prompt=%d completion=%d",
-                prompt_tokens,
-                completion_tokens,
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        try:
+            data = await self._post_chat(messages)
+            prompt_tokens, completion_tokens = self._extract_usage_tokens(data)
+            if prompt_tokens or completion_tokens:
+                logger.info(
+                    "OpenAI-compatible structure tokens: prompt=%d completion=%d",
+                    prompt_tokens,
+                    completion_tokens,
+                )
+            result = self._parse_structure_response(
+                data,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
             )
-        return self._parse_structure_response(
-            data,
+        except Ext002CallError:
+            self._record_span(
+                "structure",
+                status="failed",
+                started=started,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+            )
+            raise
+        self._record_span(
+            "structure",
+            status="success",
+            started=started,
             input_tokens=prompt_tokens,
             output_tokens=completion_tokens,
+            confidence=result.confidence,
         )
+        return result
 
-    @observe
+    @observe(name="ai_draft_rx", capture_input=False, capture_output=False)
     async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
+        started = time.monotonic()
+        self._record_span("draft_rx", status="failed", started=started)
         raise Ext002CallError(
             "draft_rx not supported in this phase",
             retries_exhausted=False,
