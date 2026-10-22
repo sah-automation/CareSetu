@@ -126,13 +126,31 @@ def build_thresholds(monthly_budget_paise: int | None) -> RollupThresholds:
 
     ``AI_MONTHLY_BUDGET_PAISE`` is the same knob the ``BudgetMeter`` reports
     against, so the alert threshold and the runtime meter read one budget.
+
+    Every other threshold comes from the SETTINGS, because each one is a limit a
+    deployment may have to move (coding-standards §9.1) - a bigger budget, a
+    busier queue, a stricter provider - and a limit buried in the rule that reads
+    it is a limit only a code change can move. The four thresholds that are NOT
+    settings are the ones a decision record pins (ADR-0027 D8's seven-day
+    baseline, ADR-0030's error-rate objective, request floor and AI latency
+    objective): a promised objective is not a knob, so those stay constants in
+    the domain module.
     """
+    settings = get_settings()
     return RollupThresholds(
         monthly_budget_paise=(
             monthly_budget_paise
             if monthly_budget_paise is not None
-            else get_settings().ai_monthly_budget_paise
-        )
+            else settings.ai_monthly_budget_paise
+        ),
+        budget_alert_threshold_pct=settings.observability_budget_alert_threshold_pct,
+        breaker_open_success_rate=settings.observability_breaker_open_success_rate,
+        provider_health_drop_threshold=settings.observability_provider_health_drop_threshold,
+        outbox_backlog_threshold=settings.observability_outbox_backlog_threshold,
+        queue_age_threshold_seconds=settings.observability_queue_age_threshold_seconds,
+        cost_outlier_multiple=settings.observability_cost_outlier_multiple,
+        cost_outlier_min_baseline_days=settings.observability_cost_outlier_min_baseline_days,
+        provider_rate_limit_count=settings.observability_provider_rate_limit_alert_count,
     )
 
 

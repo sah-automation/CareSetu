@@ -25,10 +25,14 @@ import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import CompileError
 
+from app.config import get_settings
 from modules.observability.domain.consumer import AlertRow
 from modules.observability.domain.pseudonym import ActorKind
 from modules.observability.domain.rollup import (
     COST_OUTLIER_BASELINE_DAYS,
+    DEFAULT_ERROR_RATE_MIN_REQUESTS,
+    DEFAULT_ERROR_RATE_OBJECTIVE,
+    DEFAULT_LATENCY_OBJECTIVE_MS,
     METRIC_KEY_AI_PROVIDER_HEALTH,
     METRIC_KEY_AI_SPEND,
     ActorDailySpend,
@@ -767,6 +771,50 @@ def test_resolve_target_dates_refuses_a_zero_or_negative_backfill() -> None:
 def test_build_thresholds_defaults_the_budget_to_the_configured_cap() -> None:
     assert entry_point.build_thresholds(None).monthly_budget_paise > 0
     assert entry_point.build_thresholds(1_234).monthly_budget_paise == 1_234
+
+
+def test_build_thresholds_carries_the_configured_alert_thresholds() -> None:
+    """A threshold a deployment may move is configuration, not a constant.
+
+    coding-standards §9.1: a limit a deployment has to touch is an environment
+    edit, never a code change. The pass must therefore read the CONFIGURED
+    value, not the default the rule happens to carry.
+    """
+    thresholds = entry_point.build_thresholds(1_000)
+    settings = get_settings()
+
+    assert thresholds.budget_alert_threshold_pct == (
+        settings.observability_budget_alert_threshold_pct
+    )
+    assert thresholds.breaker_open_success_rate == settings.observability_breaker_open_success_rate
+    assert thresholds.provider_health_drop_threshold == (
+        settings.observability_provider_health_drop_threshold
+    )
+    assert thresholds.outbox_backlog_threshold == settings.observability_outbox_backlog_threshold
+    assert thresholds.queue_age_threshold_seconds == (
+        settings.observability_queue_age_threshold_seconds
+    )
+    assert thresholds.cost_outlier_multiple == settings.observability_cost_outlier_multiple
+    assert thresholds.cost_outlier_min_baseline_days == (
+        settings.observability_cost_outlier_min_baseline_days
+    )
+    assert thresholds.provider_rate_limit_count == (
+        settings.observability_provider_rate_limit_alert_count
+    )
+
+
+def test_build_thresholds_keeps_the_pinned_objectives_as_constants() -> None:
+    """The four ADR-pinned thresholds are promises, not knobs, so they do not move.
+
+    ADR-0027 D8 (the seven-day cost baseline) and ADR-0030 D1/D3 (the error-rate
+    objective, the request floor and the AI latency objective).
+    """
+    thresholds = entry_point.build_thresholds(1_000)
+
+    assert thresholds.cost_outlier_baseline_days == COST_OUTLIER_BASELINE_DAYS
+    assert thresholds.error_rate_objective == DEFAULT_ERROR_RATE_OBJECTIVE
+    assert thresholds.error_rate_min_requests == DEFAULT_ERROR_RATE_MIN_REQUESTS
+    assert thresholds.latency_objective_ms == DEFAULT_LATENCY_OBJECTIVE_MS
 
 
 def test_entry_point_exposes_a_main_for_python_dash_m() -> None:

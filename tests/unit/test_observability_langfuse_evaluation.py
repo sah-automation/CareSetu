@@ -56,7 +56,7 @@ from modules.observability.facade import (
     record_evaluation_scores,
     run_daily_evaluation,
 )
-from observability.langfuse_evaluation import (
+from modules.observability.langfuse_evaluation import (
     INGESTION_PATH,
     SCORES_PATH,
     build_ingestion_batch,

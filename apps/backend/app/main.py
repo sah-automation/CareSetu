@@ -94,6 +94,7 @@ from observability.error_capture import (
     ERROR_KIND_UNHANDLED_EXCEPTION,
     capture_server_error,
     configure_error_capture,
+    route_template_for,
 )
 from observability.http_counter import configure_http_counter, record_request
 from observability.langfuse_client import flush_langfuse, get_langfuse_client
@@ -325,7 +326,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # the gateway middleware because the middleware runs on the request path
         # and must not know about Settings, and because the worker that drains it
         # applies it too - so whichever process starts first has already sized it.
-        configure_http_counter(resolved_settings.http_counter_max_series)
+        # #753: the same call applies HTTP_COUNTER_ENABLED, so this root also
+        # decides whether the counter is armed at all.
+        configure_http_counter(
+            resolved_settings.http_counter_max_series,
+            enabled=resolved_settings.http_counter_enabled,
+        )
         # In-process dispatcher (worker-outbox-runbook Rule 1, Render free
         # worker gap): when DISPATCHER_IN_PROCESS_ENABLED=true the lifespan
         # hosts exactly one outbox poll loop (intake pipeline, audit/consent/
@@ -666,7 +672,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the one where a handler raised: Starlette answers that 500 from its
     # ServerErrorMiddleware, outside all user middleware, so it is counted by the
     # catch-all below instead.
-    app.add_middleware(HttpCounterMiddleware)
+    # #753: the middleware is only installed when HTTP_COUNTER_ENABLED is on, so
+    # the gate's off path is a genuine no-op - a deployment that did not opt in
+    # does not even pay the middleware's per-request cost.
+    if resolved_settings.http_counter_enabled:
+        app.add_middleware(HttpCounterMiddleware)
 
     app.include_router(iam_router)
     app.include_router(health_router)
@@ -697,7 +707,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(Exception)
     async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
         trace_id = resolve_trace_id(request)
-        logger.exception("unhandled_exception trace_id=%s path=%s", trace_id, request.url.path)
+        # #757: the ROUTE TEMPLATE, never the concrete path. A path carries
+        # whatever the client put in it - a case id, a patient id, anything a
+        # query string was built from - and a log line is a telemetry store
+        # (security-phii §4). The capture below already uses the template for
+        # exactly this reason; the log line beside it said otherwise.
+        logger.exception(
+            "unhandled_exception trace_id=%s route=%s",
+            trace_id,
+            route_template_for(request),
+        )
         envelope = ErrorEnvelope(
             code=CODE_INTERNAL_SERVER_ERROR,
             message=MESSAGE_INTERNAL_SERVER_ERROR,

@@ -309,10 +309,11 @@ class IntakeComposerOpenedPayload(BaseModel):
     timestamps, not assumed from this key (#739).
 
     Both are bare ``str``, not a validated type, because ``TraceMiddleware``
-    already bounded them: a client ``X-Request-Id`` is honoured only when
-    printable, non-space and at most 128 characters, else a uuid4 hex is minted.
-    So neither field can carry unbounded client text into the ledger. The trade
-    is that a client CAN choose its own key; since this payload has no field
+    already bounded them: a client ``X-Request-Id`` is honoured only when it is
+    printable, non-space and at most ``MAX_TRACE_ID_LENGTH`` (64) characters per
+    the shared rule in :mod:`observability.trace_ids`, else a uuid4 hex is
+    minted. So neither field can carry unbounded client text into the ledger. The
+    trade is that a client CAN choose its own key; since this payload has no field
     another patient's key could collide with beyond ``patient_id`` itself, the
     worst that buys is scattered rows in the caller's OWN funnel - never read or
     corrupt access to another's (#739 keys the ledger on a pseudonymous actor

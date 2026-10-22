@@ -22,6 +22,15 @@ pass was in the middle of persisting. The re-drain that makes possible is not a
 double row but a re-count of one occurrence - a bounded, self-correcting
 inaccuracy, deliberately chosen over dropping an error outright.
 
+**One snapshot, written and released.** The pass takes its snapshot BEFORE it opens
+the transaction and hands that same snapshot to both the write and the release.
+Taking a second snapshot after the connection is acquired would write records the
+release does not cover: they would be written again on the next pass and their
+occurrence counts would inflate permanently and invisibly. A crash still costs one
+re-count, because the whole batch is released only after the commit - but a capture
+that arrives mid-pass costs nothing, because it is neither written nor released
+until the next pass owns it.
+
 **One process, and the buffer says so.** The drain empties the buffer of the process
 it runs in. Production runs the dispatcher in-process in the web service
 (``render.yaml`` sets ``DISPATCHER_IN_PROCESS_ENABLED=true`` at ``--workers 1``), so
@@ -52,6 +61,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import Insert
@@ -151,18 +161,28 @@ def _upsert(record: CapturedError) -> Insert:
     )
 
 
-async def drain_error_captures(connection: AsyncConnection) -> ErrorDrainReport:
+async def drain_error_captures(
+    connection: AsyncConnection, batch: Sequence[CapturedError] | None = None
+) -> ErrorDrainReport:
     """Upsert every buffered capture onto the error stream, on ``connection``.
 
     Runs inside the caller's transaction, so the caller decides the commit: the
     engine-level :func:`drain_error_buffer` wraps it in exactly one, which is what
     makes the batch atomic and the buffer release safe.
 
+    ``batch`` defaults to a fresh snapshot, and that default is only correct for a
+    caller that releases NOTHING afterwards. :func:`drain_error_buffer` passes the
+    very batch it releases after the commit, and it has to: taking a second
+    snapshot after the connection is acquired would WRITE records the release does
+    not cover, so they would be written again next pass and their occurrences
+    inflated permanently and invisibly. One snapshot, written and released, is the
+    invariant.
+
     ``frequencies`` counts the distinct fingerprints in the batch rather than
     probing for rows after the fact: the batch is what was written, so counting it
     is both cheaper and immune to a row another writer created concurrently.
     """
-    records = pending_error_captures()
+    records = pending_error_captures() if batch is None else tuple(batch)
     if not records:
         return _nothing_to_report()
     for record in records:
@@ -194,7 +214,7 @@ async def drain_error_buffer(engine: AsyncEngine) -> ErrorDrainReport:
         return _nothing_to_report()
 
     async with engine.begin() as connection:
-        report = await drain_error_captures(connection)
+        report = await drain_error_captures(connection, batch=pending)
     unreleased = len(pending) - discard_error_captures(pending)
     with _drops_lock:
         changed = report.dropped != _drops_last_reported

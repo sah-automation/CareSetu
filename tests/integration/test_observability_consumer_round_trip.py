@@ -220,7 +220,6 @@ def _queued_envelope(
     ai_job_id: int,
     task_type: str = "structure",
     patient_id: int = 7,
-    doctor_id: int | None = None,
 ) -> Envelope[AiJobQueuedPayload]:
     """A MOD-005-style ``ai_job.queued`` envelope as the pipeline publishes (B5 #729)."""
     return Envelope[AiJobQueuedPayload](
@@ -233,7 +232,6 @@ def _queued_envelope(
             intake_id=1,
             task_type=cast(AiTaskType, task_type),
             patient_id=patient_id,
-            doctor_id=doctor_id,
             trace_id=_TRACE_ID,
         ),
     )
@@ -942,6 +940,7 @@ async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
     engine = create_async_engine(database_url, poolclass=NullPool)
     facade_engine = create_async_engine(database_url, poolclass=NullPool)
     patient_id = uuid4().int % (2**53)
+    doctor_id = uuid4().int % (2**53)
     try:
         async with engine.begin() as connection:
             intake_id = int(
@@ -967,7 +966,10 @@ async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
 
         facade = IntakeFacade(engine=facade_engine, ai_gateway=MockAiProvider())
         draft = await facade.request_rx_draft(
-            doctor_input_ref=1, pre_summary_ref=pre_summary_id, history_summary="past notes"
+            doctor_input_ref=1,
+            pre_summary_ref=pre_summary_id,
+            history_summary="past notes",
+            doctor_id=doctor_id,
         )
         assert draft.rx_items[0].name == "mock medication"
 
@@ -980,7 +982,10 @@ async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
             pytest.raises(Ext002CallError),
         ):
             await facade.request_rx_draft(
-                doctor_input_ref=1, pre_summary_ref=pre_summary_id, history_summary="again"
+                doctor_input_ref=1,
+                pre_summary_ref=pre_summary_id,
+                history_summary="again",
+                doctor_id=doctor_id,
             )
 
         async with engine.connect() as connection:
@@ -1031,6 +1036,11 @@ async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
         assert [row["status"] for row in spend].count("completed") == 1
         assert [row["status"] for row in spend].count("failed") == 1
         assert spend[0]["patient_key"] == actor_key(ACTOR_KIND_PATIENT, patient_id)
+        # The drafting leg names its doctor, so the job's own key is filled: that
+        # key is the fallback the attribution edge is resolved against, and it
+        # covers a pick the edge table has not recorded yet (ADR-0027 D3). It
+        # arrives as a ONE-WAY hash of the reference, never the reference.
+        assert spend[0]["doctor_key"] == actor_key(ACTOR_KIND_DOCTOR, doctor_id)
 
         # And the drafting leg is the one place clinical content came closest to
         # the boundary - the patient's complaint text is sitting in the intake row
@@ -1038,6 +1048,7 @@ async def test_drafting_leg_reaches_the_usage_aggregate_as_a_produced_task_type(
         assert "sir dard hai" not in stored
         assert "mock medication" not in stored
         assert str(patient_id) not in stored
+        assert str(doctor_id) not in stored
     finally:
         await facade_engine.dispose()
         await engine.dispose()

@@ -245,14 +245,15 @@ def test_build_scheduler_skips_the_error_drain_when_the_capture_gate_is_off() ->
     """#753: gate off means the pre-#726 scheduler - the drain job never registers.
 
     An empty buffer drained every 30 seconds is pure cost, and the gate-off
-    posture has to be exactly "as if the feature were not there" - while the
-    sweep and the HTTP-counter fold (different features) stay untouched.
+    posture has to be exactly "as if the feature were not there" - so the
+    HTTP-counter fold (a different feature, with its own gate) is skipped too
+    while its gate is off.
     """
     scheduler = worker_main.build_scheduler(Settings())
 
     assert not any(job.id == "error-buffer-drain" for job in scheduler.get_jobs())
+    assert not any(job.id == "http-counter-fold" for job in scheduler.get_jobs())
     _job(scheduler, "credential-expiry-sweep")
-    _job(scheduler, "http-counter-fold")
 
 
 async def test_drain_callback_persists_the_buffer_through_the_module_facade(
@@ -371,7 +372,7 @@ def test_build_scheduler_registers_the_counter_fold_on_an_interval() -> None:
     default cadence is one minute because that is the grain - which is what bounds
     the write cost at one row per route per minute.
     """
-    scheduler = worker_main.build_scheduler(Settings())
+    scheduler = worker_main.build_scheduler(Settings(http_counter_enabled=True))
 
     job = _job(scheduler, "http-counter-fold")
     assert isinstance(job.trigger, IntervalTrigger)
@@ -383,7 +384,9 @@ def test_build_scheduler_registers_the_counter_fold_on_an_interval() -> None:
 
 def test_build_scheduler_honours_a_configured_counter_fold_interval() -> None:
     """B9 #727: the fold cadence is configuration (coding-standards §9.1)."""
-    scheduler = worker_main.build_scheduler(Settings(http_counter_drain_interval_seconds=15))
+    scheduler = worker_main.build_scheduler(
+        Settings(http_counter_enabled=True, http_counter_drain_interval_seconds=15)
+    )
 
     assert _job(scheduler, "http-counter-fold").trigger.interval == timedelta(seconds=15)
 

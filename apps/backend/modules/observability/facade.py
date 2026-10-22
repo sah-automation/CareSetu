@@ -211,6 +211,7 @@ from modules.observability.http_counter_stream import (
     HttpCounterDrainReport,
     drain_http_counter,
 )
+from modules.observability.langfuse_evaluation import post_evaluation_scores
 from modules.observability.rollup import (
     RollupReport,
     RollupRunState,
@@ -236,9 +237,9 @@ from modules.observability.schema.models import (
     observability_product_events,
     observability_rollup_runs,
 )
-from observability.langfuse_evaluation import post_evaluation_scores
 from observability.langfuse_metrics import LangfuseDailyMetrics, pull_daily_metrics
 from observability.logging import SERVICE_API
+from observability.trace_ids import clamp_trace_id
 
 OBSERVABILITY_SCHEMA = "observability"
 
@@ -689,7 +690,11 @@ async def record_ai_job_spend(
         output_tokens=output_tokens,
         cost_paise=cost_paise,
         status=status,
-        trace_id=payload.trace_id,
+        # Clamped to the column's width: the gateway already mints or rejects an
+        # unsafe client id, so this is the net under that gate - an over-long id
+        # would raise on length and take the consumer's whole transaction with
+        # it, losing every row in the batch.
+        trace_id=clamp_trace_id(payload.trace_id) if payload.trace_id is not None else None,
         failure_reason=failure_reason,
     )
     await connection.execute(statement)

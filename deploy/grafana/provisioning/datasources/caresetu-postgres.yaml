@@ -12,6 +12,4 @@ datasources:
     jsonData:
       sslmode: require
       postgresVersion: 1600
-      schema: observability
-      readOnly: true
     editable: false

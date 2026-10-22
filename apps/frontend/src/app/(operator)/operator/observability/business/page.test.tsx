@@ -274,6 +274,32 @@ const NO_REVENUE: BusinessRead = {
   },
 };
 
+/**
+ * Revenue captured, and it was ZERO. The panel is ready - revenue IS captured -
+ * but there is no margin to report, so the read says WHY.
+ *
+ * This is the case a `?? 0` would turn into "0% gross margin", which reads as
+ * "the AI costs nothing" rather than "there is no revenue to divide it by".
+ */
+const REVENUE_ZERO: BusinessRead = {
+  ...MEASURED,
+  margin: {
+    ...MEASURED.margin,
+    revenue_paise: 0,
+    revenue_captured: true,
+    gross_margin: {
+      value: null,
+      reason: "revenue_zero",
+      detail: "Revenue recorded this month is zero.",
+    },
+    ai_cost_pct_of_revenue: {
+      value: null,
+      reason: "revenue_zero",
+      detail: "Revenue recorded this month is zero.",
+    },
+  },
+};
+
 beforeAll(() => useChartDom());
 
 beforeEach(() => {
@@ -297,12 +323,93 @@ describe("ObservabilityBusinessPage", () => {
     for (const panel of [
       "business-spend",
       "business-breakdown",
+      "business-providers",
+      "business-models",
+      "business-tokens",
       "business-unit-costs",
       "business-margin",
       "business-heavy-actors",
     ]) {
       expect(screen.getByTestId(`${panel}-loading`)).toBeTruthy();
     }
+  });
+
+  it("asks the route for the window it is showing", async () => {
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(mockFetchBusiness).toHaveBeenCalledWith({
+        period: "month_to_date",
+      });
+    });
+    // The selected window is on screen, not just in the request.
+    expect(screen.getByTestId("business-period-current").textContent).toBe(
+      "Currently showing: Month to date",
+    );
+    expect(
+      screen
+        .getByTestId("business-period-month_to_date")
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  it("re-reads the whole page for the window the operator picked", async () => {
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(mockFetchBusiness).toHaveBeenCalledWith({
+        period: "month_to_date",
+      });
+    });
+
+    mockFetchBusiness.mockImplementation(() =>
+      Promise.resolve({
+        ...MEASURED,
+        period: "today",
+        period_start: "2026-10-12",
+        period_end: "2026-10-12",
+      }),
+    );
+    fireEvent.click(screen.getByTestId("business-period-today"));
+
+    await waitFor(() => {
+      expect(mockFetchBusiness).toHaveBeenCalledWith({ period: "today" });
+    });
+    // Every panel answers about the new window, not the one before it.
+    await waitFor(() => {
+      expect(screen.getByTestId("business-spend-window").textContent).toBe(
+        "Today, 2026-10-12 to 2026-10-12",
+      );
+    });
+    expect(screen.getByTestId("business-period-current").textContent).toBe(
+      "Currently showing: Today",
+    );
+  });
+
+  it("shows no stale figure while the next window loads", async () => {
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("business-spend-takeaway").textContent,
+      ).toContain("₹1,250 spent");
+    });
+
+    // The next window's read never settles.
+    mockFetchBusiness.mockImplementation(
+      () => new Promise<BusinessRead>(() => {}),
+    );
+    fireEvent.click(screen.getByTestId("business-period-today"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("business-spend").dataset.status).toBe(
+        "loading",
+      );
+    });
+    // Yesterday's spend is GONE, not parked behind the skeleton: a figure from
+    // the previous window under the new window's title is a wrong figure.
+    expect(screen.queryByTestId("business-spend-takeaway")).toBeNull();
+    expect(screen.getByTestId("business-spend-loading")).toBeTruthy();
   });
 
   it("states the window, the spend and the projection in one line", async () => {
@@ -373,6 +480,81 @@ describe("ObservabilityBusinessPage", () => {
         screen.getByTestId("business-breakdown-takeaway").textContent,
       ).toBe("2 task types · the largest is transcribe at ₹1,000");
     });
+  });
+
+  it("breaks the bill down by provider", async () => {
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("business-providers-takeaway").textContent,
+      ).toBe("1 providers · the largest is openai_compatible at ₹1,250");
+    });
+    const row = screen.getByTestId(
+      "business-providers-table-row-openai_compatible",
+    );
+    expect(row.textContent).toContain("120");
+    expect(row.textContent).toContain("₹1,250");
+    expect(row.textContent).toContain("1,00,000");
+    expect(row.textContent).toContain("40,000");
+    // The rates keep their paise: a per-thousand rate is a rate, and the
+    // whole-rupee rule would print ₹0.90 as "₹1".
+    expect(row.textContent).toContain("₹0.90");
+    expect(row.textContent).toContain("₹3.00");
+  });
+
+  it("breaks the bill down by model, with the provider that served it", async () => {
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("business-models-takeaway").textContent).toBe(
+        "1 models · the largest is gpt-4o-mini at ₹1,250",
+      );
+    });
+    const row = screen.getByTestId(
+      "business-models-table-row-openai_compatible-gpt-4o-mini",
+    );
+    expect(row.textContent).toContain("gpt-4o-mini");
+    expect(row.textContent).toContain("openai_compatible");
+    expect(row.textContent).toContain("₹1,250");
+  });
+
+  it("prices the token bill, input against output", async () => {
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("business-tokens-takeaway").textContent).toBe(
+        "1,00,000 input tokens · 40,000 output tokens",
+      );
+    });
+    expect(
+      screen.getByTestId("business-tokens-figures-input-tokens").textContent,
+    ).toBe("1,00,000");
+    expect(
+      screen.getByTestId("business-tokens-figures-output-tokens").textContent,
+    ).toBe("40,000");
+    // The headline rate: what a thousand of each kind costs.
+    expect(
+      screen.getByTestId("business-tokens-figures-per-thousand-input")
+        .textContent,
+    ).toBe("₹0.90");
+    expect(
+      screen.getByTestId("business-tokens-figures-per-thousand-output")
+        .textContent,
+    ).toBe("₹3.00");
+  });
+
+  it("draws one bar pair per provider for the token volumes", async () => {
+    render(<ObservabilityBusinessPage />);
+
+    const chart = await drawnChart("business-tokens-chart");
+    // Two series - input and output - for the one provider that ran.
+    expect(chart.querySelectorAll(".recharts-bar-rectangle").length).toBe(2);
+    expect(
+      [...chart.querySelectorAll(".recharts-cartesian-axis-tick-value")].map(
+        (node) => node.textContent,
+      ),
+    ).toEqual(expect.arrayContaining(["openai_compatible"]));
   });
 
   it("prices every unit of value at paise precision", async () => {
@@ -507,6 +689,41 @@ describe("ObservabilityBusinessPage", () => {
     });
   });
 
+  it("shows the gross margin, the cost of goods and the month's cost of goods", async () => {
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("business-margin-gross-margin").textContent,
+      ).toBe("97.5%");
+    });
+    expect(screen.getByTestId("business-margin-ai-cost-pct").textContent).toBe(
+      "2.5%",
+    );
+    expect(
+      screen.getByTestId("business-margin-headline-month-cogs").textContent,
+    ).toBe("₹1,250");
+  });
+
+  it("states the reason a margin is absent rather than printing a zero", async () => {
+    // Revenue captured, and it was zero. The panel is ready; the percentage is
+    // not there, and the read says why.
+    resolveWith(REVENUE_ZERO);
+
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("business-margin-gross-margin").textContent,
+      ).toBe("revenue was zero in this period");
+    });
+    expect(screen.getByTestId("business-margin-ai-cost-pct").textContent).toBe(
+      "revenue was zero in this period",
+    );
+    // 0% gross margin is a claim about the business; the reason is the truth.
+    expect(screen.queryByText(/0%/)).toBeNull();
+  });
+
   it("says nothing ran, in each panel's own terms", async () => {
     resolveWith(NOTHING_RUN);
 
@@ -520,6 +737,15 @@ describe("ObservabilityBusinessPage", () => {
     );
     expect(screen.getByTestId("business-breakdown").textContent).toContain(
       "No AI spend by task type in this window",
+    );
+    expect(screen.getByTestId("business-providers").textContent).toContain(
+      "No AI spend by provider in this window",
+    );
+    expect(screen.getByTestId("business-models").textContent).toContain(
+      "No AI spend by model in this window",
+    );
+    expect(screen.getByTestId("business-tokens").textContent).toContain(
+      "No AI tokens in this window",
     );
     expect(screen.getByTestId("business-heavy-actors").textContent).toContain(
       "No attributed patients or doctors in this window",
@@ -540,6 +766,18 @@ describe("ObservabilityBusinessPage", () => {
     });
     expect(screen.getByTestId("business-spend-retry")).toBeTruthy();
     expect(screen.getByTestId("business-breakdown-error")).toBeTruthy();
+    // Every panel reads the same route, so every panel fails with it.
+    for (const panel of [
+      "business-providers",
+      "business-models",
+      "business-tokens",
+      "business-unit-costs",
+      "business-margin",
+      "business-heavy-actors",
+    ]) {
+      expect(screen.getByTestId(`${panel}-error`)).toBeTruthy();
+      expect(screen.getByTestId(`${panel}-retry`)).toBeTruthy();
+    }
     // A transport failure reaches no API, so it carries no trace id - and the
     // panel says so rather than leaving an operator with nothing to quote.
     expect(screen.getByTestId("business-spend-error-no-trace")).toBeTruthy();

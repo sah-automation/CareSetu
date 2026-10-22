@@ -116,10 +116,34 @@ services:
       # gate's default lives in one manifest.
       - key: ERROR_CAPTURE_ENABLED
         value: "false"
+      - key: HTTP_COUNTER_ENABLED
+        value: "false"
       - key: EVALUATION_ENABLED
         value: "false"
       - key: ANNOTATION_QUEUE_ENABLED
         value: "false"
+      # MOD-013's alert thresholds (Batch 3, #717; plan-phase14 §11): the limits
+      # the nightly rollup compares against. Each is configuration rather than a
+      # constant in the rule that reads it (coding-standards §9.1), so a
+      # deployment moves a threshold here and never in code. The four thresholds
+      # NOT declared here are the ones a decision record pins (ADR-0027 D8,
+      # ADR-0030 D1 and D3): a promised objective is not a knob.
+      - key: OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT
+        value: "80"
+      - key: OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE
+        value: "0.5"
+      - key: OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD
+        value: "0.2"
+      - key: OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD
+        value: "500"
+      - key: OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS
+        value: "900"
+      - key: OBSERVABILITY_COST_OUTLIER_MULTIPLE
+        value: "3"
+      - key: OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS
+        value: "3"
+      - key: OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT
+        value: "1"
       # Browsable Grafana base (PHASE-14A C1b, #707): the stack the OTLP endpoint
       # above exports into, as an operator can actually open it. Serves the
       # operator observability "/deeplinks" read; dashboard-managed, because the

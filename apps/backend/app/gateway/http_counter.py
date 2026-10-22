@@ -36,14 +36,14 @@ reason. Counting only here would under-report throughput by exactly the requests
 that failed worst, which is the failure mode this ticket exists to prevent: an
 error rate that reads zero during a crash loop.
 
-Always on and unconditional, like ``SecurityHeadersMiddleware`` and unlike the
-optional observability gates. Two reasons. An unconfigured counter is a silently
-blind system, which is the answer an operator must never be handed by default; and
-the capture-liveness half of ``/throughput`` can only mean anything if capture
-cannot be switched off to make it read as broken. Decision 45's "new configuration
-gates, disabled by default" is about the observability FEATURE gates this counter
-does not gate - it is an instrument, like the error capture beside it, not a
-capability behind a flag.
+Gated like the error capture beside it (#753): ``HTTP_COUNTER_ENABLED`` is off by
+default, and with it off the middleware is not installed at all, so a deployment
+that has not opted in pays neither the counting nor the middleware's per-request
+cost. That is the posture decision 45 sets for every new feature in this batch,
+and it is why the gate lives on the settings object rather than as an argument to
+this class. With the gate ON the counter is always armed - a configured counter
+that could be switched off to make the throughput panel read as broken would hand
+the operator exactly the false all-clear the panel exists to prevent.
 
 **What is stored is a COLLAPSED class, never a raw status code.** Four classes
 (``2xx``/``3xx``/``4xx``/``5xx``) rather than the three of decision 37, because that

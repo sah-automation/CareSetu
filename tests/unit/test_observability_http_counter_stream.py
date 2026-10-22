@@ -37,10 +37,10 @@ _NOW = datetime(2026, 10, 14, 12, 34, 56, tzinfo=UTC)
 
 @pytest.fixture
 def clean_http_counter() -> None:
-    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES)
+    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES, enabled=True)
     reset_http_counter()
     yield
-    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES)
+    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES, enabled=True)
     reset_http_counter()
 
 
@@ -345,7 +345,7 @@ def test_discards_are_warned_about_once_per_change_not_once_per_pass(
 
     # A ceiling of one series: each overflowing pass discards one bucket, and the
     # pass in between fits - the pass that must NOT re-warn.
-    configure_http_counter(1)
+    configure_http_counter(1, enabled=True)
     _fill(0, 2)
     asyncio.run(drain_http_counter(engine))  # type: ignore[arg-type]
     _fill(1, 1)
@@ -372,7 +372,7 @@ def test_a_reset_re_arms_the_discard_warning(
     monkeypatch.setattr(http_counter_stream, "_drops_last_reported", 5)
     engine = _FakeEngine(_RecordingConnection())
 
-    configure_http_counter(1)
+    configure_http_counter(1, enabled=True)
     _fill(0, 2)
     asyncio.run(drain_http_counter(engine))  # type: ignore[arg-type]
 

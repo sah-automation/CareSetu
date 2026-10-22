@@ -150,12 +150,16 @@ def test_the_fingerprint_ignores_the_trace_id_and_the_clock() -> None:
 def test_a_client_supplied_trace_id_too_wide_for_the_column_is_clamped() -> None:
     """#726: an over-long trace id must not be able to wedge the drain.
 
-    ``app.gateway.trace`` honours a client ``X-Request-Id`` up to its own 128-char
-    safety limit, which is TWICE the ``trace_id`` column's width. Unclamped, one
-    such header on one failing route writes a record whose upsert raises on length;
-    the drain aborts the whole batch on that record, swallows the failure, and
-    leaves it at the head of the buffer - so every subsequent pass fails too and
-    error capture is silently dead until enough fresh errors evict it.
+    ``app.gateway.trace`` honours a client ``X-Request-Id`` only when it fits the
+    shared rule in :mod:`observability.trace_ids` - printable, non-space and at
+    most ``MAX_TRACE_ID_LENGTH`` (64) characters, which is the ``trace_id``
+    column's width exactly. The capture clamps anyway, because the column is the
+    last line of defence and a value that arrived by any other path (a log line,
+    a background task) would still be too wide. Unclamped, one such header on one
+    failing route writes a record whose upsert raises on length; the drain aborts
+    the whole batch on that record, swallows the failure, and leaves it at the
+    head of the buffer - so every subsequent pass fails too and error capture is
+    silently dead until enough fresh errors evict it.
     """
     oversized = "t" * 128
 

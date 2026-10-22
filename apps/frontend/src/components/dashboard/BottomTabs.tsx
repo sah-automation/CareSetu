@@ -343,9 +343,14 @@ function OverflowRow({
   // over the destination page.
   onNavigate: () => void;
 }) {
+  const pathname = usePathname();
   const Icon = item.icon;
   const className =
     "flex min-h-12 w-full items-center gap-3 rounded px-2 py-2 text-sm font-medium";
+  // A sheet row is a destination, so it carries the page-level marker. The
+  // group row above it carries the group marker ("true"), which keeps exactly
+  // one element in the sheet claiming the current page.
+  const active = isNavItemActive(item, pathname);
 
   if (item.soon) {
     return (
@@ -365,9 +370,13 @@ function OverflowRow({
     <Link
       href={item.href}
       onClick={onNavigate}
+      aria-current={active ? "page" : undefined}
+      data-active={active || undefined}
       className={cn(
         className,
-        "text-txt-sub hover:bg-accent-soft hover:text-txt",
+        active
+          ? "font-semibold text-accent-strong"
+          : "text-txt-sub hover:bg-accent-soft hover:text-txt",
       )}
       data-testid={`more-${item.key}`}
     >
@@ -456,7 +465,10 @@ function SheetGroupNavItem({
       <Link
         href={item.href}
         onClick={onNavigate}
-        aria-current={active ? "page" : undefined}
+        // The group row is the current group, not the current page: the
+        // destination rows below it carry `aria-current="page"`, so the sheet
+        // never announces the current page twice.
+        aria-current={active ? "true" : undefined}
         data-active={active || undefined}
         data-testid={`more-${item.key}`}
         className={cn(

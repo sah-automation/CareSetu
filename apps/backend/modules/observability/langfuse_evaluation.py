@@ -10,6 +10,14 @@ allow-list, never input or output - so the vendor gets a chartable
 evaluation history while no clinical content ever leaves Postgres (spec #717
 decision 40).
 
+**Why this file lives inside the module and not in the shared ``observability``
+package.** It derives the observation ids, the trace id, the score id and the
+golden dataset's own labels from MOD-013's domain - which the shared package
+cannot import (it "imports nothing from ``modules``", coding-standards §2). It
+was the only shared-package file that did, and it was the one place where the
+shared package and a module's domain could form a cycle. It is a module file
+now, beside the module's other vendor seam.
+
 Like ``observability.langfuse_metrics`` this is plain ``httpx`` with an
 injectable transport: tests count the requests a run makes against a fake
 API. At most two requests per nightly run - one ingestion batch creating the

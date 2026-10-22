@@ -57,6 +57,12 @@ METRICS_EXPORTER = "prometheus_remote_write/grafana"
 
 STATUS_CLASS_ATTR = "http.status_class"
 STATUS_CLASSES = ("success", "client-error", "server-error")
+#: Every ``set(attributes["http.status_class"], "<value>")`` assignment in the
+#: firewall, so the lint can read the classes the config actually mints instead
+#: of assuming the three it is told about.
+STATUS_CLASS_ASSIGNMENT = re.compile(
+    r'set\(\s*attributes\[\s*"' + re.escape(STATUS_CLASS_ATTR) + r'"\s*\]\s*,\s*"(?P<value>[^"]*)"'
+)
 STATUS_CLASS_1XX_MAX = 400
 STATUS_CLASS_4XX_MAX = 500
 STATUS_CODE_KEYS = ("http.status_code", "http.response.status_code")
@@ -182,27 +188,28 @@ def _status_class_violations(config: dict[str, Any], path: Path) -> list[Collect
     """Assert exactly three status classes over both raw status keys."""
     statements = _collect_statements(config)
     violations: list[CollectorViolation] = []
+    # Every class the firewall actually ASSIGNS, read out of the assignment
+    # statements themselves. Checking the three required classes against this
+    # set is the precise form of "the firewall classifies into these three",
+    # and it is what makes the "must not invent" rule reachable: a fourth class
+    # is a fourth series dimension, so it has to be rejected even when the three
+    # required ones are all present.
+    assigned_classes = {
+        match.group("value")
+        for statement in statements
+        for match in STATUS_CLASS_ASSIGNMENT.finditer(statement)
+    }
     for status_class in STATUS_CLASSES:
-        if not any(
-            f'"{status_class}"' in statement and STATUS_CLASS_ATTR in statement
-            for statement in statements
-        ):
+        if status_class not in assigned_classes:
             violations.append(
                 CollectorViolation(
                     path, f"firewall must classify status into {STATUS_CLASS_ATTR}={status_class}"
                 )
             )
-    found_classes = {
-        status_class
-        for status_class in STATUS_CLASSES
-        for statement in statements
-        if f'"{status_class}"' in statement and STATUS_CLASS_ATTR in statement
-    }
-    for status_class in found_classes:
-        if status_class not in STATUS_CLASSES:
-            violations.append(
-                CollectorViolation(path, f"firewall must not invent a status class {status_class}")
-            )
+    for status_class in sorted(assigned_classes - set(STATUS_CLASSES)):
+        violations.append(
+            CollectorViolation(path, f"firewall must not invent a status class {status_class}")
+        )
     thresholds = {int(value) for value in re.findall(r"<\s*(\d+)", " ".join(statements))}
     if STATUS_CLASS_1XX_MAX not in thresholds:
         violations.append(

@@ -1484,6 +1484,7 @@ class IntakeFacade:
         doctor_input_ref: int,
         pre_summary_ref: int,
         history_summary: str | None = None,
+        doctor_id: int | None = None,
     ) -> RxDraftResult:
         """Produce a structured rx draft from the doctor input (PHASE-8 T05).
 
@@ -1511,11 +1512,18 @@ class IntakeFacade:
         publishes ``ai_job.failed`` instead - durably, because the transaction
         commits before the error is re-raised - and records no token count,
         since a failed call reports no usage and a fabricated zero would read as
-        a free call. The event's ``doctor_id`` is null: the drafting doctor lives
-        in the care schema, which this module cannot read (ADR-0003), so per-
-        doctor attribution rides the ``intake.doctor_assigned`` edge (#720)
-        instead. The drafting-cap and consent gates stay in the care module and
-        are untouched by this metering.
+        a free call.
+
+        ``doctor_id`` is the drafting doctor, and it rides the job's own key -
+        the fallback that covers a pick the edge table has not recorded yet
+        (ADR-0027 D3). It comes from the CALLER, which owns the doctor
+        identity, not from a read of the care schema (ADR-0003 forbids this
+        module reading it): the caller hands the id over with the call, exactly
+        as it hands over the consent-gated history. It stays null on the
+        transcription and structuring legs, which run before a patient picks a
+        doctor, and per-doctor attribution there rides the
+        ``intake.doctor_assigned`` edge (#720). The drafting-cap and consent
+        gates stay in the care module and are untouched by this metering.
         """
         gateway = self._ai_gateway
         if gateway is None:
@@ -1575,7 +1583,7 @@ class IntakeFacade:
                     ai_job_id=job_id,
                     intake_id=intake_id,
                     patient_id=patient_id,
-                    doctor_id=None,
+                    doctor_id=doctor_id,
                     task_type="draft",
                     reason=failure_reason(exc),
                     provider=configured_provider,
@@ -1589,7 +1597,7 @@ class IntakeFacade:
                     ai_job_id=job_id,
                     intake_id=intake_id,
                     patient_id=patient_id,
-                    doctor_id=None,
+                    doctor_id=doctor_id,
                     task_type="draft",
                     provider=gateway.effective_provider or configured_provider,
                     model=gateway.effective_model or configured_model,

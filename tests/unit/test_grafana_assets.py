@@ -24,8 +24,8 @@ from scripts.gen_grafana_assets import (
     ACTIVE_SERIES_CEILING,
     DASHBOARD_UID,
     DATASOURCE_UID,
+    DEFAULT_WINDOW,
     MAX_ALERT_RULES,
-    OBSERVABILITY_SCHEMA,
     STATUS_CLASSES,
     GrafanaAssetError,
     assert_no_unbounded_status_label,
@@ -104,10 +104,15 @@ def test_datasource_is_read_only_and_points_at_the_observability_schema() -> Non
     assert entry["uid"] == DATASOURCE_UID
     assert entry["type"] == "postgres"
     # Read-only: the operator dashboard is a read surface, never a writer.
-    assert entry["jsonData"]["readOnly"] is True
     assert entry["editable"] is False
-    # Points at the observability schema - the system of record the lenses read.
-    assert entry["jsonData"]["schema"] == OBSERVABILITY_SCHEMA
+    # Grafana's PostgreSQL datasource honours sslmode, postgresVersion,
+    # timescaledb and the pool settings - and nothing else. A `readOnly` or
+    # `schema` key here would read like a control that exists while enforcing
+    # nothing, so the file carries only what Grafana acts on: the read-only
+    # posture is the Postgres ROLE's grants and the schema is pinned by every
+    # panel's qualified SQL.
+    assert set(entry["jsonData"]) == {"sslmode", "postgresVersion"}
+    assert entry["jsonData"]["sslmode"] == "require"
 
 
 def test_no_panel_queries_a_table_outside_the_observability_schema() -> None:
@@ -115,6 +120,47 @@ def test_no_panel_queries_a_table_outside_the_observability_schema() -> None:
         assert "FROM observability." in panel.sql, (
             f"panel {panel.id} ({panel.title!r}) must read the observability schema"
         )
+
+
+def test_the_active_series_rule_reads_the_vendor_usage_datasource(alerting: dict) -> None:
+    # The ceiling signal is Grafana Cloud's OWN usage metric. It lives in the
+    # vendor's usage datasource, not in the deployment's metrics backend, so a
+    # rule pointed at the metrics datasource would load and never find a series.
+    rules = {rule["uid"]: rule for rule in alerting["groups"][0]["rules"]}
+    active = rules["caresetu-active-series"]
+    query = next(target for target in active["data"] if target["refId"] == "A")
+    assert query["datasourceUid"] == "$GRAFANA_USAGE_DATASOURCE_UID"
+    assert "grafanacloud_instance_active_series" in query["model"]["expr"]
+
+
+def test_the_platform_rules_read_the_metrics_datasource(alerting: dict) -> None:
+    for rule in alerting["groups"][0]["rules"]:
+        if rule["uid"] == "caresetu-active-series":
+            continue
+        query = next(target for target in rule["data"] if target["refId"] == "A")
+        assert query["datasourceUid"] == "$GRAFANA_METRICS_DATASOURCE_UID"
+
+
+def test_no_alert_rule_queries_a_classic_histogram_series(alerting: dict) -> None:
+    # The collector exports histograms as NATIVE histograms (NHCB) with classic
+    # histograms switched off, so the `_count` series does not exist and a rule
+    # naming it never fires.
+    for rule in alerting["groups"][0]["rules"]:
+        query = next(target for target in rule["data"] if target["refId"] == "A")
+        expr = query["model"]["expr"]
+        assert "_bucket" not in expr
+        assert not expr.endswith("_count[10m])")
+        assert "_count[" not in expr
+
+
+def test_the_dashboard_default_window_is_the_deep_link_window() -> None:
+    # One window, two surfaces: the console's deep link opens the dashboard with
+    # `?from=`, so a second copy of the value in the generator could drift and
+    # the two would land on different ranges.
+    from modules.observability.domain.deeplinks import DEFAULT_GRAFANA_WINDOW
+
+    assert DEFAULT_WINDOW == DEFAULT_GRAFANA_WINDOW
+    assert build_dashboard()["time"]["from"] == DEFAULT_GRAFANA_WINDOW
 
 
 def test_alert_rule_count_is_within_the_deliberate_cap(alerting: dict) -> None:

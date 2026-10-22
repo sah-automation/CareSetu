@@ -10,10 +10,20 @@ gates must default to the inert posture so local dev, tests and CI are
 unchanged.
 """
 
+from decimal import Decimal
+
 import pytest
 
 from app.config import (
     DEFAULT_LOG_FORMAT,
+    DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE,
+    DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT,
+    DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS,
+    DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE,
+    DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD,
+    DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD,
+    DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT,
+    DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS,
     DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES,
     DEFAULT_OTEL_TRACES_SAMPLER_RATIO,
     DEFAULT_SENTRY_TRACES_SAMPLE_RATE,
@@ -163,3 +173,92 @@ def test_settings_otel_sampler_ratio_defaults_and_accepts_boundaries() -> None:
 
 def test_settings_sentry_sample_rate_defaults_to_zero() -> None:
     assert Settings().sentry_traces_sample_rate == DEFAULT_SENTRY_TRACES_SAMPLE_RATE
+
+
+# ------------------------------------------------------- the alert thresholds
+
+
+def test_the_alert_thresholds_default_to_the_values_the_plan_names() -> None:
+    """Each threshold is a limit a deployment may move, so it is configuration."""
+    settings = Settings()
+
+    assert settings.observability_budget_alert_threshold_pct == (
+        DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT
+    )
+    assert settings.observability_breaker_open_success_rate == (
+        DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE
+    )
+    assert settings.observability_provider_health_drop_threshold == (
+        DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD
+    )
+    assert settings.observability_outbox_backlog_threshold == (
+        DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD
+    )
+    assert settings.observability_queue_age_threshold_seconds == (
+        DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS
+    )
+    assert settings.observability_cost_outlier_multiple == (
+        DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE
+    )
+    assert settings.observability_cost_outlier_min_baseline_days == (
+        DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS
+    )
+    assert settings.observability_provider_rate_limit_alert_count == (
+        DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT
+    )
+
+
+def test_the_alert_thresholds_are_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """coding-standards §9.1: a limit a deployment must touch is an environment edit."""
+    monkeypatch.setenv("OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT", "60")
+    monkeypatch.setenv("OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE", "0.7")
+    monkeypatch.setenv("OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD", "0.1")
+    monkeypatch.setenv("OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD", "100")
+    monkeypatch.setenv("OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS", "300")
+    monkeypatch.setenv("OBSERVABILITY_COST_OUTLIER_MULTIPLE", "4.5")
+    monkeypatch.setenv("OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS", "5")
+    monkeypatch.setenv("OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT", "3")
+
+    settings = get_settings()
+
+    assert settings.observability_budget_alert_threshold_pct == 60
+    # A ratio stays a Decimal, so a threshold compared for equality against a
+    # rolled figure carries no binary approximation.
+    assert settings.observability_breaker_open_success_rate == Decimal("0.7")
+    assert settings.observability_provider_health_drop_threshold == Decimal("0.1")
+    assert settings.observability_outbox_backlog_threshold == 100
+    assert settings.observability_queue_age_threshold_seconds == 300
+    assert settings.observability_cost_outlier_multiple == Decimal("4.5")
+    assert settings.observability_cost_outlier_min_baseline_days == 5
+    assert settings.observability_provider_rate_limit_alert_count == 3
+
+
+def test_a_threshold_outside_its_range_fails_closed_at_boot() -> None:
+    """A percentage outside 0-100 is not a percentage, and a zero floor is silence."""
+    with pytest.raises(ValueError, match="observability_budget_alert_threshold_pct"):
+        Settings(observability_budget_alert_threshold_pct=0)
+    with pytest.raises(ValueError, match="observability_breaker_open_success_rate"):
+        Settings(observability_breaker_open_success_rate=Decimal("0"))
+    with pytest.raises(ValueError, match="observability_provider_health_drop_threshold"):
+        Settings(observability_provider_health_drop_threshold=Decimal("1"))
+    with pytest.raises(ValueError, match="observability_outbox_backlog_threshold"):
+        Settings(observability_outbox_backlog_threshold=0)
+    with pytest.raises(ValueError, match="observability_queue_age_threshold_seconds"):
+        Settings(observability_queue_age_threshold_seconds=0)
+    with pytest.raises(ValueError, match="observability_cost_outlier_multiple"):
+        Settings(observability_cost_outlier_multiple=Decimal("1"))
+    with pytest.raises(ValueError, match="observability_cost_outlier_min_baseline_days"):
+        Settings(observability_cost_outlier_min_baseline_days=0)
+    with pytest.raises(ValueError, match="observability_provider_rate_limit_alert_count"):
+        Settings(observability_provider_rate_limit_alert_count=0)
+
+
+def test_a_malformed_ratio_threshold_fails_closed_at_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OBSERVABILITY_COST_OUTLIER_MULTIPLE", "three")
+
+    with pytest.raises(ValueError, match="OBSERVABILITY_COST_OUTLIER_MULTIPLE"):
+        get_settings()

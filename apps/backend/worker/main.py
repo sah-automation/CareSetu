@@ -48,7 +48,7 @@ import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import TypeVar
 
 # apscheduler ships no py.typed marker; strict mypy skips it (import-untyped).
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -88,6 +88,12 @@ from observability.otel import flush_otel, init_otel, start_span
 from observability.sentry import flush_sentry, init_sentry
 
 logger = logging.getLogger(__name__)
+
+#: What a buffered-drain pass returns. The two drains report different reports
+#: (the error feed's write counts, the counter's fold counts), and the shared
+#: skeleton carries the type through so a caller reads its own report's fields
+#: rather than an untyped value.
+_DrainReportT = TypeVar("_DrainReportT")
 
 
 class _DrainLatch:
@@ -274,9 +280,9 @@ async def _run_buffered_drain(
     job_name: str,
     wording: _DrainWording,
     latch: _DrainLatch,
-    drain: Callable[[AsyncEngine], Awaitable[Any]],
+    drain: Callable[[AsyncEngine], Awaitable[_DrainReportT]],
     engine: AsyncEngine | None,
-) -> Any:
+) -> _DrainReportT | None:
     """Run ONE buffered-telemetry drain pass: span, latch, swallow, dispose.
 
     The shared skeleton behind :func:`_run_error_drain` and
@@ -309,7 +315,7 @@ async def _run_buffered_drain(
     success line to log must not print it for a pass that wrote nothing.
     """
     settings = get_settings()
-    report = None
+    report: _DrainReportT | None = None
     owned = engine is None
     drain_engine = engine if engine is not None else create_async_engine(settings.database_url)
     with start_span(
@@ -451,11 +457,15 @@ def build_scheduler(
     that owns this module's only legal write path. #753: the job is registered
     ONLY when ``settings.error_capture_enabled`` - a deployment that has not
     opted into the capture seam has an always-empty buffer, so the gate-off
-    scheduler is the pre-#726 one (sweep + HTTP-counter fold, nothing else).
+    scheduler is the pre-#726 one (sweep, plus the HTTP-counter fold when its own
+    gate is on, nothing else).
 
     The third is PHASE-14A B9's HTTP-counter fold (#727), on an ``IntervalTrigger``
     of ``settings.http_counter_drain_interval_seconds``, for the same two reasons:
     it folds in-process state, and it reaches the module through the same facade.
+    #753: it is registered ONLY when ``settings.http_counter_enabled``, for the
+    same reason the error drain is conditional - the gate-off scheduler folds
+    nothing, so the job would only wake up to find an empty map.
     Its cadence defaults to the counter's own one-minute grain because that is what
     bounds the write cost at one row per route per minute - firing faster cannot add
     information (a bucket split across two passes still lands on one row, since the
@@ -483,14 +493,19 @@ def build_scheduler(
             coalesce=True,
             max_instances=1,
         )
-    scheduler.add_job(
-        counter_drain_callback,
-        IntervalTrigger(seconds=settings.http_counter_drain_interval_seconds),
-        id="http-counter-fold",
-        name="observability-http-counter-fold",
-        coalesce=True,
-        max_instances=1,
-    )
+    # #753: the fold is registered ONLY when ``settings.http_counter_enabled`` -
+    # a deployment that has not opted into the counter has an always-empty map, so
+    # the gate-off scheduler is the pre-#727 one (sweep, plus the error drain when
+    # its own gate is on).
+    if settings.http_counter_enabled:
+        scheduler.add_job(
+            counter_drain_callback,
+            IntervalTrigger(seconds=settings.http_counter_drain_interval_seconds),
+            id="http-counter-fold",
+            name="observability-http-counter-fold",
+            coalesce=True,
+            max_instances=1,
+        )
     return scheduler
 
 
@@ -532,8 +547,13 @@ async def run_worker_until_stopped(
     # dropped. In production this is a no-op, because the web process (which serves
     # the requests being counted) already sized it in its own lifespan; a standalone
     # worker has an empty counter to fold anyway, and setting the bound there means
-    # whichever process starts first has already sized it.
-    configure_http_counter(resolved_settings.http_counter_max_series)
+    # whichever process starts first has already sized it. #753: the same call
+    # applies HTTP_COUNTER_ENABLED, so this root also decides whether the counter
+    # is armed at all.
+    configure_http_counter(
+        resolved_settings.http_counter_max_series,
+        enabled=resolved_settings.http_counter_enabled,
+    )
     # PHASE-14A A4 (#696): initialise Sentry error tracking at the worker
     # composition root when SENTRY_DSN is set; a no-op when empty and never a
     # boot failure (init failures are logged and swallowed).

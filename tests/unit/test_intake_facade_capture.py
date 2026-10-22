@@ -937,9 +937,10 @@ async def test_request_rx_draft_writes_a_metered_draft_job_and_publishes_complet
     assert event["ai_job_id"] == 42
     assert event["intake_id"] == 1
     assert event["patient_id"] == 7
-    # No doctor is resolved on this leg: the drafting doctor lives in the care
-    # schema, and per-actor attribution rides the ``intake.doctor_assigned``
-    # edge (#720) rather than a cross-schema read (ADR-0003).
+    # No doctor on the job's own key on this call: the caller named none, so the
+    # job's own key is null and per-actor attribution rides the
+    # ``intake.doctor_assigned`` edge (#720) rather than a cross-schema read
+    # (ADR-0003). The drafting leg, which names its doctor, is covered below.
     assert event["doctor_id"] is None
     # The booking announced the enqueue before the completion closed it (#729), so
     # the leg's queue row has both ends.
@@ -949,6 +950,31 @@ async def test_request_rx_draft_writes_a_metered_draft_job_and_publishes_complet
     assert queued["intake_id"] == 1
     assert queued["task_type"] == "draft"
     assert queued["patient_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_request_rx_draft_carries_the_drafting_doctor_on_the_job() -> None:
+    """The drafting doctor rides the job's own key (ADR-0027 D3).
+
+    The attribution EDGE wins over the job's own key, and the job's own key is
+    the fallback that covers a pick the edge table has not recorded yet - so the
+    drafting leg has to carry the doctor at all, or that fallback is a field
+    nobody ever fills. It gets the doctor from the CALLER, which owns the
+    identity, never by reading the care schema (ADR-0003). The transcription and
+    structuring legs stay null: they run before a patient picks a doctor.
+    """
+    connection = _DraftMeteringConnection()
+    gateway = MockAiProvider(confidence_level="clean")
+    facade = IntakeFacade(engine=_engine(connection), ai_gateway=gateway)
+
+    await facade.request_rx_draft(
+        doctor_input_ref=101,
+        pre_summary_ref=5,
+        doctor_id=42,
+    )
+
+    event = connection.outbox_payload(EVENT_AI_JOB_COMPLETED)
+    assert event["doctor_id"] == 42
 
 
 @pytest.mark.asyncio

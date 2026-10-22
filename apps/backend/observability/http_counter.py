@@ -11,8 +11,16 @@ requests to one route inside one minute are one bucket, one upsert and one row -
 so the write amplification that would make a per-request counter unusable in
 production never gets the chance to appear.
 
-Three rules this module exists to enforce, each a way the obvious implementation
+Four rules this module exists to enforce, each a way the obvious implementation
 leaks:
+
+**Off until a deployment opts in.** The counting gate is disabled at import and
+armed only by a composition root from resolved ``Settings``
+(``HTTP_COUNTER_ENABLED``, #753), exactly as the error capture's gate is. A
+module that armed itself would count every request during the window before the
+root applies the setting - a window in which a deployment that asked for no
+throughput rows is quietly producing them - and would make the gate's stated
+posture false (#717 decision 45).
 
 **Aggregate in process, buffer records.** The obvious shape copies the error
 capture one-for-one: append a record per request, drain a record per request.
@@ -124,11 +132,19 @@ def record_request(*, request: Request, status_code: int, now: datetime | None =
     a lock. No I/O, no await, no database connection - every request pays
     microseconds and the drain pays the write.
 
+    The gate first (#753): with ``HTTP_COUNTER_ENABLED`` off this counts nothing,
+    which is what makes the feature a true no-op for a deployment that has not
+    opted in - the request is answered exactly as it would be without the seam,
+    and the fold writes no row. The gate lives here so the middleware that calls
+    this never has to know about ``Settings``.
+
     The return is the collapsed class because that is what the caller usually
     needs next, and because a caller that had to recompute it would risk drifting
     from the vocabulary this module stores.
     """
     status_class = status_class_for(status_code)
+    if not _http_counter_enabled:
+        return status_class
     _counter.record(
         minute_ts=minute_bucket(now),
         route_template=route_template_for(request),
@@ -309,16 +325,31 @@ class _MinuteCounter:
 
 
 _counter = _MinuteCounter(DEFAULT_HTTP_COUNTER_MAX_SERIES)
+#: The #753 gate (HTTP_COUNTER_ENABLED). DISABLED at import, which is the gate's
+#: stated posture (#717 decision 45): a deployment that has not opted in must not
+#: write a single throughput row, and a module that armed itself would count every
+#: request during the window before the composition root applies ``Settings`` - a
+#: window in which an "off" deployment is quietly on. Every composition root arms
+#: it from resolved ``Settings`` at boot, so the capture sites stay Settings-free
+#: too.
+_http_counter_enabled = False
 
 
-def configure_http_counter(max_series: int) -> None:
-    """Resize the process-global counter; called once at a composition root.
+def configure_http_counter(max_series: int, *, enabled: bool = False) -> None:
+    """Resize the process-global counter and set the #753 counting gate.
 
     Resizing rather than reading a constant at increment time is what lets a
     deployment bound the counter by configuration (coding-standards §9.1) without
     the capture site knowing anything about ``Settings``. Counts survive the
     resize - this is a ceiling, not a reset.
+
+    ``enabled`` is the same idea one level up: the composition root applies
+    ``HTTP_COUNTER_ENABLED`` here, so the gate check inside :func:`record_request`
+    needs no ``Settings`` either. It defaults to OFF so a caller that forgets the
+    kwarg fails safe; every caller in this repo passes it explicitly.
     """
+    global _http_counter_enabled
+    _http_counter_enabled = enabled
     _counter.reset(max_series)
 
 

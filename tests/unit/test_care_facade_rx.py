@@ -69,7 +69,9 @@ from modules.care.schema.models import (
 )
 from modules.health.facade import RecordEntryView, RecordTimeline
 from modules.intake.adapters.ai_provider_mock import MockAiProvider
+from modules.intake.domain.events import EVENT_AI_JOB_COMPLETED
 from modules.intake.facade import IntakeFacade
+from modules.intake.outbox import INTAKE_OUTBOX_TABLE
 
 NOW = datetime.now(UTC)
 
@@ -378,6 +380,43 @@ async def test_create_ai_draft_stores_immutable_snapshot_and_publishes() -> None
     assert outbox_params["event_type"] == EVENT_PRESCRIPTION_DRAFT_CREATED
     assert outbox_params["payload"]["prescription_id"] == 201
     assert outbox_params["payload"]["attempt_no"] == 1
+
+
+@pytest.mark.asyncio
+async def test_create_ai_draft_names_the_drafting_doctor_to_the_intake_seam() -> None:
+    """The care module hands its doctor to the drafting seam (ADR-0027 D3).
+
+    The drafting doctor is this module's own fact - the doctor who owns the
+    case - and the intake module cannot read it (ADR-0003), so it is named in the
+    call. It lands on the metered job's own key, which is the fallback that
+    covers a pick the attribution edge has not recorded yet.
+    """
+    care_conn = _connection(
+        [
+            _FakeResult(row=_case_row()),
+            _FakeResult(row=None),
+            _FakeResult(row=_doctor_input_row()),
+            _FakeResult(scalar=201),
+            _FakeResult(),
+            _FakeResult(),
+        ]
+    )
+    intake_conn = _draft_seam_connection()
+    facade = _care_facade(
+        care_conn,
+        _intake_facade(intake_conn, MockAiProvider()),
+        _FakeHealthFacade(_timeline(entry_types=["rx"])),
+    )
+
+    await facade.create_rx_draft(case_id=1, doctor_id=42, source="ai_draft")
+
+    completed = [
+        p["payload"]
+        for p in _insert_params(_statements(intake_conn), INTAKE_OUTBOX_TABLE)
+        if p["event_type"] == EVENT_AI_JOB_COMPLETED
+    ]
+    assert len(completed) == 1
+    assert completed[0]["doctor_id"] == 42
 
 
 @pytest.mark.asyncio

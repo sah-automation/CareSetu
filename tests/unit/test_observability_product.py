@@ -465,6 +465,27 @@ def test_a_blank_trace_is_treated_as_no_trace() -> None:
     assert session_key == trace_id
 
 
+def test_an_over_long_trace_is_clamped_to_the_width_the_column_has() -> None:
+    """A producer that bypasses the gateway cannot wedge the consumer transaction.
+
+    Both columns are ``VARCHAR(64)``, so an id wider than that would raise on
+    length and take the whole batch's rows down with it. A truncated id still
+    correlates the rows of one step, which is what the key is for.
+    """
+    payload = ProductStepPayload(trace_id="t" * 200, session_key="s" * 200)
+    trace_id, session_key = product_event_keys(payload, event_id=_EVENT_ID)
+    assert trace_id == "t" * 64
+    assert session_key == "s" * 64
+
+
+def test_a_trace_within_the_width_is_never_touched() -> None:
+    """The clamp only shortens; an id that fits is stored exactly as published."""
+    payload = ProductStepPayload(trace_id="t" * 64, session_key="s" * 64)
+    trace_id, session_key = product_event_keys(payload, event_id=_EVENT_ID)
+    assert trace_id == "t" * 64
+    assert session_key == "s" * 64
+
+
 def test_duration_is_converted_to_milliseconds_and_null_stays_null() -> None:
     """An unmeasured step records NULL, never a zero that reads as instantaneous."""
     assert duration_ms_of(ProductStepPayload()) is None

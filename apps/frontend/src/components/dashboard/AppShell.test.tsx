@@ -782,12 +782,23 @@ describe("AppShell operator Observability parent (#744)", () => {
   it("marks the parent current on a nested sub-destination in both surfaces", () => {
     renderShell("operator", "/operator/observability/business");
 
+    // The group row is the current group ("true") in both surfaces; the
+    // destination row below it is the current page ("page"). One element per
+    // navigation set may claim the current page.
     expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(screen.getByTestId("nav-business")).toHaveAttribute(
       "aria-current",
       "page",
     );
     const sheet = openMore();
     expect(within(sheet).getByTestId("more-observability")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(within(sheet).getByTestId("more-business")).toHaveAttribute(
       "aria-current",
       "page",
     );

@@ -78,6 +78,7 @@ from bus.events import (
     EVENT_PRESCRIPTION_DRAFT_CREATED,
 )
 from modules.observability.domain.pseudonym import ActorKind
+from observability.trace_ids import clamp_trace_id
 
 #: The outcome vocabulary, as constants for callers that compare or map. Annotated
 #: as the type rather than left as ``str`` so passing one of them to a step cannot
@@ -404,11 +405,18 @@ def product_event_keys(payload: ProductStepPayload, *, event_id: UUID) -> tuple[
 
     A step-to-step gap is therefore measured from the ledger's own timestamps, never
     assumed from this key: it groups one request, not one journey.
+
+    Both halves are CLAMPED to the width the columns have (``VARCHAR(64)``), not
+    validated. The gateway already mints or rejects an unsafe client id before it
+    reaches here, so the clamp is the net under that gate: a producer that
+    publishes an over-long id would otherwise raise on length and take the whole
+    consumer transaction with it, losing every row in the batch. A truncated id
+    still correlates the rows of one step, which is what this key is for.
     """
     derived = derived_step_key(event_id)
     trace_id = (payload.trace_id or "").strip() or derived
     session_key = (payload.session_key or "").strip() or trace_id
-    return trace_id, session_key
+    return clamp_trace_id(trace_id), clamp_trace_id(session_key)
 
 
 def duration_ms_of(payload: ProductStepPayload) -> int | None:

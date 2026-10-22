@@ -24,6 +24,7 @@ from app.config import (
     DEFAULT_HTTP_COUNTER_MAX_SERIES,
     Settings,
 )
+from app.gateway.http_counter import HttpCounterMiddleware
 from app.main import create_app
 from observability.error_capture import (
     STATUS_CLASS_CLIENT_ERROR,
@@ -68,10 +69,10 @@ def clean_http_counter() -> Iterator[None]:
     what makes it the production/test seam - so a test that shrinks the map would
     otherwise leave every test after it running against a one-series ceiling.
     """
-    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES)
+    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES, enabled=True)
     reset_http_counter()
     yield
-    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES)
+    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES, enabled=True)
     reset_http_counter()
 
 
@@ -244,7 +245,7 @@ def test_the_map_drops_the_OLDEST_MINUTE_rather_than_one_of_its_buckets() -> Non
     made it - a row that looks like data and is not. An absent minute at least reads
     as missing.
     """
-    configure_http_counter(3)
+    configure_http_counter(3, enabled=True)
     first = _NOW.replace(second=0, microsecond=0)
     # Minute one takes TWO buckets (two routes), then two more minutes take one each.
     _count(200, path="/v1/cases/1/entries", now=first)
@@ -267,7 +268,7 @@ def test_the_map_drops_the_OLDEST_MINUTE_rather_than_one_of_its_buckets() -> Non
 
 def test_the_ceiling_spends_itself_on_minutes_that_already_look_quiet() -> None:
     """A steady route keeps one series while the clock moves, not one per minute."""
-    configure_http_counter(3)
+    configure_http_counter(3, enabled=True)
     first = _NOW.replace(second=0, microsecond=0)
     for index in range(10):
         _count(200, now=first + timedelta(minutes=index))
@@ -278,7 +279,7 @@ def test_the_ceiling_spends_itself_on_minutes_that_already_look_quiet() -> None:
 
 def test_the_ceiling_is_on_series_not_on_requests() -> None:
     """A thousand requests are one series, so a thousand requests never hit the bound."""
-    configure_http_counter(1)
+    configure_http_counter(1, enabled=True)
     for _ in range(1000):
         _count(200)
 
@@ -288,7 +289,7 @@ def test_the_ceiling_is_on_series_not_on_requests() -> None:
 
 def test_a_bucket_that_has_been_folded_is_not_dropped_and_costs_no_ceiling() -> None:
     """The row is durable in Postgres, so the key has done its job."""
-    configure_http_counter(1)
+    configure_http_counter(1, enabled=True)
     _count(200, now=_NOW)
     (first,) = pending_http_counts()
     flush_http_counts([first])
@@ -333,7 +334,7 @@ def test_an_empty_release_is_a_no_op() -> None:
 
 def test_the_ceiling_floors_at_one_rather_than_disabling_capture() -> None:
     """A misconfigured ceiling of zero must not turn the counter off silently."""
-    configure_http_counter(0)
+    configure_http_counter(0, enabled=True)
 
     assert http_counter_capacity() == 1
     _count(200)
@@ -343,7 +344,7 @@ def test_the_ceiling_floors_at_one_rather_than_disabling_capture() -> None:
 
 def test_the_reset_clears_the_counts_and_the_drop_count_but_keeps_the_ceiling() -> None:
     """The seam between production and the suites, exactly as the error buffer's."""
-    configure_http_counter(1)
+    configure_http_counter(1, enabled=True)
     _count(200, now=_NOW)
     _count(200, now=_NOW + timedelta(minutes=1))
 
@@ -383,8 +384,13 @@ def test_pending_is_ordered_so_two_reads_of_the_same_state_agree() -> None:
 
 
 def _app_client(**settings: object) -> TestClient:
-    """The real app with three extra routes, and no lifespan (nothing here needs one)."""
-    app = create_app(settings=Settings(**settings))  # type: ignore[arg-type]
+    """The real app with three extra routes, and no lifespan (nothing here needs one).
+
+    ``http_counter_enabled`` is on because the counter is an OPT-IN instrument
+    (#753): with the gate off the middleware is not installed at all, so these
+    tests would see no buckets and pass for the wrong reason.
+    """
+    app = create_app(settings=Settings(http_counter_enabled=True, **settings))  # type: ignore[arg-type]
 
     @app.get("/v1/cases/{case_id}/entries/fine")
     def fine() -> dict[str, str]:
@@ -526,6 +532,31 @@ def test_a_healthy_request_still_costs_exactly_one_series() -> None:
 # ------------------------------------------------------------------- the settings
 
 
+def test_the_counter_is_off_until_a_deployment_opts_in() -> None:
+    """#753: the counter is an instrument a deployment turns on, not one it inherits.
+
+    With the gate off nothing is counted, so the fold job would have nothing to
+    write and the operator's throughput panel would read as a healthy silence
+    rather than as a missing feature.
+    """
+    configure_http_counter(DEFAULT_HTTP_COUNTER_MAX_SERIES, enabled=False)
+
+    _count(200)
+
+    assert pending_http_counts() == ()
+
+
+def test_a_deployment_that_has_not_opted_in_installs_no_counting_middleware() -> None:
+    """#753: the gate-off posture is "as if the feature did not exist".
+
+    Not "the middleware runs and discards" - the per-request cost of an
+    instrument nobody reads is a cost with no return.
+    """
+    app = create_app(settings=Settings())
+
+    assert HttpCounterMiddleware not in [entry.cls for entry in app.user_middleware]
+
+
 def test_the_counter_defaults_to_a_ceiling_and_a_minute_cadence() -> None:
     """Both numbers are declared in ``app.config`` so nothing hardcodes them twice."""
     settings = Settings()
@@ -536,6 +567,7 @@ def test_the_counter_defaults_to_a_ceiling_and_a_minute_cadence() -> None:
         == (DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS)
         == 60
     )
+    assert settings.http_counter_enabled is False
 
 
 def test_the_drain_cadence_matches_the_counter_grain_by_default() -> None:

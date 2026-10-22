@@ -43,23 +43,26 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from urllib.parse import quote, urlencode, urlsplit
 
+from observability.otel import HTTP_INFLIGHT_METRIC
+from observability.trace_ids import MAX_TRACE_ID_LENGTH as _MAX_TRACE_ID_LENGTH
+
 #: TRUE request concurrency, as a tracing-backend signal (B5 #729, #717 decision
 #: 17). Requests in flight at this instant - the only honest place saturation
 #: lives, because a Postgres-resident count would be a snapshot of a number that
 #: changes every millisecond and would read as though it were the real one. The
 #: operator reliability read LINKS here rather than storing anything.
 #:
-#: The NAME is declared here, beside the link that points at it, because the link is
-#: the read's public contract: a metric name spelled once means the recorded signal
-#: and the URL that opens it cannot drift apart. ``observability.otel`` - which
-#: records it - reads the constant from here, so the dependency runs instrument ->
-#: contract and never the other way (coding-standards §2: the domain imports no
-#: infrastructure).
+#: The NAME is declared by ``observability.otel`` - the instrument that records
+#: it - and imported here, beside the link that points at it, because the link is
+#: the read's public contract: a metric name spelled once means the recorded
+#: signal and the URL that opens it cannot drift apart. The shared package
+#: imports nothing from ``modules`` (coding-standards §2), so the dependency runs
+#: contract -> instrument and never the other way.
 #:
 #: Unlabelled by design: one series for the whole service. Under the free tier's
 #: ten-thousand-active-series ceiling that is deliberate - a metric labelled per
 #: route would spend a series per endpoint to answer a question the total answers.
-HTTP_INFLIGHT_METRIC = "caresetu.http.server.inflight"
+
 
 #: The Grafana dashboard the operator link opens (#736).
 #:
@@ -84,7 +87,12 @@ MAX_GRAFANA_WINDOW_LENGTH = 32
 #: The longest trace id the platform can store: ``observability_ai_job_spend``,
 #: ``observability_error_events`` and ``observability_product_events`` all declare
 #: ``trace_id VARCHAR(64)``, and error capture clamps to that before it writes.
-MAX_TRACE_ID_LENGTH = 64
+#:
+#: The number is owned by the shared package (``observability.trace_ids``) because
+#: the gateway has to enforce the SAME bound before it stores one: a client-supplied
+#: id longer than the column would reach the product ledger unclamped and wedge
+#: that write. One constant, one rule, both sides of the seam.
+MAX_TRACE_ID_LENGTH = _MAX_TRACE_ID_LENGTH
 
 #: Ceiling for the platform's other pseudonymous identifiers - the ``actor_key`` and
 #: ``session_key`` the product-event ledger stores, both ``VARCHAR(64)``.
@@ -174,13 +182,13 @@ def clean_trace_id(trace_id: str | None) -> str | None:
 
     The rule this enforces is the platform's own, not a fresh one. The gateway
     (``app.gateway.trace``) mints ``uuid4().hex`` - 32 lowercase hex characters -
-    unless the caller supplied an ``X-Request-Id`` header, which it accepts when the
-    value is printable and carries no space, and it clamps what it stores to
-    ``VARCHAR(64)`` (``observability.error_capture``). So the set of identifiers the
-    platform can actually hold is "printable, unspaced, at most 64 characters", and
-    this accepts exactly that - narrower than the gateway's own rule wherever the two
-    differ, so a stored value always passes, while a value no read could have
-    produced does not.
+    unless the caller supplied an ``X-Request-Id`` header it accepts, which it
+    does only for a value matching the shared identifier shape
+    (``observability.trace_ids``), and error capture clamps what it stores to
+    ``VARCHAR(64)`` (``observability.error_capture``). So the set of identifiers
+    the platform can actually hold is exactly what
+    :func:`observability.trace_ids.is_safe_trace_id` accepts, and this accepts
+    exactly that - a value no read could have produced does not.
     """
     return _clean_segment(trace_id, max_length=MAX_TRACE_ID_LENGTH)
 

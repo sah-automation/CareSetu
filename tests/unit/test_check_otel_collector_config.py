@@ -78,6 +78,31 @@ def test_status_class_invented_is_rejected(tmp_path: Path) -> None:
     assert "server-error" in _messages(tuple(v for v in violations if "classify" in v.message))
 
 
+def test_a_fourth_status_class_is_rejected(tmp_path: Path) -> None:
+    """A class ADDED alongside the three is a fourth series dimension.
+
+    The three required classes are all still assigned, so only the "must not
+    invent" rule can catch this - which is why that rule has to read the
+    assignments rather than the expected list.
+    """
+    deploy_root = _deploy_tree(tmp_path)
+    path = _config_path(deploy_root)
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    index = next(i for i, line in enumerate(lines) if '"server-error"' in line)
+    lines.insert(
+        index + 1,
+        '          - \'set(attributes["http.status_class"], "redirect")\'\n',
+    )
+    path.write_text("".join(lines), encoding="utf-8")
+
+    violations = check_otel_collector_config(deploy_root)
+    assert "must not invent a status class redirect" in _messages(violations)
+    # The three required classes are still classified, so the only complaint
+    # is the invented one.
+    assert "must classify status" not in _messages(violations)
+
+
 def test_missing_raw_status_delete_is_rejected(tmp_path: Path) -> None:
     deploy_root = _deploy_tree(tmp_path)
     path = _config_path(deploy_root)

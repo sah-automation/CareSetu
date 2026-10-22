@@ -9,6 +9,7 @@ import {
   formatAge,
   formatCount,
   formatDuration,
+  formatMarginPercent,
   formatMoney,
   formatPct,
   formatRate,
@@ -102,6 +103,51 @@ describe("formatCount", () => {
     expect(formatCount(1234)).toBe("1,234");
     expect(formatCount(1200000)).toBe("12,00,000");
     expect(formatCount(0)).toBe("0");
+  });
+});
+
+// #737: a margin percentage is either a figure or a REASON. The zero is the
+// failure this exists to prevent: "0% gross margin" reads as "the AI costs
+// nothing", which is a claim about the business, not a fact about the data.
+describe("formatMarginPercent", () => {
+  const REASONS = {
+    revenueNotCaptured: "revenue not captured",
+    revenueZero: "revenue was zero in this period",
+  };
+
+  it("prints the figure when there is one", () => {
+    expect(
+      formatMarginPercent({ value: 97.5, reason: null, detail: null }, REASONS),
+    ).toBe("97.5%");
+  });
+
+  it("names the reason instead of printing a zero", () => {
+    expect(
+      formatMarginPercent(
+        { value: null, reason: "revenue_not_captured", detail: null },
+        REASONS,
+      ),
+    ).toBe("revenue not captured");
+    expect(
+      formatMarginPercent(
+        { value: null, reason: "revenue_zero", detail: null },
+        REASONS,
+      ),
+    ).toBe("revenue was zero in this period");
+  });
+
+  it("never prints a zero margin, whatever the read says", () => {
+    for (const reason of ["revenue_not_captured", "revenue_zero"] as const) {
+      expect(
+        formatMarginPercent({ value: null, reason, detail: null }, REASONS),
+      ).not.toBe("0%");
+    }
+  });
+
+  it("falls back to the dash when there is neither a figure nor a reason", () => {
+    expect(
+      formatMarginPercent({ value: null, reason: null, detail: null }, REASONS),
+    ).toBe(DASH);
   });
 });
 

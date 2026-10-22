@@ -35,6 +35,16 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
+from app.config import (
+    DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE,
+    DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT,
+    DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS,
+    DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE,
+    DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD,
+    DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD,
+    DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT,
+    DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS,
+)
 from modules.observability.domain.consumer import (
     AI_JOB_SPEND_STATUS_COMPLETED,
     AI_JOB_SPEND_STATUS_FAILED,
@@ -119,22 +129,27 @@ ALERT_KIND_PROVIDER_RATE_LIMITED = "provider_rate_limited"
 ALERT_KIND_LATENCY_OBJECTIVE_BREACH = "latency_objective_breach"
 
 #: The share of a budget that raises ``ai_budget`` (plan-phase14 §11, the
-#: "AI budget meter > 80%" member of the minimum alert set).
-DEFAULT_BUDGET_ALERT_THRESHOLD_PCT = 80
+#: "AI budget meter > 80%" member of the minimum alert set). The VALUE is
+#: configuration (``app.config``), so a deployment moves it with an environment
+#: edit rather than a code change (coding-standards §9.1); this is the default
+#: the rule falls back to when nothing is configured.
+DEFAULT_BUDGET_ALERT_THRESHOLD_PCT = DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT
 
 #: A provider whose observed success rate falls below this is recorded with an
 #: open breaker and raises the critical ``breaker_open`` alert
 #: (``error-handling-observability.md`` §5, "repeated third-party failures").
-DEFAULT_BREAKER_OPEN_SUCCESS_RATE = Decimal("0.5")
+#: Configuration, like the budget share above.
+DEFAULT_BREAKER_OPEN_SUCCESS_RATE = DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE
 
 #: How far the success rate must fall below the previously recorded value before
-#: ``provider_health_drop`` fires (plan-phase14 §11).
-DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD = Decimal("0.2")
+#: ``provider_health_drop`` fires (plan-phase14 §11). Configuration.
+DEFAULT_PROVIDER_HEALTH_DROP_THRESHOLD = DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD
 
 #: Rows parked in ``pending``/``inflight`` across an outbox table before
 #: ``outbox_backlog`` fires (plan-phase14 §11). Sized well above a normal
 #: dispatch delay so a burst of freshly published events is not an alert.
-DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD = 500
+#: Configuration.
+DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD = DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD
 
 #: How old the OLDEST still-open job in one AI queue may get before ``queue_age``
 #: fires (B5, #729). Fifteen minutes is well past any healthy pipeline leg: a
@@ -146,7 +161,7 @@ DEFAULT_OUTBOX_BACKLOG_ALERT_THRESHOLD = 500
 #: has a depth of one - invisible to an alert sized for five hundred rows - and an
 #: age that grows without limit. Age is the LEADING indicator; a stall has to page
 #: on it, not on the row count that follows an hour later.
-DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS = 900
+DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS = DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS
 
 #: How many times one actor's own trailing average a single day of its spend has to
 #: reach before ``cost_outlier`` fires (B7, #733). A multiple of their OWN history,
@@ -154,20 +169,26 @@ DEFAULT_QUEUE_AGE_ALERT_THRESHOLD_SECONDS = 900
 #: imaging passes and a caller looping the same request four hundred times are the
 #: same figure on the meter, and only the actor's own baseline tells them apart. The
 #: absolute cap belongs to ``ai_budget``, which bounds the bill; this bounds the
-#: SHAPE of one actor's spend.
-DEFAULT_COST_OUTLIER_MULTIPLE = Decimal("3")
+#: SHAPE of one actor's spend. ADR-0027 D8 asks for "a CONFIGURED multiple", so
+#: this one is configuration by decision, not only by convention.
+DEFAULT_COST_OUTLIER_MULTIPLE = DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE
 
 #: How far back an actor's baseline reaches, in days: the seven days trailing the
 #: day under test, not the day under test itself. Including the day being judged
 #: would let a large spike raise its own baseline and hide itself.
+#:
+#: A PINNED CONSTANT, and deliberately so: ADR-0027 D8 names the seven-day
+#: trailing average as the rule, so this is a decision rather than a limit a
+#: deployment may move (coding-standards §9.2 - only an ADR-pinned threshold may
+#: stay a constant). The multiple above is the tunable half; the window is not.
 COST_OUTLIER_BASELINE_DAYS = 7
 
 #: How many of those seven days the actor must actually have spent on before it has
 #: a baseline at all. A patient is episodic - a returning one who last spent a week
 #: ago would otherwise be measured against an average diluted by six silent days
 #: and alert on a perfectly ordinary consultation, which is the false positive that
-#: trains an operator to dismiss the feed.
-MIN_COST_OUTLIER_BASELINE_DAYS = 3
+#: trains an operator to dismiss the feed. Configuration.
+MIN_COST_OUTLIER_BASELINE_DAYS = DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS
 
 #: The precision every ratio in a ``cost_outlier`` payload is reported at. The rule
 #: compares at this precision too, so a payload can never state a deviation that
@@ -182,6 +203,10 @@ _COST_OUTLIER_QUANTUM = Decimal("0.01")
 #: 4xx is deliberately not in the numerator: a 404 is a caller getting a route wrong,
 #: not the platform failing, and folding it in would make a bad frontend link read as
 #: an outage.
+#:
+#: A PINNED CONSTANT: ADR-0030 D1 names the < 1% objective as one of the six, so
+#: this is a promise rather than a limit a deployment may move (coding-standards
+#: §9.2 - only an ADR-pinned threshold stays a constant).
 DEFAULT_ERROR_RATE_OBJECTIVE = Decimal("0.01")
 
 #: How many requests a day must record before the error rate is judged at all. One
@@ -189,6 +214,9 @@ DEFAULT_ERROR_RATE_OBJECTIVE = Decimal("0.01")
 #: quiet night a handful of requests carry the whole denominator and every one of
 #: them is a large share of it - which is the first thing an operator would learn to
 #: dismiss. The floor is what makes this alert trustworthy at all.
+#:
+#: A PINNED CONSTANT, for the same reason as the objective above: ADR-0030 D3
+#: states the 100-request floor as part of the symptom rule.
 DEFAULT_ERROR_RATE_MIN_REQUESTS = 100
 
 #: The latency objective ``error-handling-observability.md`` §5.1 states for the AI
@@ -212,6 +240,9 @@ DEFAULT_ERROR_RATE_MIN_REQUESTS = 100
 #: slow enough to breach it is genuinely slow; a provider whose true distribution has
 #: a long thin tail but a modest mean may sit closer to the line than the objective
 #: implies. #754 formalises the SLOs and is where that measurement gap is settled.
+#:
+#: A PINNED CONSTANT: ADR-0030 D1 names the p95 <= 30 s objective as one of the
+#: six, so the alert compares against the number the platform promised.
 DEFAULT_LATENCY_OBJECTIVE_MS = 30_000
 
 #: How many quota refusals one provider must accumulate in its window before
@@ -220,8 +251,9 @@ DEFAULT_LATENCY_OBJECTIVE_MS = 30_000
 #: response is to slow down rather than to read a success-rate figure and shrug. One
 #: refusal is a fact about the provider's capacity, not a rounding artefact of a
 #: larger count; a deployment that treats it as noise raises the threshold here
-#: rather than losing the alert.
-DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT = 1
+#: rather than losing the alert. Configuration, because the count is a limit a
+#: deployment may have to move, not an objective it promised.
+DEFAULT_PROVIDER_RATE_LIMIT_ALERT_COUNT = DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT
 
 #: Rollup metric-key prefixes registered at import. The suffix appended to each
 #: key is the scope the entry computes over (the provider today).

@@ -218,6 +218,25 @@ DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS = 30
 # slower leaves the operator's "recent past" stale.
 DEFAULT_HTTP_COUNTER_MAX_SERIES = 5000
 DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS = 60
+# MOD-013's ALERT THRESHOLDS (Batch 3, #717; plan-phase14 §11). Every one of
+# these is a LIMIT a deployment may have to move - a bigger budget, a busier
+# queue, a stricter provider - so each is configuration (coding-standards §9.1)
+# rather than a constant buried in the rule that reads it. The four values that
+# are deliberately NOT here are the ones a decision record pins: the seven-day
+# cost baseline (ADR-0027 D8), the 1% error-rate objective, the 100-request
+# floor and the 30 s AI latency objective (ADR-0030 D1, D3). A pinned
+# objective is a promise, not a knob, and §9.2 is explicit that only an
+# ADR-pinned threshold may stay a constant.
+DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT = 80
+DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE = Decimal("0.5")
+DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD = Decimal("0.2")
+DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD = 500
+DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS = 900
+# ADR-0027 D8 asks for "a CONFIGURED multiple" of the actor's own trailing
+# average, so this one was always meant to be an environment edit.
+DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE = Decimal("3")
+DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS = 3
+DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT = 1
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -441,10 +460,40 @@ class Settings:
     # dropped minutes is missing rather than the point past which the process
     # becomes unsafe. A limit, so configuration (coding-standards §9.1).
     http_counter_max_series: int = DEFAULT_HTTP_COUNTER_MAX_SERIES
+    # The per-minute HTTP counter's own gate (B9 #727, gated #753): off (the
+    # default) means no request is counted at all - the gateway middleware is not
+    # installed, the seam counts nothing, and the worker skips the fold job. On,
+    # the counter is armed and the ceiling above applies. Off by default, like
+    # every gate in this block: a deployment opts in per feature, and the inert
+    # path is proven by the CI gate job so it cannot rot.
+    http_counter_enabled: bool = False
     # How often the worker folds the per-minute counter into the observability
-    # schema, in seconds. Bounded below only by "must be positive": a zero interval
-    # is a busy loop against the database.
+    # schema, in seconds. Bounded below only by "must be positive": a zero
+    # interval is a busy loop against the database.
     http_counter_drain_interval_seconds: int = DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
+    # MOD-013's alert thresholds: the LIMITS each rollup rule compares against.
+    # They are configuration rather than constants in the rule that reads them
+    # (coding-standards §9.1), so a deployment moves a threshold by an
+    # environment edit and never by a code change. The defaults are the values
+    # plan-phase14 §11 names.
+    observability_budget_alert_threshold_pct: int = DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT
+    observability_breaker_open_success_rate: Decimal = (
+        DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE
+    )
+    observability_provider_health_drop_threshold: Decimal = (
+        DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD
+    )
+    observability_outbox_backlog_threshold: int = DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD
+    observability_queue_age_threshold_seconds: int = (
+        DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS
+    )
+    observability_cost_outlier_multiple: Decimal = DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE
+    observability_cost_outlier_min_baseline_days: int = (
+        DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS
+    )
+    observability_provider_rate_limit_alert_count: int = (
+        DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT
+    )
     # Batch-3 observability feature gates (#753): additive and disabled by
     # default, one gate per feature that shipped in this batch, so a deployment
     # opts in per feature and local dev / tests / CI run without them. The A5
@@ -601,6 +650,31 @@ class Settings:
             raise ValueError("http_counter_max_series must be positive")
         if self.http_counter_drain_interval_seconds <= 0:
             raise ValueError("http_counter_drain_interval_seconds must be positive")
+        if not 0 < self.observability_budget_alert_threshold_pct <= 100:
+            # A percentage outside 0-100 is not a percentage: at zero the alert
+            # would fire on every day the platform spends anything, and above
+            # 100 it could never fire at all.
+            raise ValueError("observability_budget_alert_threshold_pct must be in (0, 100]")
+        if not 0 < self.observability_breaker_open_success_rate <= 1:
+            raise ValueError("observability_breaker_open_success_rate must be in (0, 1]")
+        if not 0 < self.observability_provider_health_drop_threshold < 1:
+            # A drop of a whole success rate is not a drop; a threshold of zero
+            # would fire on any movement at all.
+            raise ValueError("observability_provider_health_drop_threshold must be in (0, 1)")
+        if self.observability_outbox_backlog_threshold <= 0:
+            raise ValueError("observability_outbox_backlog_threshold must be positive")
+        if self.observability_queue_age_threshold_seconds <= 0:
+            raise ValueError("observability_queue_age_threshold_seconds must be positive")
+        if self.observability_cost_outlier_multiple <= 1:
+            # A multiple of one or less fires on every day merely ABOVE the
+            # actor's own average, which is what half of any week looks like.
+            raise ValueError("observability_cost_outlier_multiple must be greater than 1")
+        if self.observability_cost_outlier_min_baseline_days <= 0:
+            raise ValueError("observability_cost_outlier_min_baseline_days must be positive")
+        if self.observability_provider_rate_limit_alert_count <= 0:
+            # Zero refusals is the ABSENCE of the condition, not a mild form of
+            # it; a threshold of zero would make the alert permanent.
+            raise ValueError("observability_provider_rate_limit_alert_count must be positive")
         parse_ai_pricing_table(self.ai_pricing_table)
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
@@ -766,6 +840,22 @@ def _env_int(name: str, default: int) -> int:
     if raw is None:
         return default
     return int(raw)
+
+
+def _env_decimal(name: str, default: Decimal) -> Decimal:
+    """Parse a decimal environment variable, falling back to ``default``.
+
+    Decimal rather than float because the thresholds that use it are RATIOS
+    compared for equality against a rolled figure: a float would carry a
+    binary approximation into a comparison the operator reads as exact.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return Decimal(raw.strip())
+    except InvalidOperation as exc:
+        raise ValueError(f"{name} must be a decimal number; got {raw!r}") from exc
 
 
 def _env_csv(name: str) -> tuple[str, ...]:
@@ -991,11 +1081,43 @@ def get_settings() -> Settings:
         error_drain_interval_seconds=_env_int(
             "ERROR_DRAIN_INTERVAL_SECONDS", DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS
         ),
+        http_counter_enabled=_env_bool("HTTP_COUNTER_ENABLED", False),
         http_counter_max_series=_env_int(
             "HTTP_COUNTER_MAX_SERIES", DEFAULT_HTTP_COUNTER_MAX_SERIES
         ),
         http_counter_drain_interval_seconds=_env_int(
             "HTTP_COUNTER_DRAIN_INTERVAL_SECONDS", DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
+        ),
+        observability_budget_alert_threshold_pct=_env_int(
+            "OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT",
+            DEFAULT_OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT,
+        ),
+        observability_breaker_open_success_rate=_env_decimal(
+            "OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE",
+            DEFAULT_OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE,
+        ),
+        observability_provider_health_drop_threshold=_env_decimal(
+            "OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD",
+            DEFAULT_OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD,
+        ),
+        observability_outbox_backlog_threshold=_env_int(
+            "OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD",
+            DEFAULT_OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD,
+        ),
+        observability_queue_age_threshold_seconds=_env_int(
+            "OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS",
+            DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS,
+        ),
+        observability_cost_outlier_multiple=_env_decimal(
+            "OBSERVABILITY_COST_OUTLIER_MULTIPLE", DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE
+        ),
+        observability_cost_outlier_min_baseline_days=_env_int(
+            "OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS",
+            DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS,
+        ),
+        observability_provider_rate_limit_alert_count=_env_int(
+            "OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT",
+            DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT,
         ),
         evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
         annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),

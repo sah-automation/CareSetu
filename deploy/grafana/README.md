@@ -60,15 +60,30 @@ Grafana picks the files up on boot from
 these variables, which are resolved on the **Grafana host** (they are not read
 by the CareSetu app, so they do not appear in the app's `.env.example`):
 
-| Variable                         | Used by             | Meaning                                                                                               |
-| :------------------------------- | :------------------ | :---------------------------------------------------------------------------------------------------- |
-| `CARESETU_DB_HOST`               | datasource          | Postgres host the read-only role connects to                                                          |
-| `CARESETU_DB_PORT`               | datasource          | Postgres port                                                                                         |
-| `CARESETU_DB_NAME`               | datasource          | Database holding the `observability` schema                                                           |
-| `CARESETU_DB_READONLY_USER`      | datasource          | The read-only Postgres role (SELECT on `observability`)                                               |
-| `CARESETU_DB_READONLY_PASSWORD`  | datasource (secure) | That role's password; set in the environment, never committed                                         |
-| `GRAFANA_METRICS_DATASOURCE_UID` | alert rules         | UID of the metrics datasource (Grafana Cloud Mimir/Prometheus) the alert query nodes evaluate against |
+| Variable                         | Used by             | Meaning                                                                                                                                                |
+| :------------------------------- | :------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CARESETU_DB_HOST`               | datasource          | Postgres host the read-only role connects to                                                                                                           |
+| `CARESETU_DB_PORT`               | datasource          | Postgres port                                                                                                                                          |
+| `CARESETU_DB_NAME`               | datasource          | Database holding the `observability` schema                                                                                                            |
+| `CARESETU_DB_READONLY_USER`      | datasource          | The read-only Postgres role (SELECT on `observability`)                                                                                                |
+| `CARESETU_DB_READONLY_PASSWORD`  | datasource (secure) | That role's password; set in the environment, never committed                                                                                          |
+| `GRAFANA_METRICS_DATASOURCE_UID` | alert rules         | UID of the metrics datasource (Grafana Cloud Mimir/Prometheus) the platform alert query nodes evaluate against                                         |
+| `GRAFANA_USAGE_DATASOURCE_UID`   | alert rules         | UID of Grafana Cloud's own usage datasource, which publishes the free-tier `grafanacloud_instance_active_series` metric the active-series rule watches |
 
-An unset `GRAFANA_METRICS_DATASOURCE_UID` resolves to empty: the alert rules
+An unset `GRAFANA_METRICS_DATASOURCE_UID` or `GRAFANA_USAGE_DATASOURCE_UID`
+resolves to empty: the alert rules
 still load, but their query nodes find no datasource, so the operator sees rules
 that never fire rather than a rule silently pointed at the wrong series.
+
+The two datasources are different on purpose. The platform's own metrics
+(`caresetu.*`) live in the deployment's metrics backend; Grafana Cloud's
+active-series allowance is published by the vendor's usage datasource, so the
+rule that guards the ceiling reads that one. A single datasource for both would
+leave the ceiling rule looking for a series it can never find.
+
+The datasource provisioning file carries no read-only or schema flag: Grafana's
+PostgreSQL datasource honours `sslmode`, `postgresVersion`, `timescaledb` and
+the pool settings only, so a `readOnly` key there would read like a control
+that exists while enforcing nothing. The read-only posture is the Postgres
+role's grants (`CARESETU_DB_READONLY_USER`, SELECT only), and the schema is
+pinned by every panel's schema-qualified SQL.

@@ -51,9 +51,27 @@ export interface PanelRead<T> {
  * dependency here would re-fire the read on every render and never settle. The
  * ref keeps `reload` stable, so the mount effect runs exactly once and Retry
  * re-runs the identical read rather than a re-derived one.
+ *
+ * `key` names WHAT the read is about - a window, a scope, a provider. When it
+ * changes the read is about something else, so the old payload is DROPPED and
+ * the read re-run: a figure from the previous window sitting behind a loading
+ * skeleton is a figure an operator could still read, and the page would then
+ * show yesterday's spend under today's title.
  */
-export function usePanelRead<T>(load: () => Promise<T>): PanelRead<T> {
-  const [data, setData] = useState<T | null>(null);
+export function usePanelRead<T>(
+  load: () => Promise<T>,
+  key?: string,
+): PanelRead<T> {
+  /**
+   * The payload, together with the key it was read for. A payload belongs to
+   * the key it was asked about, so the two travel together: a payload read for
+   * another key is not this page's data, and the read exposes `null` rather
+   * than a figure from the wrong window.
+   */
+  const [loaded, setLoaded] = useState<{
+    key: string | undefined;
+    data: T;
+  } | null>(null);
   const [status, setStatus] = useState<PanelLoadStatus>("loading");
   const [error, setError] = useState<PanelRead<T>["error"]>(null);
   const [bannerOpen, setBannerOpen] = useState(false);
@@ -63,17 +81,36 @@ export function usePanelRead<T>(load: () => Promise<T>): PanelRead<T> {
     loadRef.current = load;
   }, [load]);
 
+  /**
+   * Which read is allowed to land. Every reload takes a number; only the
+   * newest one may write. Without this, switching a window twice quickly
+   * leaves the slower first response to land last and overwrite the newer
+   * figures with the older ones.
+   */
+  const generationRef = useRef(0);
+
+  /**
+   * The key the current read is about. Held in a ref because `reload` is
+   * stable and must not close over a changing key.
+   */
+  const keyRef = useRef(key);
+
   const reload = useCallback(() => {
+    const generation = ++generationRef.current;
     setStatus("loading");
     loadRef
       .current()
-      .then((loaded) => {
-        setData(loaded);
+      .then((payload) => {
+        if (generation !== generationRef.current) return;
+        setLoaded({ key: keyRef.current, data: payload });
         setStatus("ready");
         setError(null);
         setBannerOpen(false);
       })
       .catch((thrown: unknown) => {
+        // A read that was superseded is not a failure of the page: the read
+        // that replaced it owns the state now.
+        if (generation !== generationRef.current) return;
         // An `ApiError` is a response the API chose to send; anything else is a
         // transport failure or a bug. Keeping the distinction is what lets the
         // caller treat an expected 4xx differently from an operational failure.
@@ -89,14 +126,29 @@ export function usePanelRead<T>(load: () => Promise<T>): PanelRead<T> {
 
   const dismissBanner = useCallback(() => setBannerOpen(false), []);
 
-  // Declared after the ref-sync effect above, so on mount the ref already holds
-  // the caller's loader when the first read fires.
+  // A change of key is a change of question: the read is re-run for the new
+  // key, and the payload read for the old one stops being this page's data
+  // (see the `loaded` state above) - so no figure from the previous window is
+  // on screen while the new one loads.
+  const keyChangedRef = useRef(false);
   useEffect(() => {
+    if (keyRef.current === key) return;
+    keyRef.current = key;
+    keyChangedRef.current = true;
+  }, [key]);
+
+  // Run the read when the key changes or on mount. A mounted read always
+  // starts on mount; a key change also needs a fresh read for the new window.
+  useEffect(() => {
+    if (keyChangedRef.current) {
+      keyChangedRef.current = false;
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     reload();
-  }, [reload]);
+  }, [key, reload]);
 
   return {
-    data,
+    data: loaded !== null && loaded.key === key ? loaded.data : null,
     status,
     errorTraceId: error?.traceId,
     error,
@@ -104,4 +156,19 @@ export function usePanelRead<T>(load: () => Promise<T>): PanelRead<T> {
     reload,
     dismissBanner,
   };
+}
+
+/**
+ * A read that belongs to a key - a window, a scope - and re-runs when that key
+ * changes.
+ *
+ * The same seam as `usePanelRead`, named for the one thing it adds: the read
+ * is ABOUT something that can change under the operator's hands, and the page
+ * says so with one read rather than one read per window.
+ */
+export function useKeyedRead<T>(
+  load: () => Promise<T>,
+  key: string,
+): PanelRead<T> {
+  return usePanelRead(load, key);
 }

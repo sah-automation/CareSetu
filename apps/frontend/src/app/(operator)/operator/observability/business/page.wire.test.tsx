@@ -15,7 +15,13 @@
 // faked - so this is the one place the lens pages agree on what "over the wire"
 // means.
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import {
   afterEach,
   beforeAll,
@@ -251,7 +257,7 @@ describe("ObservabilityBusinessPage over the real wire", () => {
     );
   });
 
-  it("sends the operator's bearer and asks for the route's default window", async () => {
+  it("sends the operator's bearer and asks for the window the page shows", async () => {
     const fetchMock = stubBusinessWire();
 
     render(<ObservabilityBusinessPage />);
@@ -265,10 +271,66 @@ describe("ObservabilityBusinessPage over the real wire", () => {
     const request = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     const headers = new Headers(request[1].headers);
     expect(headers.get("Authorization")).toBe("Bearer operator.jwt.value");
-    // No invented window: the route's own default is the one authority.
+    // The window the page is showing, asked for by name. The page opens on the
+    // route's own default (`month_to_date`), and names it rather than leaving
+    // the query off - so a switch of the period control is the same request
+    // with a different window, and never a second route.
     expect(requestedUrls(fetchMock)).toContain(
-      "http://localhost:8000/v1/operator/observability/business",
+      "http://localhost:8000/v1/operator/observability/business?period=month_to_date",
     );
+  });
+
+  it("asks for the other window when the operator switches the period", async () => {
+    const fetchMock = stubBusinessWire();
+
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("business-spend-takeaway")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId("business-period-today"));
+
+    await waitFor(() => {
+      expect(requestedUrls(fetchMock)).toContain(
+        "http://localhost:8000/v1/operator/observability/business?period=today",
+      );
+    });
+    // The window line follows the read, so the figures on screen belong to the
+    // window the control names.
+    await waitFor(() => {
+      expect(screen.getByTestId("business-spend-window").textContent).toBe(
+        "Month to date, 2026-10-01 to 2026-10-12",
+      );
+    });
+  });
+
+  it("breaks the quoted bill down by provider and by model", async () => {
+    stubBusinessWire();
+
+    render(<ObservabilityBusinessPage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("business-providers-table-row-openai_compatible")
+          .textContent,
+      ).toContain("₹1,250");
+    });
+    // The per-thousand rates arrive quoted and stay rates: 90 paise is ₹0.90,
+    // not ₹90 and not ₹0.
+    expect(
+      screen.getByTestId("business-providers-table-row-openai_compatible")
+        .textContent,
+    ).toContain("₹0.90");
+    expect(
+      screen.getByTestId(
+        "business-models-table-row-openai_compatible-gpt-4o-mini",
+      ).textContent,
+    ).toContain("gpt-4o-mini");
+    expect(
+      screen.getByTestId("business-tokens-figures-per-thousand-output")
+        .textContent,
+    ).toBe("₹3.00");
   });
 
   it("states revenue-not-captured rather than printing a zero margin", async () => {
@@ -282,6 +344,10 @@ describe("ObservabilityBusinessPage over the real wire", () => {
       );
     });
     expect(screen.queryByTestId("business-margin-takeaway")).toBeNull();
+    // Revenue is not captured, so the margin panel is EMPTY rather than
+    // showing a figure with a reason - the reason appears when revenue IS
+    // captured but is zero (a ready-state null case).
+    expect(screen.queryByTestId("business-margin-gross-margin")).toBeNull();
   });
 
   it("deep-links onward into the vendor traces", async () => {
@@ -316,6 +382,9 @@ describe("ObservabilityBusinessPage over the real wire", () => {
     for (const panel of [
       "business-spend",
       "business-breakdown",
+      "business-providers",
+      "business-models",
+      "business-tokens",
       "business-unit-costs",
       "business-margin",
       "business-heavy-actors",

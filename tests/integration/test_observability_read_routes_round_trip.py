@@ -1247,6 +1247,11 @@ def _counter_client(database_url: str) -> TestClient:
             gateway_jwt_verify_enabled=True,
             gateway_jwt_signing_key=_SIGNING_KEY,
             dispatcher_in_process_enabled=False,
+            # The per-minute counter is a GATE that is off by default (#753), so
+            # the client that exercises the fold has to arm it explicitly -
+            # otherwise the middleware is never installed, nothing is counted,
+            # and the fold this file proves has nothing to fold.
+            http_counter_enabled=True,
         )
     )
 

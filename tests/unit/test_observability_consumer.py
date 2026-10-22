@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy.dialects import postgresql
 
 from bus.envelope import Envelope
 from bus.events import (
@@ -56,6 +57,7 @@ from modules.observability.domain.consumer import (
     sanitize_failure_reason,
 )
 from modules.observability.domain.pseudonym import ACTOR_KIND_PATIENT, actor_key
+from modules.observability.facade import record_ai_job_spend
 
 
 def test_register_handlers_registers_both_consumers_without_owning_the_models() -> None:
@@ -633,3 +635,68 @@ def test_nothing_to_say_is_a_null_rather_than_a_blank_column() -> None:
 
 def test_whitespace_runs_collapse_so_the_stored_length_means_something() -> None:
     assert sanitize_failure_reason("Ext002CallError \t  failed") == "Ext002CallError failed"
+
+
+# ------------------------------- the spend write: what may be STORED as a trace id
+
+
+@pytest.mark.asyncio
+async def test_an_over_long_trace_on_the_spend_row_is_clamped_to_the_columns_width() -> None:
+    """The column is ``VARCHAR(64)``, so an over-long id would take the batch with it.
+
+    The gateway already mints or rejects an unsafe client id, so this is the net
+    UNDER that gate: a producer that published an over-long id would otherwise
+    raise on length inside the consumer's transaction, and every row in the
+    batch would roll back with it.
+    """
+    envelope = ai_job_completed_envelope(
+        ai_job_id=9,
+        intake_id=42,
+        task_type="structure",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=100,
+        output_tokens=20,
+        cost_paise=7,
+        duration_ms=900,
+        low_confidence=False,
+        patient_id=7,
+        doctor_id=None,
+        trace_id="t" * 200,
+    )
+    mirror = AiJobCompletedUsagePayload.model_validate(envelope.payload.model_dump())
+    connection = AsyncMock()
+
+    await record_ai_job_spend(connection, envelope, mirror)
+
+    statement = connection.execute.await_args.args[0]
+    values = statement.compile(dialect=postgresql.dialect()).params
+    assert values["trace_id"] == "t" * 64
+
+
+@pytest.mark.asyncio
+async def test_a_trace_that_fits_is_stored_exactly_as_published() -> None:
+    """The clamp only shortens; a trace that fits is never rewritten."""
+    envelope = ai_job_completed_envelope(
+        ai_job_id=9,
+        intake_id=42,
+        task_type="structure",
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=100,
+        output_tokens=20,
+        cost_paise=7,
+        duration_ms=900,
+        low_confidence=False,
+        patient_id=7,
+        doctor_id=None,
+        trace_id="t" * 32,
+    )
+    mirror = AiJobCompletedUsagePayload.model_validate(envelope.payload.model_dump())
+    connection = AsyncMock()
+
+    await record_ai_job_spend(connection, envelope, mirror)
+
+    statement = connection.execute.await_args.args[0]
+    values = statement.compile(dialect=postgresql.dialect()).params
+    assert values["trace_id"] == "t" * 32

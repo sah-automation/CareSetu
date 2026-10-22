@@ -45,11 +45,41 @@ export function formatRate(fraction: number | null): string {
 }
 
 /**
+ * A margin percentage, or the REASON it is absent.
+ *
+ * The margin read reports a figure OR a reason, never a zero (facade: a
+ * deployment that has not written revenue has no gross margin). Printing that
+ * `null` through `formatPct` would render the em dash, which says "not
+ * measured" without saying why - and the reason is the fact an operator needs:
+ * "revenue not captured" is a thing to go and fix, and a bare dash is not.
+ *
+ * So the reason travels with the figure and is rendered in its place. The
+ * reason phrases are the console's copy, passed in by the caller so the
+ * wording stays in the dictionary beside every other string on the page.
+ */
+export function formatMarginPercent(
+  percent: {
+    value: number | null;
+    reason: string | null;
+    detail?: string | null;
+  },
+  reasons: { revenueNotCaptured: string; revenueZero: string },
+): string {
+  if (percent.value !== null) return formatPct(percent.value);
+  if (percent.reason === "revenue_not_captured") {
+    return reasons.revenueNotCaptured;
+  }
+  if (percent.reason === "revenue_zero") return reasons.revenueZero;
+  // Neither a figure nor a named reason: still not a zero.
+  return DASH;
+}
+
+/**
  * A count, grouped the way the console's money already is.
  *
  * `toLocaleString("en-IN")` spelled inline is one authority per call site, and
- * two tables on one page that group 1,234 and 1,23,4 differently is exactly
- * the drift the money formatter exists to prevent.
+ * two tables on one page that group 1,234 and 1,23,4 differently is exactly the
+ * drift the money formatter exists to prevent.
  */
 export function formatCount(value: number): string {
   return value.toLocaleString("en-IN");

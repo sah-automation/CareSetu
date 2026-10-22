@@ -258,6 +258,7 @@ jobs:
           LANGFUSE_HOST: ${{ matrix.gates == 'on' && 'http://127.0.0.1:9' || 'https://cloud.langfuse.com' }}
           OBSERVABILITY_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
           ERROR_CAPTURE_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
+          HTTP_COUNTER_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
           EVALUATION_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
           ANNOTATION_QUEUE_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
 

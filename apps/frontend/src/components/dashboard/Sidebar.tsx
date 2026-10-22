@@ -265,12 +265,15 @@ function DisclosureNavItem({ item }: { item: NavItemDef }) {
         type="button"
         aria-expanded={open}
         aria-controls={submenuId}
-        // The parent reads as current while any sub-destination is current - the
-        // same shared predicate (#744) the collapsed rail and the phone tab
-        // consume, so the surfaces can never disagree about where the operator
-        // is. #744's contract asserts this attribute on `nav-observability` in
-        // both the expanded and collapsed forms.
-        aria-current={active ? "page" : undefined}
+        // The parent reads as the current group while any sub-destination is
+        // current - the same shared predicate (#744) the collapsed rail and the
+        // phone sheet consume, so the surfaces can never disagree about where
+        // the operator is. The value is "true", not "page": the parent is a
+        // disclosure toggle, not the destination, and the destination row
+        // carries `aria-current="page"`. Two elements claiming the current
+        // page inside one navigation set is the classic aria-current
+        // anti-pattern (the current page gets announced twice).
+        aria-current={active ? "true" : undefined}
         data-active={active || undefined}
         data-testid={`nav-${item.key}`}
         onClick={() => setOpen((value) => !value)}
@@ -357,7 +360,10 @@ function CollapsedGroupNavItem({ item }: { item: NavItemDef }) {
       <Link
         href={item.href}
         aria-label={label}
-        aria-current={active ? "page" : undefined}
+        // The collapsed rail reads the same group-level marker as the expanded
+        // toggle and the phone sheet: the group is current ("true"), the
+        // destination inside it is the page ("page").
+        aria-current={active ? "true" : undefined}
         data-active={active || undefined}
         data-testid={`nav-${item.key}`}
         className="block w-11"
@@ -415,7 +421,12 @@ function CollapsedFlyoutChild({
   child: NavItemDef;
   lang: Lang;
 }) {
+  const pathname = usePathname();
   const label = STRINGS[lang].nav[child.labelKey];
+  // The flyout row is a real destination, so it carries the page-level marker
+  // the expanded sub-menu row carries. The collapsed group's own link is the
+  // group marker ("true"), so exactly one element in the rail claims the page.
+  const active = isNavItemActive(child, pathname);
 
   if (child.soon) {
     return (
@@ -434,6 +445,8 @@ function CollapsedFlyoutChild({
   return (
     <Link
       href={child.href}
+      aria-current={active ? "page" : undefined}
+      data-active={active || undefined}
       data-testid={`nav-${child.key}`}
       className="flex items-center gap-2 rounded px-2 py-1.5 whitespace-nowrap text-txt-sub hover:bg-accent-soft hover:text-txt"
     >

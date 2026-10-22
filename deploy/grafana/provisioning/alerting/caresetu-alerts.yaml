@@ -17,7 +17,7 @@ groups:
           summary: "Active series is within 80 percent of Grafana Cloud's free-tier ceiling of 10000. Exceeding it drops telemetry silently, so shed a label now."
         data:
           - refId: A
-            datasourceUid: $GRAFANA_METRICS_DATASOURCE_UID
+            datasourceUid: $GRAFANA_USAGE_DATASOURCE_UID
             relativeTimeRange:
               from: 600
               to: 0
@@ -67,7 +67,7 @@ groups:
               from: 600
               to: 0
             model:
-              expr: "sum(rate(caresetu_http_server_duration_count[10m]))"
+              expr: "sum(rate(histogram_count(caresetu_http_server_duration[10m])))"
               instant: true
               refId: A
           - refId: B

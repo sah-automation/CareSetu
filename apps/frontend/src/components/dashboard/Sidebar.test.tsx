@@ -169,10 +169,18 @@ describe("Sidebar", () => {
     const { unmount } = render(
       <Sidebar role="operator" collapsed={false} onToggleCollapse={vi.fn()} />,
     );
+    // The parent row is the current group ("true"), the destination row under it
+    // is the current page ("page"). Two elements claiming the current page
+    // inside one navigation set announces the page twice.
     expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(screen.getByTestId("nav-business")).toHaveAttribute(
       "aria-current",
       "page",
     );
+    expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
     unmount();
 
     render(
@@ -182,7 +190,7 @@ describe("Sidebar", () => {
     // look inactive in one surface and current in the other.
     expect(screen.getByTestId("nav-observability")).toHaveAttribute(
       "aria-current",
-      "page",
+      "true",
     );
   });
 });
@@ -635,10 +643,15 @@ describe("Sidebar #745 operator groups and disclosure", () => {
     renderOperator({ pathname: "/operator/observability/reliability" });
 
     const toggle = screen.getByTestId("nav-observability");
-    // The toggle carries the same current marker #744 asserts on the collapsed
-    // rail, so both group forms agree on where the operator is.
-    expect(toggle).toHaveAttribute("aria-current", "page");
+    // The toggle carries the same current-group marker #744 asserts on the
+    // collapsed rail, so both group forms agree on where the operator is. It
+    // is "true" and not "page": the destination row owns the page.
+    expect(toggle).toHaveAttribute("aria-current", "true");
     expect(toggle).toHaveAttribute("data-active", "true");
+    expect(screen.getByTestId("nav-reliability")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("renders the sub-destinations as live links inside the sub-menu", () => {

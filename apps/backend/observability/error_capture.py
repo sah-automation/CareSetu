@@ -6,8 +6,15 @@ failing: the capture is one append to a bounded deque, and a worker drains the
 buffer into the ``observability`` schema off the request path
 (:mod:`modules.observability.error_stream`).
 
-Three rules this module exists to enforce, each of them a way the obvious
+Four rules this module exists to enforce, each of them a way the obvious
 implementation leaks:
+
+**Off until a deployment opts in.** The capture gate is disabled at import and
+armed only by a composition root from resolved ``Settings``
+(``ERROR_CAPTURE_ENABLED``, #753). A module that armed itself would capture
+during the window before the root applies the setting - a window in which a
+deployment that asked for no capture is quietly capturing - and would make the
+gate's stated posture false (#717 decision 45).
 
 **Bounded, with an explicit drop policy.** ``deque(maxlen=...)`` keeps the NEWEST
 ``capacity`` records and discards the OLDEST, and every discard is counted. An
@@ -58,6 +65,7 @@ from datetime import UTC, datetime
 from starlette.requests import Request
 
 from app.config import DEFAULT_ERROR_CAPTURE_MAX_RECORDS
+from observability.trace_ids import clamp_trace_id
 
 #: An exception escaped every module-level handler. Captured as well as answered,
 #: so a swallowed exception is not invisible (#717 story 27).
@@ -89,17 +97,16 @@ UNMATCHED_ROUTE_TEMPLATE = "<unmatched>"
 #: Caps the free-text fields a hostile or buggy client can push into a column. The
 #: method is a fixed HTTP token in practice and the code a fixed envelope string;
 #: ``trace_id`` is the exception that matters - ``app.gateway.trace`` HONOURS a
-#: client-supplied ``X-Request-Id`` up to its own 128-char safety limit, which is
-#: wider than the ``trace_id`` column. Unbounded, one such header on one failing
-#: route writes a record whose upsert raises on length, and because the drain
-#: aborts the WHOLE batch on the first bad row, that record poisons every
-#: subsequent pass - error capture is silently dead until enough fresh errors evict
-#: it. So the width is clamped HERE, at the only point the value enters the system,
-#: rather than trusted at the column.
+#: client-supplied ``X-Request-Id`` only when it fits the shared rule in
+#: :mod:`observability.trace_ids` (printable, non-space, at most
+#: ``MAX_TRACE_ID_LENGTH`` characters), which is exactly the ``trace_id`` column's
+#: width. Unbounded, one such header on one failing route writes a record whose
+#: upsert raises on length, and because the drain aborts the WHOLE batch on the
+#: first bad row, that record poisons every subsequent pass - error capture is
+#: silently dead until enough fresh errors evict it. So the width is clamped HERE,
+#: at the only point the value enters the system, rather than trusted at the column.
 _MAX_METHOD_LENGTH = 10
 _MAX_CODE_LENGTH = 64
-_MAX_TRACE_ID_LENGTH = 64
-
 #: A hex sha256 is 64 characters, which is the column's width exactly - no
 #: truncation, so a fingerprint collision is a sha256 collision.
 _FINGERPRINT_LENGTH = 64
@@ -283,17 +290,29 @@ class _BoundedErrorBuffer:
         RIGHTMOST items - so a resize down keeps what is currently happening and
         drops what has already been superseded, the same policy an append to a
         full buffer applies.
+
+        The records the rebuild drops are COUNTED, exactly as an append to a full
+        buffer counts the record it evicts. A resize that silently discarded them
+        would contradict the module's own rule - every discard is counted - and
+        would leave the drain reporting a complete capture of a buffer that had
+        just lost records.
         """
         with self._lock:
-            self._capacity = max(1, capacity)
-            self._records = deque(self._records, maxlen=self._capacity)
+            new_capacity = max(1, capacity)
+            kept = deque(self._records, maxlen=new_capacity)
+            self._dropped += len(self._records) - len(kept)
+            self._capacity = new_capacity
+            self._records = kept
 
 
 _buffer = _BoundedErrorBuffer(DEFAULT_ERROR_CAPTURE_MAX_RECORDS)
-#: The #753 gate (ERROR_CAPTURE_ENABLED). Armed at import - the pre-gate
-#: behaviour - and re-armed by every composition root from its resolved
-#: ``Settings`` at boot, so the capture sites stay Settings-free too.
-_error_capture_enabled = True
+#: The #753 gate (ERROR_CAPTURE_ENABLED). DISABLED at import, which is the
+#: gate's stated posture (#717 decision 45): a deployment that has not opted in
+#: must not capture a single record, and a module that armed itself would capture
+#: in the window before the composition root applies ``Settings`` - a window in
+#: which an "off" deployment is quietly on. Every composition root arms it from
+#: resolved ``Settings`` at boot, so the capture sites stay Settings-free too.
+_error_capture_enabled = False
 
 
 def configure_error_capture(max_records: int, *, enabled: bool = False) -> None:
@@ -304,12 +323,9 @@ def configure_error_capture(max_records: int, *, enabled: bool = False) -> None:
     every capture site having to know about ``Settings``. ``enabled`` is the same
     idea one level up: the composition root applies ``ERROR_CAPTURE_ENABLED``
     here, so the gate check inside :func:`capture_server_error` needs no
-    ``Settings`` either. The default is OFF so a caller that forgets the kwarg
-    fails safe; every caller in this repo passes it explicitly (the composition
-    roots from resolved ``Settings``, the suites' fixture arming ``True``). The
-    module flag's own import-time default stays ``True`` - the pre-gate
-    behaviour - so a process that never configures at all (a one-off script) is
-    unchanged.
+    ``Settings`` either. Both default to OFF so a caller that forgets either
+    fails safe; every caller in this repo passes them explicitly (the composition
+    roots from resolved ``Settings``, the suites' fixture arming ``True``).
     """
     global _error_capture_enabled
     _error_capture_enabled = enabled
@@ -376,9 +392,9 @@ def capture_server_error(
         # Clamped, not validated: a trace id's job is correlation, and a truncated
         # one still correlates within the window an operator is reading, while a
         # rejected one would drop the link to the log lines that explain the
-        # failure. See ``_MAX_TRACE_ID_LENGTH`` for why the column cannot be the
+        # failure. See ``clamp_trace_id`` for why the column cannot be the
         # thing that says no.
-        trace_id=trace_id[:_MAX_TRACE_ID_LENGTH],
+        trace_id=clamp_trace_id(trace_id),
         occurred_at=datetime.now(UTC),
     )
     return record if _buffer.capture(record) else None

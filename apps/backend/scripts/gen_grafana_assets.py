@@ -23,7 +23,10 @@ read surface, and a datasource with write access to the system of record is a
 standing footgun. Every panel's SQL is fully schema-qualified
 (``observability.<table>``), so the business and product numbers render from the
 same system of record the operator APIs read rather than from a vendor's
-14-day window (ADR-0024 D2).
+14-day window (ADR-0024 D2). The read-only posture is the POSTGRES ROLE's
+grants: Grafana's PostgreSQL datasource has no read-only switch to set, so the
+provisioned file carries no flag that would enforce nothing (see
+:func:`build_datasource`).
 
 **No panel calls a vendor API.** A panel that shelled out to the AI tracing
 vendor on refresh would exhaust the free tier's hundred-request-a-day ceiling in
@@ -67,7 +70,10 @@ DEFAULT_ASSET_ROOT = REPO_ROOT / "deploy" / "grafana" / "provisioning"
 # to a 404 - the exact drift #748 exists to prevent, so the generator reads the
 # one source of truth and the test asserts they agree.
 sys.path.insert(0, str(REPO_ROOT / "apps" / "backend"))
-from modules.observability.domain.deeplinks import GRAFANA_DASHBOARD_UID  # noqa: E402
+from modules.observability.domain.deeplinks import (  # noqa: E402
+    DEFAULT_GRAFANA_WINDOW,
+    GRAFANA_DASHBOARD_UID,
+)
 
 DASHBOARD_UID = GRAFANA_DASHBOARD_UID
 
@@ -85,6 +91,15 @@ DATASOURCE_UID = "caresetu-observability-postgres"
 #: unset variable resolves to empty, which the operator sees as a rule that loads
 #: but finds no data - visible, not silently pointed at the wrong series.
 METRICS_DATASOURCE_UID_ENV = "GRAFANA_METRICS_DATASOURCE_UID"
+
+#: The datasource UID the active-series rule's QUERY node runs against. That
+#: signal is Grafana Cloud's OWN usage metric
+#: (``grafanacloud_instance_active_series``), which the vendor publishes through
+#: its usage datasource - it is not in the deployment's metrics backend. Pointing
+#: that rule at the metrics datasource is the difference between an alert that
+#: watches the ceiling and one that never finds a series, so the two rules name
+#: two datasources and each is bound by its own environment variable.
+USAGE_DATASOURCE_UID_ENV = "GRAFANA_USAGE_DATASOURCE_UID"
 
 #: The Postgres schema every panel reads. The datasource is pinned to it and every
 #: query is qualified with it, so the business and product numbers come from the
@@ -114,8 +129,11 @@ MAX_ALERT_RULES = 6
 STATUS_CLASSES: tuple[str, ...] = ("2xx", "3xx", "4xx", "5xx")
 
 #: The default dashboard window, matching the console deep-link default so a link
-#: and a hand-opened dashboard land on the same range.
-DEFAULT_WINDOW = "now-6h"
+#: and a hand-opened dashboard land on the same range. IMPORTED rather than
+#: re-spelled: the deep link is what opens this dashboard with ``?from=``, so a
+#: second copy of the value could drift from the link and the two would land on
+#: different ranges.
+DEFAULT_WINDOW = DEFAULT_GRAFANA_WINDOW
 
 
 class GrafanaAssetError(RuntimeError):
@@ -164,6 +182,11 @@ class AlertRule:
     #: ``gt`` (fires above the threshold, the common case) or ``lt`` (fires below
     #: it - the liveness rule, where a rate that HAS gone quiet is the alarm).
     comparison: str = "gt"
+    #: The environment variable naming the datasource this rule's QUERY node
+    #: reads. Most rules read the platform's own metrics backend; the
+    #: active-series rule reads Grafana Cloud's usage datasource, because that
+    #: is where the vendor publishes the ceiling.
+    datasource_env: str = METRICS_DATASOURCE_UID_ENV
 
 
 def _panel(
@@ -444,7 +467,9 @@ def build_alert_rules() -> tuple[AlertRule, ...]:
             ),
             # Grafana Cloud's usage metric, exported by the stack's own
             # ``grafanacloud-usage`` datasource. It is the one signal that says how
-            # much of the free tier's series allowance is spent.
+            # much of the free tier's series allowance is spent, and it lives in
+            # the VENDOR's usage datasource rather than in the platform's metrics
+            # backend, so the rule names that datasource.
             expr="max(grafanacloud_instance_active_series)",
             for_duration="10m",
             # Warning, not critical: there is headroom left, and the rule exists to
@@ -452,15 +477,20 @@ def build_alert_rules() -> tuple[AlertRule, ...]:
             # yet broken trains the operator to ignore it.
             severity="warning",
             threshold=float(ACTIVE_SERIES_ALERT_THRESHOLD),
+            datasource_env=USAGE_DATASOURCE_UID_ENV,
         ),
         AlertRule(
             uid="caresetu-error-capture-dead",
             title="Error capture stalled",
             summary="No requests recorded in ten minutes: the capture path itself is down.",
             # Grounded on the platform's own exported histogram
-            # (``caresetu.http.server.duration`` -> ``_count``); a rate of zero over
-            # a busy service means the capture path, not the platform, is quiet.
-            expr="sum(rate(caresetu_http_server_duration_count[10m]))",
+            # (``caresetu.http.server.duration``). The collector exports it as a
+            # NATIVE histogram (NHCB, with classic histograms switched off), so
+            # the classic ``_count`` series does not exist: the count comes out of
+            # the native histogram through ``histogram_count()``. Querying the
+            # missing ``_count`` series would leave this rule loading forever and
+            # never firing.
+            expr="sum(rate(histogram_count(caresetu_http_server_duration[10m])))",
             for_duration="10m",
             severity="warning",
             threshold=1.0,
@@ -563,11 +593,18 @@ def _grouped_labels(sql: str) -> tuple[str, ...]:
 def build_datasource() -> dict[str, Any]:
     """The read-only PostgreSQL datasource onto the observability schema.
 
-    ``readOnly`` is true and ``editable`` is false: the operator dashboard is a
-    read surface, and a datasource that could write into the system of record is a
-    standing footgun. The schema is pinned to ``observability`` and every panel
-    qualifies its tables, so the numbers render from the system of record rather
-    than a vendor window (ADR-0024 D2, stories 103-105).
+    ``editable`` is false and the datasource is a read surface: the operator
+    dashboard only ever SELECTs, and a datasource that could write into the
+    system of record is a standing footgun.
+
+    The read-only posture is the POSTGRES ROLE's, not this file's. Grafana's
+    PostgreSQL datasource has no read-only switch: it honours ``sslmode``,
+    ``postgresVersion``, ``timescaledb`` and the pool settings, and ignores any
+    other key. A ``readOnly`` flag here would have read like a control that
+    exists while enforcing nothing, so the file says only what Grafana acts on
+    and the ROLE's grants are what stop a write (the provisioning README names
+    the role). The schema is pinned the same way - by every panel's own
+    schema-qualified SQL - because ``schema`` is not a jsonData key either.
     """
     # A Grafana environment-variable reference, resolved on the Grafana host
     # against the read-only role's password; no secret is committed
@@ -577,8 +614,6 @@ def build_datasource() -> dict[str, Any]:
     json_data: dict[str, Any] = {
         "sslmode": "require",
         "postgresVersion": 1600,
-        "schema": OBSERVABILITY_SCHEMA,
-        "readOnly": True,
     }
     entry: dict[str, Any] = {
         "name": "CareSetu Observability (Postgres)",
@@ -702,10 +737,12 @@ def build_alerting_provider() -> dict[str, Any]:
     reduces the series (``reducer``) and compares it to the rule's ``threshold``.
     The rule's ``condition`` names ``B`` (the expression), which is what actually
     decides firing - a rule with only a query node has nothing to evaluate and
-    never fires. The query node's datasource is the interpolated
-    :data:`METRICS_DATASOURCE_UID_ENV`, so the deployment binds it rather than the
-    repository guessing a UID (Grafana does not interpolate inside ``model``, so
-    the ``$VAR`` lives on ``datasourceUid``).
+    never fires. The query node's datasource is the interpolated environment
+    variable the rule names (:data:`METRICS_DATASOURCE_UID_ENV` for the
+    platform's own metrics, :data:`USAGE_DATASOURCE_UID_ENV` for the vendor's
+    usage metric), so the deployment binds them rather than the repository
+    guessing a UID (Grafana does not interpolate inside ``model``, so the
+    ``$VAR`` lives on ``datasourceUid``).
     """
     rules = build_alert_rules()
     return {
@@ -729,7 +766,7 @@ def build_alerting_provider() -> dict[str, Any]:
                         "data": [
                             {
                                 "refId": "A",
-                                "datasourceUid": f"${METRICS_DATASOURCE_UID_ENV}",
+                                "datasourceUid": f"${rule.datasource_env}",
                                 "relativeTimeRange": {
                                     "from": _RULE_LOOKBACK_SECONDS,
                                     "to": 0,

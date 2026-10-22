@@ -47,10 +47,6 @@ import time
 from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
-# The metric NAME lives with the pure link builder in the domain, not here: the
-# operator reliability read links to this signal, so the name is part of that
-# read's contract and the SDK - which needs no domain - is the side that reads it.
-from modules.observability.domain.deeplinks import HTTP_INFLIGHT_METRIC
 from observability.sentry import resolve_release
 
 if TYPE_CHECKING:
@@ -81,6 +77,23 @@ _METRIC_OUTBOX_CLAIMED = "caresetu.outbox.claimed"
 _METRIC_OUTBOX_FANNED_OUT = "caresetu.outbox.fanned_out"
 _METRIC_OUTBOX_RETRIED = "caresetu.outbox.retried"
 _METRIC_OUTBOX_DEAD_LETTERED = "caresetu.outbox.dead_lettered"
+
+# TRUE request concurrency, as a tracing-backend signal (B5 #729, #717 decision
+# 17). Requests in flight at this instant - the only honest place saturation
+# lives, because a Postgres-resident count would be a snapshot of a number that
+# changes every millisecond and would read as though it were the real one. The
+# operator reliability read LINKS here rather than storing anything.
+#
+# The NAME lives here, beside the instrument that records it, because the shared
+# package imports nothing from ``modules`` - a metric name the operator's link
+# points at is read from THIS side by ``modules.observability.domain.deeplinks``,
+# so the dependency runs contract -> instrument and never the other way
+# (coding-standards §2).
+#
+# Unlabelled by design: one series for the whole service. Under the free tier's
+# ten-thousand-active-series ceiling that is deliberate - a metric labelled per
+# route would spend a series per endpoint to answer a question the total answers.
+HTTP_INFLIGHT_METRIC = "caresetu.http.server.inflight"
 
 # Resource attribute keys (OTel semantic conventions).
 _ATTR_SERVICE_NAME = "service.name"
