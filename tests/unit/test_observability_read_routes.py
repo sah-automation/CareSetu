@@ -1336,7 +1336,7 @@ def test_acknowledging_a_resolved_alert_is_refused_as_a_conflict() -> None:
 
     response = client.post(f"{ALERTS_PATH}/{_ALERT_ID}/acknowledge", headers=_operator())
 
-    assert response.status_code == 422
+    assert response.status_code == 409
     assert response.json()["code"] == "ALERT_ALREADY_RESOLVED"
 
 

@@ -894,7 +894,7 @@ async def test_acknowledging_a_resolved_alert_is_refused_and_leaves_it_resolved(
             f"{ALERTS_PATH}/{resolved['alerts'][0]['id']}/acknowledge", headers=_bearer()
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 409
     assert response.json()["code"] == "ALERT_ALREADY_RESOLVED"
     assert (await _alert_row(rolled_engine, "outbox_dead_letter"))["status"] == "resolved"
 

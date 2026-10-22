@@ -827,7 +827,8 @@ def register_error_handlers(app: FastAPI) -> None:
     ``CONSENT_NOT_FOUND``) - the alert feed is the only observability surface an
     operator names a resource on, so the resource is what disambiguates the code.
     Both are 4xx because both are outcomes of a call an operator made
-    deliberately, not defects.
+    deliberately, not defects - and the second is a 409 rather than a 422, because
+    the row's state is what refuses it, not the request's shape.
     """
 
     async def _alert_not_found(request: Request, exc: Exception) -> JSONResponse:
@@ -842,8 +843,12 @@ def register_error_handlers(app: FastAPI) -> None:
 
     async def _alert_already_resolved(request: Request, exc: Exception) -> JSONResponse:
         del exc
+        # 409, not 422: the request was well formed, and what refuses it is the
+        # ROW's state, not the payload's shape - a state conflict is what the rest
+        # of the platform answers with 409 for. 422 is reserved for a request the
+        # server could not understand (api-standards §3).
         return error_response(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status.HTTP_409_CONFLICT,
             "ALERT_ALREADY_RESOLVED",
             "That alert is already resolved, so it cannot be acknowledged",
             log_tag="observability_rejection",
