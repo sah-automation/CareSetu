@@ -190,18 +190,22 @@ class OperatorInvitedPayload(BaseModel):
     Emitted synchronously when an existing operator invites a new phone
     to join the operator group. The invited identity is created
     ``[Unverified]`` with an ``operator`` role grant, MFA-bound at first
-    login - no session is minted until MFA enrollment completes.
+    login - no session is minted until MFA enrollment completes. ``tier`` is
+    the authority the invite granted (``admin`` / ``operator``, spec #761), so
+    the audit trail records the privilege handed over, not only the identity.
     """
 
     identity_id: int
     phone_e164: str
     invited_by_identity_id: int
+    tier: str
 
 
 def operator_invited_envelope(
     identity_id: int,
     phone_e164: str,
     invited_by_identity_id: int,
+    tier: str,
 ) -> Envelope[OperatorInvitedPayload]:
     """Build the ``operator.invited`` envelope for the iam outbox."""
     return Envelope[OperatorInvitedPayload](
@@ -212,5 +216,6 @@ def operator_invited_envelope(
             identity_id=identity_id,
             phone_e164=phone_e164,
             invited_by_identity_id=invited_by_identity_id,
+            tier=tier,
         ),
     )
