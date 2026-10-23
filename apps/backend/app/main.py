@@ -151,12 +151,15 @@ class MeResponse(BaseModel):
     their own record id and nothing else; ``roles`` is the resolved RBAC scope
     from the token claim (api-standards §6). ``phone`` (PHASE-2.6 T05, #196,
     decision D4) is the caller's E.164 number resolved from the identity
-    table, additive so older clients keep working.
+    table, additive so older clients keep working. ``tier`` is the operator
+    authority tier from the token claim (spec #761) - ``None`` for patient and
+    partner callers.
     """
 
     subject_id: str
     roles: list[str]
     phone: str
+    tier: str | None = None
 
 
 class PatientProfileResponse(BaseModel):
@@ -772,6 +775,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             subject_id=principal.subject_id,
             roles=list(principal.roles),
             phone=phone,
+            tier=principal.tier,
         )
 
     @app.get("/v1/me/profile", response_model=PatientProfileResponse)

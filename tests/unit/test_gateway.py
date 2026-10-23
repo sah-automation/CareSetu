@@ -32,7 +32,7 @@ from starlette.responses import Response
 from app.config import Settings, get_settings
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import _MAX_TRACKED_BUCKETS, RateLimitMiddleware
-from app.gateway.rbac import require_patient, resolve_scope_roles
+from app.gateway.rbac import require_admin, require_patient, resolve_scope_roles
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import RegisterPatientResult, VerifyOtpResult
@@ -93,6 +93,7 @@ def _issue_access_token(
     scope: str = "patient",
     now: datetime | None = None,
     key: str = _SIGNING_KEY,
+    tier: str | None = None,
 ) -> str:
     """A valid HS256 access JWT minted exactly like ``issue_session`` does."""
     return issue_token(
@@ -101,6 +102,7 @@ def _issue_access_token(
         scope=scope,
         signing_key=key,
         now=now or datetime.now(UTC),
+        tier=tier,
     )
 
 
@@ -191,6 +193,24 @@ def _patient_only_client(
         request: Request, principal: Annotated[Principal, Depends(require_patient)]
     ) -> dict[str, str]:
         return {"subject_id": principal.subject_id}
+
+    return TestClient(app)
+
+
+def _admin_only_client(
+    settings: Settings | None = None, facade: StubFacade | None = None
+) -> TestClient:
+    """App with an admin-only probe route (spec #761 tier guard)."""
+    if settings is None:
+        settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
+    app = create_app(settings=settings)
+    app.state.iam_facade = facade if facade is not None else StubFacade()
+
+    @app.get("/v1/probe/admin")
+    async def admin_probe(
+        request: Request, principal: Annotated[Principal, Depends(require_admin)]
+    ) -> dict[str, object]:
+        return {"subject_id": principal.subject_id, "tier": principal.tier}
 
     return TestClient(app)
 
@@ -437,6 +457,7 @@ def test_valid_patient_token_admitted_to_protected_route() -> None:
         "subject_id": "7",
         "roles": ["patient"],
         "phone": "+919876543210",
+        "tier": None,
     }
 
 
@@ -452,6 +473,7 @@ def test_valid_operator_token_admitted_to_v1_me() -> None:
         "subject_id": "12",
         "roles": ["operator"],
         "phone": "+919876543210",
+        "tier": None,
     }
 
 
@@ -467,7 +489,62 @@ def test_valid_partner_token_admitted_to_v1_me() -> None:
         "subject_id": "9",
         "roles": ["partner"],
         "phone": "+919876543210",
+        "tier": None,
     }
+
+
+def test_operator_me_response_carries_the_token_tier() -> None:
+    client = _protected_client()
+
+    response = client.get(
+        "/v1/me",
+        headers=_bearer(_issue_access_token(subject_id=12, scope="operator", tier="admin")),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "subject_id": "12",
+        "roles": ["operator"],
+        "phone": "+919876543210",
+        "tier": "admin",
+    }
+
+
+def test_admin_guard_admits_an_admin_tier_operator() -> None:
+    client = _admin_only_client()
+
+    response = client.get(
+        "/v1/probe/admin",
+        headers=_bearer(_issue_access_token(subject_id=12, scope="operator", tier="admin")),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"subject_id": "12", "tier": "admin"}
+
+
+@pytest.mark.parametrize(
+    ("scope", "tier", "label"),
+    [
+        ("operator", "operator", "operator-tier"),
+        ("operator", None, "missing-tier"),
+        ("operator", "superadmin", "unknown-tier"),
+        ("patient", "admin", "non-operator"),
+    ],
+)
+def test_admin_guard_denies_with_the_shared_403_envelope(
+    scope: str, tier: str | None, label: str
+) -> None:
+    client = _admin_only_client()
+
+    response = client.get(
+        "/v1/probe/admin",
+        headers=_bearer(_issue_access_token(subject_id=12, scope=scope, tier=tier)),
+    )
+
+    assert response.status_code == 403, label
+    body = response.json()
+    assert body["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert body["details"] == {}
 
 
 def test_authenticated_caller_without_patient_scope_denied_403(
@@ -697,6 +774,7 @@ def test_valid_auth_flows_pass_under_rate_cap() -> None:
         "subject_id": "7",
         "roles": ["patient"],
         "phone": "+919876543210",
+        "tier": None,
     }
 
 

@@ -66,7 +66,9 @@ class JWTVerifyMiddleware(BaseHTTPMiddleware):
             return await _deny_unauthenticated(request)
 
         request.state.principal = Principal.for_subject(
-            str(validated.subject_id), *resolve_scope_roles(validated.scope)
+            str(validated.subject_id),
+            *resolve_scope_roles(validated.scope),
+            tier=validated.tier,
         )
         return await call_next(request)
 

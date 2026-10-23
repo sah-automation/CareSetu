@@ -33,6 +33,7 @@ from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import (
     iam_identities,
     iam_operator_mfa,
+    iam_operator_profiles,
     iam_role_grants,
     iam_sessions,
 )
@@ -78,11 +79,14 @@ class ValidatedAccessToken(BaseModel):
 
     ``subject_id`` is the identity id the gateway scopes to the patient's own
     record; ``scope`` is the RBAC scope resolved from the token claim.
+    ``tier`` is the optional operator authority tier (spec #761) - absent on
+    patient and partner tokens, and never inferred when missing.
     """
 
     subject_id: int
     scope: str
     jti: str
+    tier: str | None = None
 
 
 def _default_clock() -> datetime:
@@ -179,7 +183,10 @@ class SessionFacade:
         names the missing precondition - an operator can never land an
         operator-scoped session on the phone-OTP factor alone. The minted
         ``scope`` resolves to ``operator`` so the gateway's ``require_operator``
-        admits the caller.
+        admits the caller. The operator's active profile tier (``admin`` /
+        ``operator``, spec #761) rides the access token as the optional ``tier``
+        claim; a missing profile fails closed rather than minting a tier-free
+        operator token.
 
         The ``code`` parameter is an RFC-6238 TOTP code derived from the
         operator's enrolled MFA secret.  It is verified against the decrypted
@@ -256,9 +263,15 @@ class SessionFacade:
                 raise SessionIssuanceError(
                     f"identity {identity_id} has no active operator role grant"
                 )
+            tier = await _resolve_operator_tier(connection, identity_id)
+            if tier is None:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} has no active operator profile; "
+                    "refusing to issue an operator session without a tier"
+                )
 
             jti, refresh_token, token = await self._mint_session_row(
-                connection, identity_id, scope, now
+                connection, identity_id, scope, now, tier=tier
             )
 
         return SessionResult(
@@ -392,7 +405,7 @@ class SessionFacade:
         """
         claims = jwt.verify_token(token, self._access_token_signing_key, now=self._clock())
         return ValidatedAccessToken(
-            subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti
+            subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti, tier=claims.tier
         )
 
     async def refresh_session(
@@ -429,8 +442,10 @@ class SessionFacade:
         ``FOR UPDATE`` (after the session
         row) so a concurrent role change cannot race the refresh, and the
         session-row lock serializes two concurrent refreshes of the same token
-        so only one rotation wins.  An empty signing key fails closed exactly
-        like ``issue_session``.
+        so only one rotation wins.  An operator refresh re-derives the tier from
+        the operator profile (spec #761), so a tier change lands within the
+        access-token lifetime; a missing tier fails closed.  An empty signing
+        key fails closed exactly like ``issue_session``.
 
         Partner-scoped sessions renew differently (F014-T05, #465): a waiting
         partner holds no ``partner`` role grant until activation (ADR-0010), so
@@ -490,6 +505,7 @@ class SessionFacade:
                 identity_id = identity.identity_id
                 identity_status = identity.status
                 scope_name = session_row["scope"]
+                tier: str | None = None
                 if scope_name == _PARTNER_ROLE:
                     if identity_status == IDENTITY_SUSPENDED:
                         raise RefreshTokenRevokedError(
@@ -515,9 +531,16 @@ class SessionFacade:
                             f"identity {identity_id} has no active {scope_name} role grant; "
                             "refusing to refresh"
                         )
+                    if scope == _OPERATOR_ROLE:
+                        tier = await _resolve_operator_tier(connection, identity_id)
+                        if tier is None:
+                            raise RefreshTokenRevokedError(
+                                f"identity {identity_id} has no active operator profile; "
+                                "refusing to refresh"
+                            )
 
                 new_jti, new_refresh_token, token = await self._mint_session_row(
-                    connection, identity_id, scope, now
+                    connection, identity_id, scope, now, tier=tier
                 )
                 await connection.execute(
                     iam_sessions.update()
@@ -545,13 +568,16 @@ class SessionFacade:
         identity_id: int,
         scope: str,
         now: datetime,
+        *,
+        tier: str | None = None,
     ) -> tuple[str, str, str]:
         """Mint a fresh access JWT + opaque refresh token and record the session row.
 
         Shared by ``issue_session`` and ``refresh_session`` so both mint the
         same row shape: a random ``jti``, a fresh opaque refresh token (stored
         hashed, never in clear) with its ~30-day sliding ``refresh_expires_at``,
-        and an access JWT whose ``exp`` is the access-token TTL out.  Returns
+        and an access JWT whose ``exp`` is the access-token TTL out. ``tier``
+        rides the access JWT only for operators (spec #761). Returns
         ``(jti, refresh_token, jwt)``.
         """
         jti = uuid.uuid4().hex
@@ -563,6 +589,7 @@ class SessionFacade:
             signing_key=self._access_token_signing_key,
             now=now,
             ttl_seconds=self._access_token_ttl_seconds,
+            tier=tier,
         )
         await connection.execute(
             iam_sessions.insert().values(
@@ -635,6 +662,24 @@ async def _resolve_active_role(
                 iam_role_grants.c.identity_id == identity_id,
                 iam_role_grants.c.role == role,
                 iam_role_grants.c.status == IDENTITY_ACTIVE,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _resolve_operator_tier(connection: AsyncConnection, identity_id: int) -> str | None:
+    """The active operator tier for ``identity_id`` (``admin`` / ``operator``).
+
+    A missing or inactive profile returns ``None`` so callers fail closed: an
+    operator session is never minted without a tier (spec #761).
+    """
+    return (
+        await connection.execute(
+            select(iam_operator_profiles.c.tier)
+            .where(
+                iam_operator_profiles.c.identity_id == identity_id,
+                iam_operator_profiles.c.is_active.is_(True),
             )
             .limit(1)
         )
