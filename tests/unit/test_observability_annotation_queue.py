@@ -439,6 +439,8 @@ async def test_the_writer_upserts_the_human_row_through_the_score_seam() -> None
         "evaluator": ANNOTATION_EVALUATOR_REJECTED,
         "data_type": DATA_TYPE_BOOLEAN,
         "value": Decimal("1.0"),
+        "judge_run_ref": None,
+        "metadata": {},
     }
 
 

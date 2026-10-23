@@ -63,9 +63,11 @@ DATA_TYPE_BOOLEAN = "BOOLEAN"
 
 #: ``source`` values. ``human`` is #752's annotation queue: the doctor review
 #: outcomes recorded through :mod:`modules.observability.domain.annotation`.
-#: This module produces ``code`` only.
+#: ``judge`` is the synthetic LLM-as-judge run (#789), which carries a run
+#: reference and non-PHI metadata. This module produces ``code`` only.
 SOURCE_CODE = "code"
 SOURCE_HUMAN = "human"
+SOURCE_JUDGE = "judge"
 
 #: ``observation_kind`` values: a real AI job's telemetry, a golden dataset
 #: example, and - since #752 - a prescription a doctor reviewed.
@@ -98,7 +100,7 @@ OBSERVATION_KINDS: frozenset[str] = frozenset(
     {OBSERVATION_KIND_AI_JOB, OBSERVATION_KIND_GOLDEN, OBSERVATION_KIND_PRESCRIPTION}
 )
 DATA_TYPES: frozenset[str] = frozenset({DATA_TYPE_NUMERIC, DATA_TYPE_BOOLEAN})
-SOURCES: frozenset[str] = frozenset({SOURCE_CODE, SOURCE_HUMAN})
+SOURCES: frozenset[str] = frozenset({SOURCE_CODE, SOURCE_HUMAN, SOURCE_JUDGE})
 
 #: ADR-0001 / AMB-006: self-reported confidence at or above the floor passes,
 #: strictly below it - or absent - is flagged as low confidence.
@@ -142,6 +144,12 @@ class EvaluationScore:
     source: str = SOURCE_CODE
     trace_id: str | None = None
     observation_id: str | None = None
+    #: The judge run a ``judge`` row belongs to. ``None`` on code and human
+    #: rows: their identity is a batch date, not a run (#766).
+    judge_run_ref: str | None = None
+    #: Non-PHI operational metadata for a judged score (model, prompt version,
+    #: parse outcome). Never the content the score was computed from.
+    metadata: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.observation_kind not in OBSERVATION_KINDS:
@@ -154,6 +162,11 @@ class EvaluationScore:
             raise ValueError(f"data_type must be numeric or boolean, got {self.data_type!r}")
         if self.source not in SOURCES:
             raise ValueError(f"unknown score source: {self.source!r}")
+        if self.source == SOURCE_JUDGE:
+            if not self.judge_run_ref:
+                raise ValueError("judge scores must carry the run they belong to")
+        elif self.judge_run_ref is not None:
+            raise ValueError("only judge scores may carry a run reference")
         if not isfinite(self.value):
             raise ValueError(f"score value must be finite, got {self.value!r}")
         quantized = Decimal(str(self.value)).quantize(_VALUE_QUANTUM, rounding=ROUND_HALF_UP)
@@ -434,6 +447,7 @@ __all__ = [
     "SOURCES",
     "SOURCE_CODE",
     "SOURCE_HUMAN",
+    "SOURCE_JUDGE",
     "WELL_FORMED_WER_CEILING",
     "EvaluationScore",
     "evaluate_day",

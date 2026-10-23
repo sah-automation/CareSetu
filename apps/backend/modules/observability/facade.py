@@ -157,6 +157,7 @@ from modules.observability.domain.deeplinks import (
 from modules.observability.domain.evaluation import (
     OBSERVATION_KIND_GOLDEN,
     SOURCE_CODE,
+    SOURCE_JUDGE,
     EvaluationScore,
     evaluate_day,
 )
@@ -1140,41 +1141,73 @@ async def record_evaluation_scores(
     human verdict on the same observation and evaluator (#752's annotation
     queue) outranks tonight's recompute and must survive it, so the nightly
     batch leaves ``source = 'human'`` rows untouched.
+
+    Since #766 the table has two PARTIAL unique keys and a ``ON CONFLICT``
+    target must name the matching predicate. Code and human rows still share the
+    date-based key; judge rows are keyed by their run instead, so they are
+    written in their own statement when a batch mixes both.
     """
     if not scores:
         return
     table = observability_evaluation_scores
-    statement = insert(table).values(
-        [
-            {
-                "score_date": score.score_date,
-                "source": score.source,
-                "observation_kind": score.observation_kind,
-                "observation_ref": score.observation_ref,
-                "trace_id": score.trace_id,
-                "evaluator": score.evaluator,
-                "data_type": score.data_type,
-                "value": Decimal(str(score.value)),
-            }
-            for score in scores
-        ]
-    )
-    statement = statement.on_conflict_do_update(
-        index_elements=[
-            "score_date",
-            "observation_kind",
-            "observation_ref",
-            "evaluator",
-        ],
-        set_={
-            "source": statement.excluded.source,
-            "trace_id": statement.excluded.trace_id,
-            "data_type": statement.excluded.data_type,
-            "value": statement.excluded.value,
-        },
-        where=table.c.source == SOURCE_CODE,
-    )
-    await connection.execute(statement)
+    code_human_scores = [score for score in scores if score.source != SOURCE_JUDGE]
+    judge_scores = [score for score in scores if score.source == SOURCE_JUDGE]
+
+    if code_human_scores:
+        statement = insert(table).values([_score_values(score) for score in code_human_scores])
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                "score_date",
+                "observation_kind",
+                "observation_ref",
+                "evaluator",
+            ],
+            index_where=table.c.source != SOURCE_JUDGE,
+            set_={
+                "source": statement.excluded.source,
+                "trace_id": statement.excluded.trace_id,
+                "data_type": statement.excluded.data_type,
+                "value": statement.excluded.value,
+                "metadata": statement.excluded.metadata,
+            },
+            where=table.c.source == SOURCE_CODE,
+        )
+        await connection.execute(statement)
+
+    if judge_scores:
+        statement = insert(table).values([_score_values(score) for score in judge_scores])
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                "judge_run_ref",
+                "observation_kind",
+                "observation_ref",
+                "evaluator",
+            ],
+            index_where=table.c.source == SOURCE_JUDGE,
+            set_={
+                "trace_id": statement.excluded.trace_id,
+                "data_type": statement.excluded.data_type,
+                "value": statement.excluded.value,
+                "metadata": statement.excluded.metadata,
+            },
+        )
+        await connection.execute(statement)
+
+
+def _score_values(score: EvaluationScore) -> dict[str, object]:
+    """One score's insert shape, shared by the code/human and judge statements."""
+    return {
+        "score_date": score.score_date,
+        "source": score.source,
+        "observation_kind": score.observation_kind,
+        "observation_ref": score.observation_ref,
+        "trace_id": score.trace_id,
+        "evaluator": score.evaluator,
+        "data_type": score.data_type,
+        "value": Decimal(str(score.value)),
+        "judge_run_ref": score.judge_run_ref,
+        "metadata": dict(score.metadata) if score.metadata is not None else {},
+    }
 
 
 async def record_annotation(

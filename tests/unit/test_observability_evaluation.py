@@ -48,6 +48,9 @@ from modules.observability.domain.evaluation import (
     EVAL_TRANSCRIPTION_WELL_FORMED,
     EVAL_TRANSCRIPTION_WER,
     EVALUATOR_NAMES,
+    SOURCE_CODE,
+    SOURCE_HUMAN,
+    SOURCE_JUDGE,
     WELL_FORMED_WER_CEILING,
     EvaluationScore,
     evaluate_day,
@@ -339,6 +342,49 @@ def test_a_free_text_or_unknown_verdict_is_refused() -> None:
             data_type=DATA_TYPE_NUMERIC,
             value=float("nan"),
         )
+
+
+def test_a_judge_score_needs_a_run_and_carries_non_phi_metadata() -> None:
+    score = EvaluationScore(
+        score_date=_TARGET_DATE,
+        observation_kind="golden",
+        observation_ref="tx-clear",
+        evaluator="completeness",
+        data_type=DATA_TYPE_NUMERIC,
+        value=0.9,
+        source=SOURCE_JUDGE,
+        judge_run_ref="run-1",
+        metadata={"judge_model": "fake-judge", "prompt_version": "v1"},
+    )
+    assert score.source == SOURCE_JUDGE
+    assert score.judge_run_ref == "run-1"
+    assert score.metadata == {"judge_model": "fake-judge", "prompt_version": "v1"}
+
+    with pytest.raises(ValueError, match="run they belong to"):
+        EvaluationScore(
+            score_date=_TARGET_DATE,
+            observation_kind="golden",
+            observation_ref="tx-clear",
+            evaluator="completeness",
+            data_type=DATA_TYPE_NUMERIC,
+            value=0.9,
+            source=SOURCE_JUDGE,
+        )
+
+
+def test_only_a_judge_score_carries_a_run_reference() -> None:
+    for source in (SOURCE_CODE, SOURCE_HUMAN):
+        with pytest.raises(ValueError, match="only judge scores"):
+            EvaluationScore(
+                score_date=_TARGET_DATE,
+                observation_kind="golden",
+                observation_ref="tx-clear",
+                evaluator="transcription_wer",
+                data_type=DATA_TYPE_NUMERIC,
+                value=0.0,
+                source=source,
+                judge_run_ref="run-1",
+            )
 
 
 def test_the_golden_run_always_produces_numeric_or_boolean_scores_only() -> None:

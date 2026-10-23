@@ -63,6 +63,9 @@ OBSERVABILITY_TABLES: tuple[str, ...] = (
     "observability.observability_product_events",
     "observability.observability_product_daily",
     "observability.observability_product_actor_daily",
+    "observability.observability_evaluation_datasets",
+    "observability.observability_evaluation_examples",
+    "observability.observability_evaluation_judge_runs",
     "observability.observability_evaluation_scores",
     "observability.consumed_events",
 )

@@ -15,7 +15,10 @@ daily rollup, and the ``v9.4`` pair of columns (B9 #728) that let the provider
 board name a failure - the per-job ``failure_reason`` and the per-provider
 ``rate_limit_count`` - and the ``v9.5`` queue table (B5 #729) that holds the
 still-open AI jobs the enqueue/completion events produce, from which depth and the
-oldest queued item's age are derived.
+oldest queued item's age are derived. The ``v9.11`` set (#766) adds versioned
+evaluation datasets, their synthetic examples and judge runs, and extends the
+score ledger with a judge source, a run reference, non-PHI metadata and a partial
+unique key so code/human rows keep the uniqueness they had.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     MetaData,
@@ -516,6 +520,125 @@ observability_product_actor_daily = Table(
 )
 
 
+observability_evaluation_datasets = Table(
+    "observability_evaluation_datasets",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # A dataset is a NAMED family of versions: ``golden`` today, with every
+    # revision a separate row. The pair is UNIQUE, so activating, cloning or
+    # seeding a version twice surfaces as a conflict rather than two rows that
+    # claim to be the same revision (#766).
+    Column("name", String(100), nullable=False),
+    Column("version", Integer, nullable=False),
+    # ``draft`` is editable, ``active`` is the version the judge runs against,
+    # ``retired`` is history. The status is what the service layer checks before
+    # allowing an edit; the database only refuses values outside the vocabulary.
+    Column("status", String(20), nullable=False, server_default=text("'draft'")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint(
+        "name",
+        "version",
+        name="uq_observability_evaluation_datasets_name_version",
+    ),
+    CheckConstraint(
+        "status IN ('draft', 'active', 'retired')",
+        name="ck_observability_evaluation_datasets_status",
+    ),
+    # At most ONE active version per dataset name: the judge always has one
+    # unambiguous dataset to run against, and activation of a new version
+    # retires the old one first. Draft and retired rows are unconstrained.
+    Index(
+        "uq_observability_evaluation_datasets_active_name",
+        "name",
+        unique=True,
+        postgresql_where=text("status = 'active'"),
+    ),
+    Index("ix_observability_evaluation_datasets_name_status", "name", "status"),
+)
+
+
+observability_evaluation_examples = Table(
+    "observability_evaluation_examples",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "dataset_id",
+        BigInteger,
+        ForeignKey(
+            "observability.observability_evaluation_datasets.id",
+            name="fk_observability_evaluation_examples_dataset",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    # Stable local identity within the dataset, so a judge score's
+    # ``observation_ref`` can name this example without depending on a
+    # surrogate id that changes when a version is cloned.
+    Column("example_ref", String(64), nullable=False),
+    Column("task_type", String(30), nullable=False),
+    # The synthetic input and the expected output are JSONB because one
+    # dataset carries transcripts and another carries structured fields.
+    # Content stays in Postgres; only the derived score reaches telemetry.
+    Column("input", JSONB, nullable=False),
+    Column("expected_output", JSONB, nullable=False),
+    Column("tags", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint(
+        "dataset_id",
+        "example_ref",
+        name="uq_observability_evaluation_examples_ref",
+    ),
+    Index("ix_observability_evaluation_examples_dataset", "dataset_id"),
+)
+
+
+observability_evaluation_judge_runs = Table(
+    "observability_evaluation_judge_runs",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # The run's OWN reference, and what a score stores in ``judge_run_ref``.
+    # UNIQUE because one run is one set of verdicts; a retry resumes that run
+    # rather than minting a second reference beside it.
+    Column("run_ref", String(64), nullable=False),
+    Column(
+        "dataset_version_id",
+        BigInteger,
+        ForeignKey(
+            "observability.observability_evaluation_datasets.id",
+            name="fk_observability_evaluation_judge_runs_dataset",
+        ),
+        nullable=False,
+    ),
+    # The cap checked before the run and enforced while it executes; cost is
+    # accumulated from the existing AI usage pipeline, never estimated here.
+    Column("budget_paise", BigInteger, nullable=False, server_default=text("0")),
+    Column("cost_paise", BigInteger, nullable=False, server_default=text("0")),
+    Column("status", String(20), nullable=False, server_default=text("'pending'")),
+    # A sanitised, bounded infrastructure reason, never model or patient text.
+    Column("failure_reason", String(200), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint(
+        "run_ref",
+        name="uq_observability_evaluation_judge_runs_ref",
+    ),
+    CheckConstraint(
+        "status IN ('pending', 'running', 'completed', 'partial', 'failed', "
+        "'budget_exceeded', 'cancelled')",
+        name="ck_observability_evaluation_judge_runs_status",
+    ),
+    Index(
+        "ix_observability_evaluation_judge_runs_dataset",
+        "dataset_version_id",
+    ),
+    Index("ix_observability_evaluation_judge_runs_status", "status", "created_at"),
+)
+
+
 observability_evaluation_scores = Table(
     "observability_evaluation_scores",
     MODULE_METADATA,
@@ -524,9 +647,9 @@ observability_evaluation_scores = Table(
     # metrics pull and the rollup ledger use, so one scheduled run's rows all
     # share it.
     Column("score_date", Date, nullable=False),
-    # 'code' today (the deterministic evaluators); 'human' is reserved for the
-    # #752 annotation queue so a person's verdict lands in these same rows
-    # without a schema change.
+    # 'code' (the deterministic evaluators), 'human' (#752's annotation queue)
+    # and - since #766 - 'judge' (the synthetic LLM-as-judge). All three land in
+    # the same rows so agreement is one query, not three.
     Column("source", String(10), nullable=False, server_default=text("'code'")),
     # 'ai_job' production telemetry versus 'golden' dataset example versus
     # (since #752) 'prescription' a doctor reviewed: a query that forgets to
@@ -545,19 +668,47 @@ observability_evaluation_scores = Table(
     # Six decimals, the precision the domain's EvaluationScore quantizes to.
     Column("data_type", String(10), nullable=False),
     Column("value", Numeric(12, 6), nullable=False),
+    # The judge run that produced a judge row, and the run's stable identity.
+    # NULL on code and human rows: their nightly/annotation key is a date, not a
+    # run, and a value here without ``source = 'judge'`` is refused below.
+    Column("judge_run_ref", String(64), nullable=True),
+    # Non-PHI judge metadata (model name, prompt version, parse outcome). The
+    # column is optional and defaults to an empty object; content a score was
+    # computed FROM never belongs here.
+    Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
-    # The nightly idempotency key: re-running a date upserts these rows
-    # instead of stacking a second set of scores beside the first.
-    UniqueConstraint(
+    # Code and human rows keep their original nightly key: re-running a date
+    # upserts these rows instead of stacking a second set beside the first. The
+    # index is PARTIAL (source <> 'judge'), because a judge row's identity is
+    # its run, not its batch date - see the second partial index below.
+    Index(
+        "uq_observability_evaluation_scores_code_human_key",
         "score_date",
         "observation_kind",
         "observation_ref",
         "evaluator",
-        name="uq_observability_evaluation_scores_key",
+        unique=True,
+        postgresql_where=text("source <> 'judge'"),
+    ),
+    # A judge run scores one observation once per evaluator, independent of the
+    # date: re-running the same run replaces its rows, while a later run
+    # legitimately writes the same observation/evaluator under its own ref.
+    Index(
+        "uq_observability_evaluation_scores_judge_key",
+        "judge_run_ref",
+        "observation_kind",
+        "observation_ref",
+        "evaluator",
+        unique=True,
+        postgresql_where=text("source = 'judge'"),
     ),
     CheckConstraint(
-        "source IN ('code', 'human')",
+        "source IN ('code', 'human', 'judge')",
         name="ck_observability_evaluation_scores_source",
+    ),
+    CheckConstraint(
+        "(source = 'judge') = (judge_run_ref IS NOT NULL)",
+        name="ck_observability_evaluation_scores_judge_run_ref",
     ),
     CheckConstraint(
         "data_type IN ('NUMERIC', 'BOOLEAN')",
