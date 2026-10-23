@@ -23,10 +23,11 @@ from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.errors import emit_access_denial, error_response
 from app.gateway.idempotency import run_idempotent
+from app.gateway.plain_text import normalize_optional_plain_text, normalize_plain_text
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_operator, require_partner
 from modules.partner.domain.credentials import CredentialType
@@ -173,6 +174,12 @@ class PartnerSelectRequest(BaseModel):
         description="Source surface of the pick (e.g. search card, profile page)",
     )
 
+    @field_validator("source")
+    @classmethod
+    def _normalize_source(cls, source: str | None) -> str | None:
+        """Normalize the client-reported free-text source at the write boundary."""
+        return normalize_optional_plain_text(source, max_length=80)
+
 
 @directory_router.post(
     "/select",
@@ -224,6 +231,18 @@ class RegisterPartnerRequest(BaseModel):
     practice_latitude: float = Field(ge=-90, le=90)
     practice_longitude: float = Field(ge=-180, le=180)
     service_area_id: int | None = None
+
+    @field_validator("practice_name")
+    @classmethod
+    def _normalize_practice_name(cls, practice_name: str | None) -> str | None:
+        """Normalize the partner's free-text practice name at the write boundary."""
+        return normalize_optional_plain_text(practice_name, max_length=120)
+
+    @field_validator("practice_address")
+    @classmethod
+    def _normalize_practice_address(cls, practice_address: str) -> str:
+        """Normalize the partner's free-text address at the write boundary."""
+        return normalize_plain_text(practice_address)
 
 
 class CredentialDocumentRequest(BaseModel):
@@ -541,6 +560,12 @@ class OperatorDecisionRequest(BaseModel):
         default=None,
         description="Required on reject; the specific failure surfaced to the partner",
     )
+
+    @field_validator("reason")
+    @classmethod
+    def _normalize_reason(cls, reason: str | None) -> str | None:
+        """Normalize the operator's free-text reason at the write boundary."""
+        return normalize_optional_plain_text(reason)
 
 
 @router.post(

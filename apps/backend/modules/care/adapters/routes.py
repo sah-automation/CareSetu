@@ -24,7 +24,7 @@ from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.gateway.errors import (
@@ -33,6 +33,7 @@ from app.gateway.errors import (
     error_response,
 )
 from app.gateway.idempotency import run_idempotent
+from app.gateway.plain_text import normalize_plain_text
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_partner
 from app.gateway.trace import resolve_trace_id
@@ -185,6 +186,12 @@ class RxRejectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str = Field(description="Why the draft is rejected (recorded for the draft retry)")
+
+    @field_validator("reason")
+    @classmethod
+    def _normalize_reason(cls, reason: str) -> str:
+        """Normalize the doctor's free-text reason at the write boundary."""
+        return normalize_plain_text(reason)
 
 
 class CaseCloseRequest(BaseModel):
