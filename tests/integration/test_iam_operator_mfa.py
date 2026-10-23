@@ -92,7 +92,7 @@ async def clean_iam(database_url: str, iam_schema: None) -> Iterator[None]:
                 text(
                     "TRUNCATE TABLE iam.iam_identities, iam.iam_otp_challenges, "
                     "iam.iam_role_grants, iam.iam_sessions, iam.iam_operator_mfa, "
-                    "iam.iam_outbox CASCADE"
+                    "iam.iam_operator_profiles, iam.iam_outbox CASCADE"
                 )
             )
     finally:

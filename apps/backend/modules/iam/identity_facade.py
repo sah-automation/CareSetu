@@ -45,7 +45,11 @@ from modules.iam.domain.shared import (
     _reissue_otp_challenge,
 )
 from modules.iam.outbox import IAM_OUTBOX_TABLE
-from modules.iam.schema.models import iam_identities, iam_patient_profiles
+from modules.iam.schema.models import (
+    iam_identities,
+    iam_operator_profiles,
+    iam_patient_profiles,
+)
 from modules.iam.session_facade import grant_operator_role
 from modules.profile_media.facade import PATIENT_PREFIX, ProfileMediaStore
 
@@ -438,6 +442,14 @@ class IdentityFacade:
                 )
             ).scalar_one()
             await grant_operator_role(connection, identity_id)
+            # Every operator carries a profile; a new invite starts at the
+            # non-admin ``operator`` tier (spec #761). ON CONFLICT keeps a
+            # duplicate invite from demoting an existing admin.
+            await connection.execute(
+                postgresql_insert(iam_operator_profiles)
+                .values(identity_id=identity_id, tier="operator", is_active=True)
+                .on_conflict_do_nothing(index_elements=["identity_id"])
+            )
             if inserted.rowcount == 1:
                 await write_outbox(
                     connection,
