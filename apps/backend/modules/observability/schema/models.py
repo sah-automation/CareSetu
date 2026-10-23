@@ -571,3 +571,92 @@ observability_evaluation_scores = Table(
     Index("ix_observability_evaluation_scores_trace", "trace_id"),
     Index("ix_observability_evaluation_scores_date", "score_date"),
 )
+
+
+observability_security_signals = Table(
+    "observability_security_signals",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # Truncated to the minute in UTC, the grain this table exists for (#765):
+    # one row per signal kind per subject per minute, never one write per event.
+    Column("minute_ts", DateTime(timezone=True), nullable=False),
+    Column("signal_kind", String(50), nullable=False),
+    # A one-way, domain-separated hash of the subject (domain.pseudonym), never
+    # the raw reference; '' when the signal has no subject to key on.
+    Column("subject_key", String(64), nullable=False, server_default=text("''")),
+    Column("count", BigInteger, nullable=False, server_default=text("0")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint(
+        "minute_ts",
+        "signal_kind",
+        "subject_key",
+        name="uq_observability_security_signals_scope",
+    ),
+    Index("ix_observability_security_signals_minute", "minute_ts"),
+    Index("ix_observability_security_signals_kind", "signal_kind", "minute_ts"),
+)
+
+
+observability_csp_aggregates = Table(
+    "observability_csp_aggregates",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column("aggregate_date", Date, nullable=False),
+    Column("directive", String(100), nullable=False),
+    Column("disposition", String(30), nullable=False),
+    # Both capped strings rather than payload columns: a raw CSP report carries
+    # the full document and query string, so only the reporting fields the
+    # dashboard groups by are kept (#765).
+    Column("blocked_source", String(255), nullable=False, server_default=text("''")),
+    Column("document_uri", String(255), nullable=False, server_default=text("''")),
+    Column("count", BigInteger, nullable=False, server_default=text("0")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint(
+        "aggregate_date",
+        "directive",
+        "disposition",
+        "blocked_source",
+        "document_uri",
+        name="uq_observability_csp_aggregates_scope",
+    ),
+    Index("ix_observability_csp_aggregates_date", "aggregate_date"),
+)
+
+
+observability_alert_delivery = Table(
+    "observability_alert_delivery",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    # Local identity of the alert being delivered, not a foreign key: module
+    # schemas never point across a boundary (ADR-0003).
+    Column("alert_id", PgUUID(as_uuid=True), nullable=False),
+    Column("channel", String(30), nullable=False),
+    Column("status", String(20), nullable=False, server_default=text("'pending'")),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("next_retry_at", DateTime(timezone=True), nullable=True),
+    Column("last_attempt_at", DateTime(timezone=True), nullable=True),
+    Column("delivered_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    # One delivery row per alert and channel: a retry updates the row instead of
+    # stacking a second attempt trail (#765).
+    UniqueConstraint(
+        "alert_id",
+        "channel",
+        name="uq_observability_alert_delivery_alert_channel",
+    ),
+    CheckConstraint(
+        "status IN ('pending', 'in_progress', 'delivered', 'failed', 'dead_letter')",
+        name="ck_observability_alert_delivery_status",
+    ),
+    # The retry sweep opens on (status, next_retry_at); the alert lookup opens
+    # on alert_id.
+    Index(
+        "ix_observability_alert_delivery_status_retry",
+        "status",
+        "next_retry_at",
+    ),
+    Index("ix_observability_alert_delivery_alert", "alert_id"),
+)
