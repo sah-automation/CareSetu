@@ -26,7 +26,7 @@ from modules.iam.facade import OperatorInvitedResult
 
 _SIGNING_KEY = "unit-test-operator-invite-key"
 
-_OPERATOR_ID = 77
+_ADMIN_ID = 77
 
 _RESULT = OperatorInvitedResult(identity_id=12, phone_e164="+919876543210")
 
@@ -39,21 +39,27 @@ class StubIamFacade:
         self.result: OperatorInvitedResult | None = _RESULT
 
     async def create_operator_account(
-        self, phone: str, *, invited_by_identity_id: int
+        self, phone: str, *, invited_by_identity_id: int, tier: str = "operator"
     ) -> OperatorInvitedResult:
-        self.calls.append({"phone": phone, "invited_by_identity_id": invited_by_identity_id})
+        self.calls.append(
+            {"phone": phone, "invited_by_identity_id": invited_by_identity_id, "tier": tier}
+        )
         if self.result is None:
             raise AssertionError("stub facade needs a result before the call")
         return self.result
 
+    async def list_operators(self):
+        return []
 
-def _token(*, scope: str = "operator", subject_id: int = _OPERATOR_ID) -> str:
+
+def _token(*, scope: str = "operator", subject_id: int = _ADMIN_ID, tier: str | None = "admin") -> str:
     return issue_token(
         jti=uuid.uuid4().hex,
         subject_id=subject_id,
         scope=scope,
         signing_key=_SIGNING_KEY,
         now=datetime.now(UTC),
+        tier=tier,
     )
 
 
@@ -71,7 +77,7 @@ def _bearer(token: str) -> dict[str, str]:
 def test_operator_invites_a_new_phone_with_their_own_identity() -> None:
     facade = StubIamFacade()
     client = _client(facade)
-    headers = _bearer(_token())
+    headers = _bearer(_token(tier="admin"))
 
     response = client.post(
         "/v1/auth/operator/invite", json={"phone": "9876543210"}, headers=headers
@@ -79,13 +85,15 @@ def test_operator_invites_a_new_phone_with_their_own_identity() -> None:
 
     assert response.status_code == 201
     assert response.json() == _RESULT.model_dump(mode="json")
-    assert facade.calls == [{"phone": "9876543210", "invited_by_identity_id": _OPERATOR_ID}]
+    assert facade.calls == [
+        {"phone": "9876543210", "invited_by_identity_id": _ADMIN_ID, "tier": "operator"}
+    ]
 
 
 def test_operator_invite_rejects_unknown_fields() -> None:
     facade = StubIamFacade()
     client = _client(facade)
-    headers = _bearer(_token())
+    headers = _bearer(_token(tier="admin"))
 
     response = client.post(
         "/v1/auth/operator/invite",
@@ -107,7 +115,7 @@ def test_anonymous_invite_denied_with_401() -> None:
 
 def test_patient_scope_invite_denied_with_403() -> None:
     client = _client()
-    headers = _bearer(_token(scope="patient"))
+    headers = _bearer(_token(scope="patient", tier=None))
 
     response = client.post(
         "/v1/auth/operator/invite", json={"phone": "9876543210"}, headers=headers
@@ -118,7 +126,18 @@ def test_patient_scope_invite_denied_with_403() -> None:
 
 def test_partner_scope_invite_denied_with_403() -> None:
     client = _client()
-    headers = _bearer(_token(scope="partner"))
+    headers = _bearer(_token(scope="partner", tier=None))
+
+    response = client.post(
+        "/v1/auth/operator/invite", json={"phone": "9876543210"}, headers=headers
+    )
+
+    assert response.status_code == 403
+
+
+def test_operator_scope_non_admin_invite_denied_with_403() -> None:
+    client = _client()
+    headers = _bearer(_token(scope="operator", tier="operator"))
 
     response = client.post(
         "/v1/auth/operator/invite", json={"phone": "9876543210"}, headers=headers
@@ -133,3 +152,4 @@ def test_operator_invite_route_sits_behind_the_gateway_stack() -> None:
     middlewares = {middleware.cls for middleware in app.user_middleware}
     assert JWTVerifyMiddleware in middlewares
     assert "/v1/auth/operator/invite" in app.openapi()["paths"]
+

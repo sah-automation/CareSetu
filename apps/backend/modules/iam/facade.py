@@ -50,6 +50,9 @@ from modules.iam.identity_facade import (
     OperatorInvitedResult as OperatorInvitedResult,
 )
 from modules.iam.identity_facade import (
+    OperatorSummary as OperatorSummary,
+)
+from modules.iam.identity_facade import (
     PartnerCredentialCreatedResult as PartnerCredentialCreatedResult,
 )
 from modules.iam.identity_facade import (
@@ -190,17 +193,32 @@ class IamFacade:
         self,
         phone: str,
         invited_by_identity_id: int,
+        tier: str = "operator",
         connection: AsyncConnection | None = None,
     ) -> OperatorInvitedResult:
         """Invite a new operator (T07, #250): credentialed, MFA-bound at first login.
 
         Delegated to ``IdentityFacade``. The invited identity is created with an
         ``Active`` ``operator`` role grant, so an operator-scoped session is
-        minted only after MFA completes.
+        minted only after MFA completes. ``tier`` is the authority the invite
+        grants and defaults to the non-admin ``operator`` tier (spec #761).
         """
         return await self._identity.create_operator_account(
-            phone, invited_by_identity_id=invited_by_identity_id, connection=connection
+            phone,
+            invited_by_identity_id=invited_by_identity_id,
+            tier=tier,
+            connection=connection,
         )
+
+    async def list_operators(
+        self, connection: AsyncConnection | None = None
+    ) -> list[OperatorSummary]:
+        """List operators with masked phones for the admin view (spec #761, #768).
+
+        Delegated to ``IdentityFacade``, which joins each operator profile to
+        its identity and MFA row and masks the phone before returning.
+        """
+        return await self._identity.list_operators(connection=connection)
 
     async def save_patient_profile(
         self,

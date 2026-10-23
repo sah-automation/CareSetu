@@ -16,7 +16,7 @@ key replays the stored result instead of re-executing.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -28,7 +28,7 @@ from app.config import Settings
 from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_operator
+from app.gateway.rbac import require_admin
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain.exceptions import (
     IamError,
@@ -48,6 +48,7 @@ from modules.iam.facade import (
     EnrollMfaResult,
     IamFacade,
     OperatorInvitedResult,
+    OperatorSummary,
     PartnerLoginOtpResult,
     PartnerVerifyOtpResult,
     RegisterPatientResult,
@@ -129,11 +130,15 @@ class RefreshSessionRequest(BaseModel):
 
 
 class OperatorInviteRequest(BaseModel):
-    """Body of ``POST /v1/auth/operator/invite`` (S9, #262)."""
+    """Body of ``POST /v1/auth/operator/invite`` (S9, #262; spec #761, #768)."""
 
     model_config = ConfigDict(extra="forbid")
 
     phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    tier: Literal["admin", "operator"] = Field(
+        default="operator",
+        description="Authority to grant; defaults to the non-admin operator tier",
+    )
 
 
 class OperatorLoginRequest(BaseModel):
@@ -483,31 +488,58 @@ async def refresh_session(
     return response
 
 
+@router.get(
+    "/operator/users",
+    response_model=list[OperatorSummary],
+    status_code=status.HTTP_200_OK,
+    summary="List operators (admin only)",
+)
+async def list_operators(
+    request: Request,
+    admin: Annotated[Principal, Depends(require_admin)],
+) -> list[OperatorSummary]:
+    """List the operator group for user management (spec #761, #768).
+
+    Admin-only (``require_admin``): the operator role alone is not enough - a
+    non-admin operator, a patient or partner caller, and a token with a missing
+    or unknown tier all receive the shared 403 envelope. Every row carries the
+    masked phone, tier, active state, MFA state, and the identity's creation
+    date; the facade masks the phone before the value leaves the module, so the
+    canonical number is never in the response.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.list_operators()
+
+
 @router.post(
     "/operator/invite",
     response_model=OperatorInvitedResult,
     status_code=status.HTTP_201_CREATED,
-    summary="Invite a new operator (operator only)",
+    summary="Invite a new operator (admin only)",
 )
 async def invite_operator(
     request: Request,
-    operator: Annotated[Principal, Depends(require_operator)],
+    operator: Annotated[Principal, Depends(require_admin)],
     body: OperatorInviteRequest,
 ) -> OperatorInvitedResult:
-    """Grow the trusted queue-running group (US-22).
+    """Grow the trusted queue-running group (US-22; admin only, spec #761).
 
-    Operator-scoped (``require_operator``): only an attested operator can
-    invite another phone. The invited identity is created ``[Unverified]``
-    with an ``Active`` ``operator`` role grant, so the invited phone completes
-    MFA at first login. The requesting operator is recorded as the inviter on
-    the ``operator.invited`` audit event. Duplicate phones resolve to the
-    existing identity (idempotent by phone, plus the edge ``Idempotency-Key``).
+    Admin-scoped (``require_admin``): only an admin-tier operator can invite
+    another phone. The invited identity is created ``[Unverified]`` with an
+    ``Active`` ``operator`` role grant, so the invited phone completes MFA at
+    first login. ``tier`` chooses the authority and defaults to the non-admin
+    ``operator`` tier, so privilege is granted deliberately. The requesting
+    admin is recorded as the inviter on the ``operator.invited`` audit event.
+    Duplicate phones resolve to the existing identity (idempotent by phone,
+    plus the edge ``Idempotency-Key``) and never rewrite the existing tier.
     """
     invited_by = int(operator.subject_id)
     facade = cast(IamFacade, request.app.state.iam_facade)
     return await run_idempotent(
         request,
-        lambda: facade.create_operator_account(body.phone, invited_by_identity_id=invited_by),
+        lambda: facade.create_operator_account(
+            body.phone, invited_by_identity_id=invited_by, tier=body.tier
+        ),
     )
 
 
