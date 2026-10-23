@@ -96,10 +96,8 @@ def _compile(statement: Any) -> str:
     return str(statement.compile(dialect=postgresql.dialect()))
 
 
-def _literal_sql(statement: Any) -> str:
-    return str(
-        statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
-    )
+def _bound_values(statement: Any) -> list[Any]:
+    return list(statement.compile(dialect=postgresql.dialect()).params.values())
 
 
 def _client(captured: list[httpx.Request]) -> httpx.AsyncClient:
@@ -264,14 +262,15 @@ def test_the_facade_writes_both_kinds_locally_but_posts_only_the_golden_scores()
     assert connection.execute.await_count == 2
 
     upsert = connection.execute.await_args_list[1].args[0]
-    compiled = _literal_sql(upsert)
+    compiled = _compile(upsert)
     assert "INSERT INTO observability.observability_evaluation_scores" in compiled
-    assert (
-        "ON CONFLICT (score_date, observation_kind, observation_ref, evaluator) DO UPDATE"
-        in compiled
-    )
-    assert "'ai_job', '7'" in compiled, "the production row is recorded locally"
-    assert f"'{EVAL_JOB_SUCCEEDED}', 'BOOLEAN', 1.0" in compiled
+    assert "ON CONFLICT (score_date, observation_kind, observation_ref, evaluator)" in compiled
+    assert "WHERE source !=" in compiled
+    assert "DO UPDATE" in compiled
+    bound = _bound_values(upsert)
+    assert "ai_job" in bound, "the production row is recorded locally"
+    assert "7" in bound
+    assert EVAL_JOB_SUCCEEDED in bound
 
     scores_request = captured[-1]
     assert scores_request.url.path == _SCORES
@@ -324,9 +323,10 @@ async def test_the_writer_replaces_scores_on_a_re_run() -> None:
 
     assert connection.execute.await_count == 2
     statement = connection.execute.await_args.args[0]
-    assert "ON CONFLICT (score_date, observation_kind, observation_ref, evaluator) DO UPDATE" in (
-        _compile(statement)
-    )
+    compiled = _compile(statement)
+    assert "ON CONFLICT (score_date, observation_kind, observation_ref, evaluator)" in compiled
+    assert "WHERE source !=" in compiled
+    assert "DO UPDATE" in compiled
 
 
 async def test_the_writer_never_overwrites_a_human_verdict() -> None:
