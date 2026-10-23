@@ -2,7 +2,7 @@
 
 Verifies the acceptance criteria that need a live database:
 
-  1. ``alembic upgrade head`` creates all 12 private module schemas (ADR-0003
+  1. ``alembic upgrade head`` creates all 13 private module schemas (ADR-0003
       layout); the only tables they may hold are the five ``iam`` tables added
       by ``v1.0__init_iam`` (PHASE-2 T1, #52) plus the operator-MFA table from
       ``v4.1__iam_roles_mfa`` (PHASE-5 T1, #244), the health record core added
@@ -24,6 +24,8 @@ Verifies the acceptance criteria that need a live database:
       (``v8.16__pin_centroid_table_and_seed``, #601).
       Phase 14A adds the MOD-013 observability telemetry schema
       (``v9.0__init_observability``, #701).
+      Phase 14B adds the MOD-014 ops configuration schema
+      (``v9.9__init_ops``, #764).
   2. The outbox/``consumed_events`` DDL template materializes into a throwaway
      schema with the documented row contract (issue #16), so the round-trip
      harness (T2c) can build on it.
@@ -157,6 +159,15 @@ EXPECTED_OBSERVABILITY_TABLES = {
 }
 
 
+EXPECTED_OPS_TABLES = {
+    "ops.ops_settings",
+    "ops.ops_setting_history",
+    "ops.ops_feature_flags",
+    "ops.ops_outbox",
+    "ops.consumed_events",
+}
+
+
 def _alembic_config(database_url: str) -> Config:
     config = Config(str(ALEMBIC_INI))
     config.set_main_option("sqlalchemy.url", database_url)
@@ -229,7 +240,7 @@ def test_upgrade_head_creates_all_module_schemas(database_url: str, reachable_db
         system_schemas = {"public", "information_schema"}
         non_system = {s for s in schemas if not s.startswith("pg_") and s not in system_schemas}
         assert non_system == set(MODULE_SCHEMAS), (
-            f"expected exactly the 12 module schemas after upgrade, missing: "
+            f"expected exactly the 13 module schemas after upgrade, missing: "
             f"{set(MODULE_SCHEMAS) - non_system}, "
             f"unexpected: {non_system - set(MODULE_SCHEMAS)}"
         )
@@ -245,14 +256,16 @@ def test_upgrade_head_creates_all_module_schemas(database_url: str, reachable_db
             | EXPECTED_INTAKE_TABLES
             | EXPECTED_CARE_TABLES
             | EXPECTED_OBSERVABILITY_TABLES
+            | EXPECTED_OPS_TABLES
         )
         assert set(tables) == expected_tables, (
             "only the iam + health + consent + audit + partner + notify + "
-            "intake + care + observability schemas may hold tables after "
+            "intake + care + observability + ops schemas may hold tables after "
             "upgrade head "
             "(v1.0__init_iam, v2.0__init_health, v2.1__init_consent, "
             "v3.0__init_audit, v4.0__init_partner, v5.0__init_notify, "
-            "v7.0__init_intake, v8.0__init_care, v9.0__init_observability), "
+            "v7.0__init_intake, v8.0__init_care, v9.0__init_observability, "
+            "v9.9__init_ops), "
             f"unexpected: {set(tables) - expected_tables}, "
             f"missing: {expected_tables - set(tables)}"
         )
