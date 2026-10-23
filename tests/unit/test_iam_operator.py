@@ -30,7 +30,7 @@ from app.gateway.errors import (
     InsufficientScopeError,
 )
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_operator
+from app.gateway.rbac import require_admin, require_operator
 from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.domain.exceptions import (
     AccessTokenMalformedError,
@@ -161,6 +161,52 @@ async def test_require_operator_denies_an_unknown_scope_principal_with_403() -> 
 
     with pytest.raises(InsufficientScopeError):
         await require_operator(_operator_request(principal))
+
+
+# ---------------------------------------------------------------------------
+# require_admin route guard (spec #761 operator tiers)
+# ---------------------------------------------------------------------------
+
+
+async def test_require_admin_admits_an_operator_on_the_admin_tier() -> None:
+    principal = Principal.for_subject("11", "operator", tier="admin")
+
+    admitted = await require_admin(_operator_request(principal))
+
+    assert admitted == principal
+
+
+async def test_require_admin_denies_an_operator_without_the_admin_tier() -> None:
+    principal = Principal.for_subject("11", "operator", tier="operator")
+
+    with pytest.raises(InsufficientScopeError):
+        await require_admin(_operator_request(principal))
+
+
+async def test_require_admin_denies_a_missing_tier() -> None:
+    principal = Principal.for_subject("11", "operator")
+
+    with pytest.raises(InsufficientScopeError):
+        await require_admin(_operator_request(principal))
+
+
+async def test_require_admin_denies_an_unknown_tier() -> None:
+    principal = Principal.for_subject("11", "operator", tier="superadmin")
+
+    with pytest.raises(InsufficientScopeError):
+        await require_admin(_operator_request(principal))
+
+
+async def test_require_admin_denies_a_non_operator_even_with_an_admin_tier() -> None:
+    principal = Principal.for_subject("7", "patient", tier="admin")
+
+    with pytest.raises(InsufficientScopeError):
+        await require_admin(_operator_request(principal))
+
+
+async def test_require_admin_denies_an_anonymous_caller_with_401() -> None:
+    with pytest.raises(AuthenticationRequiredError):
+        await require_admin(_operator_request(Principal.anonymous()))
 
 
 def test_operator_bearer_token_mints_the_operator_scope() -> None:

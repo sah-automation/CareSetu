@@ -212,7 +212,36 @@ async def test_operator_session_minted_only_after_mfa_is_verified(
     claims = verify_token(session.jwt, _KEY, _T0)
     assert claims.subject_id == session.identity_id
     assert claims.scope == "operator"
+    assert claims.tier == "operator"
     assert claims.expires_at == _T0 + timedelta(seconds=900)
+
+
+async def test_operator_refresh_re_derives_the_tier_from_the_profile(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    facade = await _invited_operator(database_url, clock)
+    identity_id = await _invited_identity_id(database_url)
+    enroll = await facade.enroll_mfa(identity_id)
+    session = await facade.issue_operator_session(_INVITED_PHONE, _valid_code(enroll.secret, _T0))
+
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE iam.iam_operator_profiles SET tier = 'admin' "
+                    "WHERE identity_id = :identity_id"
+                ),
+                {"identity_id": identity_id},
+            )
+    finally:
+        await engine.dispose()
+
+    refreshed = await facade.refresh_session(session.refresh_token)
+
+    assert refreshed.scope == "operator"
+    assert verify_token(refreshed.jwt, _KEY, _T0).tier == "admin"
 
 
 async def test_wrong_totp_code_rejected(database_url: str, clean_iam: Any) -> None:

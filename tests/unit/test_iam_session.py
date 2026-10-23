@@ -212,7 +212,12 @@ async def test_issue_partner_session_reverifies_profile_under_the_lock_at_mint()
         assert partner_id == 3
 
     async def _fake_mint(
-        connection: AsyncConnection, identity_id: int, scope: str, now: datetime
+        connection: AsyncConnection,
+        identity_id: int,
+        scope: str,
+        now: datetime,
+        *,
+        tier: str | None = None,
     ) -> tuple[str, str, str]:
         mint_connections.append(id(connection))
         minted_scopes.append(scope)
@@ -379,7 +384,12 @@ async def test_refresh_partner_renews_without_an_active_role_grant() -> None:
         raise AssertionError("partner renewal must not read an active role grant")
 
     async def _fake_mint(
-        connection: AsyncConnection, identity_id: int, scope: str, now: datetime
+        connection: AsyncConnection,
+        identity_id: int,
+        scope: str,
+        now: datetime,
+        *,
+        tier: str | None = None,
     ) -> tuple[str, str, str]:
         minted_scopes.append(scope)
         return "jti-refresh-1", "refresh-new-1", "partner.jwt.1"

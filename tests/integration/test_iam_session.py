@@ -506,6 +506,13 @@ async def test_operator_session_rotates_to_operator_scope(
                 ),
                 {"identity_id": identity_id},
             )
+            await connection.execute(
+                text(
+                    "INSERT INTO iam.iam_operator_profiles (identity_id, tier, is_active) "
+                    "VALUES (:identity_id, 'operator', true)"
+                ),
+                {"identity_id": identity_id},
+            )
             refresh_token = "operator-test-refresh-token"
             token_hash = hash_refresh_token(refresh_token)
             await connection.execute(
@@ -533,6 +540,7 @@ async def test_operator_session_rotates_to_operator_scope(
     assert refreshed.identity_id == identity_id
     claims = verify_token(refreshed.jwt, _KEY, _T0 + timedelta(minutes=10))
     assert claims.scope == "operator"
+    assert claims.tier == "operator"
 
 
 # --- F014-T05 (#465): partner-scoped renewal in every pre-activation state ---
