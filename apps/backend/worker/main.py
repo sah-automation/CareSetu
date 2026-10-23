@@ -77,6 +77,7 @@ from modules.intake.adapters import register_handlers as intake_register_handler
 from modules.notify.adapters import register_handlers as notify_register_handlers
 from modules.observability.adapters import register_handlers as observability_register_handlers
 from modules.observability.facade import drain_error_buffer, drain_http_counter
+from modules.ops.adapters import register_handlers as ops_register_handlers
 from modules.partner.adapters import register_handlers as partner_register_handlers
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
@@ -182,6 +183,7 @@ _MODULE_REGISTERS: tuple[Callable[[HandlerRegistry], None], ...] = (
     notify_register_handlers,
     audit_register_handlers,
     observability_register_handlers,
+    ops_register_handlers,
 )
 
 

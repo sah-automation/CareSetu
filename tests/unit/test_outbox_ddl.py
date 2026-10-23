@@ -24,6 +24,7 @@ EXPECTED_MODULE_SCHEMAS = (
     "notify",
     "audit",
     "observability",
+    "ops",
 )
 
 
