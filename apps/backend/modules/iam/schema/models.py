@@ -71,6 +71,43 @@ iam_operator_mfa = Table(
     UniqueConstraint("identity_id", name="uq_iam_operator_mfa_identity"),
 )
 
+iam_operator_profiles = Table(
+    "iam_operator_profiles",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "identity_id",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_operator_profiles_identity"),
+        nullable=False,
+    ),
+    # Operator authority tier: admin holds sensitive writes, operator reads the
+    # console. New profiles default to the non-admin tier (spec #761).
+    Column("tier", String(20), nullable=False, server_default=text("'operator'")),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("mfa_failed_attempts", Integer, nullable=False, server_default=text("0")),
+    Column("mfa_locked_until", DateTime(timezone=True), nullable=True),
+    Column(
+        "created_by",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_operator_profiles_created_by"),
+        nullable=True,
+    ),
+    Column(
+        "updated_by",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_operator_profiles_updated_by"),
+        nullable=True,
+    ),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("identity_id", name="uq_iam_operator_profiles_identity"),
+    CheckConstraint("tier IN ('admin', 'operator')", name="ck_iam_operator_profiles_tier"),
+    CheckConstraint(
+        "mfa_failed_attempts >= 0", name="ck_iam_operator_profiles_mfa_failed_attempts"
+    ),
+)
+
 iam_otp_challenges = Table(
     "iam_otp_challenges",
     MODULE_METADATA,

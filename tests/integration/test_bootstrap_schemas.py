@@ -70,6 +70,7 @@ EXPECTED_IAM_TABLES = {
     "iam.iam_role_grants",
     "iam.iam_outbox",
     "iam.iam_operator_mfa",
+    "iam.iam_operator_profiles",
     "iam.iam_patient_profiles",
     "iam.consumed_events",
 }
