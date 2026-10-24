@@ -309,6 +309,11 @@ class Settings:
     # the Render web service's env vars (free compute covers web services
     # only - background workers require a paid instance).
     dispatcher_in_process_enabled: bool = False
+    # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings read
+    # caches resolved values in-process for this many seconds so a polling
+    # operator surface does not re-query ``ops_settings`` on every call. Reflects
+    # the "effective values cached for 30s" contract; positive integer.
+    settings_cache_ttl_seconds: int = 30
     # Encrypted credential-document store (PHASE-5 T06, #251): local root and
     # the base64 AES-256 key. Root defaults to a repo-local ``var/`` dir; the
     # key is empty unless supplied by the environment (the store derives an
@@ -640,6 +645,8 @@ class Settings:
             raise ValueError("ai_circuit_breaker_threshold must be positive")
         if self.ai_monthly_budget_paise <= 0:
             raise ValueError("ai_monthly_budget_paise must be positive")
+        if self.settings_cache_ttl_seconds <= 0:
+            raise ValueError("settings_cache_ttl_seconds must be positive")
         if self.observability_rollup_max_dates <= 0:
             raise ValueError("observability_rollup_max_dates must be positive")
         if self.error_capture_max_records <= 0:
@@ -974,6 +981,7 @@ def get_settings() -> Settings:
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
         dispatcher_in_process_enabled=_env_bool("DISPATCHER_IN_PROCESS_ENABLED", False),
+        settings_cache_ttl_seconds=_env_int("SETTINGS_CACHE_TTL_SECONDS", 30),
         partner_artifact_root=os.environ.get(
             "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
         ),
