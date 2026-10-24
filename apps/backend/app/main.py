@@ -77,6 +77,8 @@ from modules.observability.adapters.routes import (
 )
 from modules.observability.adapters.routes import router as observability_router
 from modules.observability.facade import ObservabilityFacade
+from modules.ops.adapters.routes import router as ops_router
+from modules.ops.facade import OpsFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
 from modules.partner.adapters.routes import directory_router
 from modules.partner.adapters.routes import (
@@ -514,6 +516,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # read one resolved object and their tests stub it wholesale, like the audit
     # instance above.
     app.state.observability_facade = ObservabilityFacade(engine=engine)
+    # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings facade
+    # reads this module's own ``ops_settings`` table for database overrides and
+    # falls back to the settled Settings (environment then default). Its 30s
+    # in-process cache keeps an operator read from re-querying on every poll.
+    app.state.ops_facade = OpsFacade(engine=engine, settings=resolved_settings)
     # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
     # and, for open registration (ADR-0010), the settled iam facade - the sync
     # ``create_credential_account`` seam is called in-sequence at registration
@@ -686,6 +693,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(consent_router)
     app.include_router(audit_router)
     app.include_router(observability_router)
+    app.include_router(ops_router)
     app.include_router(partner_router)
     app.include_router(directory_router)
     app.include_router(intake_router)
