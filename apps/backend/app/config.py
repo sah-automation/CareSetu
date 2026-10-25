@@ -98,6 +98,11 @@ DEFAULT_PROFILE_MEDIA_TIMEOUT_SECONDS = 30.0
 # facade, so raising ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` moves both limits
 # together. Nothing else may re-declare the number.
 DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+# CSP report-only (PHASE-14B Batch 2, #775): hardened CSP on API responses and
+# report-only CSP on the frontend. The report URI points to the backend collector
+# endpoint. When unset, reporting directives are omitted.
+DEFAULT_CSP_REPORT_ONLY_ENABLED = False
+DEFAULT_CSP_REPORT_URI = ""
 # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
 # re-submission rounds a rejected partner may open before the operator queue is
 # protected, and the cooldown (days) after which the budget refreshes. Queue
@@ -314,6 +319,11 @@ class Settings:
     # operator surface does not re-query ``ops_settings`` on every call. Reflects
     # the "effective values cached for 30s" contract; positive integer.
     settings_cache_ttl_seconds: int = 30
+    # CSP report-only (PHASE-14B Batch 2, #775): hardened CSP on API responses and
+    # report-only CSP on the frontend. The report URI points to the backend collector
+    # endpoint. When unset, reporting directives are omitted.
+    csp_report_only_enabled: bool = DEFAULT_CSP_REPORT_ONLY_ENABLED
+    csp_report_uri: str = DEFAULT_CSP_REPORT_URI
     # Encrypted credential-document store (PHASE-5 T06, #251): local root and
     # the base64 AES-256 key. Root defaults to a repo-local ``var/`` dir; the
     # key is empty unless supplied by the environment (the store derives an
