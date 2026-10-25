@@ -72,6 +72,7 @@ from modules.intake.adapters.routes import (
 )
 from modules.intake.adapters.routes import router as intake_router
 from modules.intake.facade import IntakeFacade
+from modules.observability.adapters.csp_routes import router as csp_collector_router
 from modules.observability.adapters.routes import (
     register_error_handlers as register_observability_error_handlers,
 )
@@ -693,6 +694,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(consent_router)
     app.include_router(audit_router)
     app.include_router(observability_router)
+    app.include_router(csp_collector_router)
     app.include_router(ops_router)
     app.include_router(partner_router)
     app.include_router(directory_router)

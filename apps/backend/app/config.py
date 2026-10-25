@@ -103,6 +103,18 @@ DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 # endpoint. When unset, reporting directives are omitted.
 DEFAULT_CSP_REPORT_ONLY_ENABLED = False
 DEFAULT_CSP_REPORT_URI = ""
+# CSP report collector (PHASE-14B Batch 2, #776): public, rate-limited endpoint
+# accepting both legacy (report-uri) and modern (report-to) CSP report formats.
+# All limits are configurable so a deployment can tune them without code changes
+# (coding-standards §9.1).
+DEFAULT_CSP_COLLECTOR_MAX_REPORT_BYTES = 16 * 1024  # 16 KB
+DEFAULT_CSP_COLLECTOR_MAX_DIRECTIVE_LENGTH = 100
+DEFAULT_CSP_COLLECTOR_MAX_DISPOSITION_LENGTH = 30
+DEFAULT_CSP_COLLECTOR_MAX_BLOCKED_SOURCE_LENGTH = 255
+DEFAULT_CSP_COLLECTOR_MAX_DOCUMENT_URI_LENGTH = 255
+DEFAULT_CSP_COLLECTOR_RATE_LIMIT_MAX_REQUESTS = 60
+DEFAULT_CSP_COLLECTOR_RATE_LIMIT_WINDOW_SECONDS = 60
+DEFAULT_CSP_COLLECTOR_MAX_BUCKETS = 1024
 # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
 # re-submission rounds a rejected partner may open before the operator queue is
 # protected, and the cooldown (days) after which the budget refreshes. Queue
@@ -324,6 +336,16 @@ class Settings:
     # endpoint. When unset, reporting directives are omitted.
     csp_report_only_enabled: bool = DEFAULT_CSP_REPORT_ONLY_ENABLED
     csp_report_uri: str = DEFAULT_CSP_REPORT_URI
+    # CSP report collector (PHASE-14B Batch 2, #776): public, rate-limited endpoint
+    # accepting both legacy (report-uri) and modern (report-to) CSP report formats.
+    csp_collector_max_report_bytes: int = DEFAULT_CSP_COLLECTOR_MAX_REPORT_BYTES
+    csp_collector_max_directive_length: int = DEFAULT_CSP_COLLECTOR_MAX_DIRECTIVE_LENGTH
+    csp_collector_max_disposition_length: int = DEFAULT_CSP_COLLECTOR_MAX_DISPOSITION_LENGTH
+    csp_collector_max_blocked_source_length: int = DEFAULT_CSP_COLLECTOR_MAX_BLOCKED_SOURCE_LENGTH
+    csp_collector_max_document_uri_length: int = DEFAULT_CSP_COLLECTOR_MAX_DOCUMENT_URI_LENGTH
+    csp_collector_rate_limit_max_requests: int = DEFAULT_CSP_COLLECTOR_RATE_LIMIT_MAX_REQUESTS
+    csp_collector_rate_limit_window_seconds: int = DEFAULT_CSP_COLLECTOR_RATE_LIMIT_WINDOW_SECONDS
+    csp_collector_max_buckets: int = DEFAULT_CSP_COLLECTOR_MAX_BUCKETS
     # Encrypted credential-document store (PHASE-5 T06, #251): local root and
     # the base64 AES-256 key. Root defaults to a repo-local ``var/`` dir; the
     # key is empty unless supplied by the environment (the store derives an
