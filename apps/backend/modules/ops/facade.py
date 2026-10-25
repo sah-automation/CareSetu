@@ -13,6 +13,8 @@ from app.config import Settings
 from bus.events import EVENT_AUDIT_EVENT
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.settings import (
+    ALL_EDITABLE_KEYS,
+    EDITABLE_NOTIFICATION_KEYS,
     EffectiveSetting,
     EffectiveSettingsResolver,
     FeatureFlag,
@@ -21,11 +23,13 @@ from modules.ops.domain.settings import (
     FeatureFlagWriteResponse,
     OpsSettingsCache,
     validate_feature_flag_write,
+    validate_notification_setting,
 )
 from modules.ops.schema.models import (
     ops_feature_flag_history,
     ops_feature_flags,
     ops_outbox,
+    ops_setting_history,
     ops_settings,
 )
 
@@ -218,3 +222,104 @@ class OpsFacade:
             flag_kind=flag_kind.value,
             version=new_version,
         )
+
+    async def write_setting(
+        self,
+        setting_key: str,
+        value: Any,
+        updated_by: int | None = None,
+    ) -> dict[str, Any]:
+        """Write a setting value with validation, history, and audit.
+
+        Args:
+            setting_key: The setting key to update (must be in allowlist)
+            value: New value (JSON-serializable)
+            updated_by: Actor ID making the change
+
+        Returns:
+            Dict with setting_key, value, version
+
+        Raises:
+            InvalidSettingWriteError: If key is not allowlisted or value is invalid
+        """
+        from modules.ops.domain.exceptions import InvalidSettingWriteError
+
+        # Validate key is in allowlist
+        if setting_key not in ALL_EDITABLE_KEYS:
+            raise InvalidSettingWriteError(setting_key, "setting key is not editable")
+
+        # Validate value for notification settings
+        if setting_key in EDITABLE_NOTIFICATION_KEYS:
+            validate_notification_setting(setting_key, value)
+
+        async with self._engine.begin() as connection:
+            # Read existing setting for update (lock row)
+            result = await connection.execute(
+                select(ops_settings).where(ops_settings.c.setting_key == setting_key)
+            )
+            row = result.mappings().first()
+
+            old_value = None
+            old_version = 0
+            if row is not None:
+                old_value = row["value"]
+                old_version = row["version"]
+
+            new_version = old_version + 1
+
+            # Upsert the setting
+            if row is None:
+                await connection.execute(
+                    ops_settings.insert().values(
+                        setting_key=setting_key,
+                        value=value,
+                        version=new_version,
+                        updated_by=updated_by,
+                    )
+                )
+            else:
+                await connection.execute(
+                    ops_settings.update()
+                    .where(ops_settings.c.setting_key == setting_key)
+                    .values(
+                        value=value,
+                        updated_by=updated_by,
+                        updated_at=datetime.now(UTC),
+                        version=new_version,
+                    )
+                )
+
+            # Record history
+            await connection.execute(
+                ops_setting_history.insert().values(
+                    setting_key=setting_key,
+                    value=value,
+                    version=new_version,
+                    changed_by=updated_by,
+                )
+            )
+
+            # Emit audit event
+            audit_payload = {
+                "action": "setting.write",
+                "setting_key": setting_key,
+                "old_value": old_value,
+                "new_value": value,
+                "version": new_version,
+                "updated_by": updated_by,
+            }
+            await connection.execute(
+                ops_outbox.insert().values(
+                    event_id=uuid4(),
+                    event_type=EVENT_AUDIT_EVENT,
+                    payload=audit_payload,
+                    occurred_at=datetime.now(UTC),
+                    status="pending",
+                    attempts=0,
+                )
+            )
+
+        # Invalidate cache
+        self._cache.set([])
+
+        return {"setting_key": setting_key, "value": value, "version": new_version}

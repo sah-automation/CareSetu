@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict
@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_admin, require_operator
+from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError, InvalidSettingWriteError
 from modules.ops.facade import OpsFacade
 
 
@@ -59,6 +60,21 @@ class FeatureFlagWriteResponse(BaseModel):
     flag_key: str
     enabled: bool
     flag_kind: str
+    version: int
+
+
+class SettingWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    setting_key: str
+    value: str | int | float | bool | list[str] | dict[str, Any] | None
+
+
+class SettingWriteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    setting_key: str
+    value: str | int | float | bool | list[str] | dict[str, Any] | None
     version: int
 
 
@@ -170,7 +186,6 @@ async def write_feature_flag(
     facade = _facade(request)
 
     async def _call() -> FeatureFlagWriteResponse:
-        from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 
         try:
             result = await facade.write_feature_flag(
@@ -194,6 +209,48 @@ async def write_feature_flag(
             enabled=result.enabled,
             flag_kind=result.flag_kind,
             version=result.version,
+        )
+
+    namespace = f"ops:{principal.subject_id}" if principal.subject_id is not None else "ops"
+    response = await run_idempotent(request, _call, namespace=namespace)
+    return response
+
+
+@router.put(
+    "/v1/operator/settings",
+    response_model=SettingWriteResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Write an allowlisted setting with history and audit (admin only)",
+)
+async def write_setting(
+    request: Request,
+    body: SettingWriteRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> SettingWriteResponse:
+    facade = _facade(request)
+
+    async def _call() -> SettingWriteResponse:
+        try:
+            result = await facade.write_setting(
+                setting_key=body.setting_key,
+                value=body.value,
+                updated_by=int(principal.subject_id) if principal.subject_id is not None else None,
+            )
+        except InvalidSettingWriteError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_SETTING_WRITE",
+                    "message": e.reason,
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+        return SettingWriteResponse(
+            setting_key=result["setting_key"],
+            value=result["value"],
+            version=result["version"],
         )
 
     namespace = f"ops:{principal.subject_id}" if principal.subject_id is not None else "ops"

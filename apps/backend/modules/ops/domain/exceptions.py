@@ -18,3 +18,12 @@ class InvalidFeatureFlagWriteError(OpsError):
         super().__init__(f"Feature flag '{flag_key}' write not allowed: {reason}")
         self.flag_key = flag_key
         self.reason = reason
+
+
+class InvalidSettingWriteError(OpsError):
+    """Raised when a setting write is not allowed."""
+
+    def __init__(self, setting_key: str, reason: str) -> None:
+        super().__init__(f"Setting '{setting_key}' write not allowed: {reason}")
+        self.setting_key = setting_key
+        self.reason = reason
