@@ -28,7 +28,7 @@ from app.config import Settings
 from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_admin
+from app.gateway.rbac import require_admin, require_operator
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain.exceptions import (
     IamError,
