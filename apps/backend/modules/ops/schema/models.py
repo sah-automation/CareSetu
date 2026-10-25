@@ -72,11 +72,26 @@ ops_feature_flags = Table(
     Column("updated_by", BigInteger, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("version", Integer, nullable=False, server_default=text("1")),
     UniqueConstraint("flag_key", name="uq_ops_feature_flags_key"),
     CheckConstraint(
         "flag_kind IN ('runtime', 'restart_required')",
         name="ck_ops_feature_flags_kind",
     ),
+)
+
+
+ops_feature_flag_history = Table(
+    "ops_feature_flag_history",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column("flag_key", String(200), nullable=False),
+    Column("enabled", Boolean, nullable=False),
+    Column("flag_kind", String(20), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("changed_by", BigInteger, nullable=True),
+    Column("changed_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Index("ix_ops_feature_flag_history_key", "flag_key", "changed_at"),
 )
 
 

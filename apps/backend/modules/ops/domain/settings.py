@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
@@ -195,6 +196,10 @@ class OpsSettingsCache:
         self._cached_at: float | None = None
         self._cached: list[EffectiveSetting] | None = None
 
+    @property
+    def ttl_seconds(self) -> int:
+        return self._ttl_seconds
+
     def get(self) -> list[EffectiveSetting] | None:
         if self._cached is None or self._cached_at is None:
             return None
@@ -326,12 +331,15 @@ def validate_feature_flag_write(flag: FeatureFlag, enabled: bool) -> None:
     """Validate a feature flag write request.
 
     Raises:
-        ValueError: If the flag is restart-required (not editable).
+        InvalidFeatureFlagWriteError: If the flag is restart-required (not editable).
     """
+    from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
+
     if not flag.editable:
-        raise ValueError(
-            f"Flag '{flag.flag_key}' is restart-required and cannot be edited at runtime. "
-            f"Restart the service to change this flag."
+        raise InvalidFeatureFlagWriteError(
+            flag.flag_key,
+            "flag is restart-required and cannot be edited at runtime; "
+            "restart the service to change",
         )
 
 
@@ -406,24 +414,43 @@ async def write_feature_flag(
         FeatureFlagWriteResponse with updated flag info
 
     Raises:
-        ValueError: If flag doesn't exist or is restart-required
+        InvalidFeatureFlagWriteError: If flag doesn't exist or is restart-required
     """
     from datetime import UTC, datetime
     from uuid import uuid4
 
     from bus.events import EVENT_AUDIT_EVENT
-    from modules.ops.schema.models import ops_feature_flags, ops_outbox
-
-    # First read the existing flag to validate
-    flag = await get_feature_flag(engine, flag_key)
-    if flag is None:
-        raise ValueError(f"Feature flag '{flag_key}' not found")
-
-    # Validate the write is allowed
-    validate_feature_flag_write(flag, enabled)
+    from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
+    from modules.ops.schema.models import ops_feature_flag_history, ops_feature_flags, ops_outbox
 
     async with engine.begin() as connection:
-        # Update the flag
+        # Read and lock the existing flag for update
+        result = await connection.execute(
+            select(ops_feature_flags).where(ops_feature_flags.c.flag_key == flag_key)
+        )
+        row = result.mappings().first()
+        if row is None:
+            raise InvalidFeatureFlagWriteError(flag_key, "feature flag not found")
+
+        old_enabled = row["enabled"]
+        old_version = row["version"]
+        flag_kind = FeatureFlagKind(row["flag_kind"])
+
+        # Validate the write is allowed
+        flag = FeatureFlag(
+            flag_key=row["flag_key"],
+            enabled=row["enabled"],
+            flag_kind=flag_kind,
+            description=row["description"],
+            updated_by=row["updated_by"],
+            created_at=row["created_at"].isoformat(),
+            updated_at=row["updated_at"].isoformat(),
+        )
+        validate_feature_flag_write(flag, enabled)
+
+        new_version = old_version + 1
+
+        # Update the flag with incremented version
         await connection.execute(
             ops_feature_flags.update()
             .where(ops_feature_flags.c.flag_key == flag_key)
@@ -431,15 +458,29 @@ async def write_feature_flag(
                 enabled=enabled,
                 updated_by=updated_by,
                 updated_at=datetime.now(UTC),
+                version=new_version,
             )
         )
 
-        # Emit audit event
+        # Record history
+        await connection.execute(
+            ops_feature_flag_history.insert().values(
+                flag_key=flag_key,
+                enabled=enabled,
+                flag_kind=flag_kind.value,
+                version=new_version,
+                changed_by=updated_by,
+            )
+        )
+
+        # Emit audit event with old and new values
         audit_payload = {
             "action": "feature_flag.write",
             "flag_key": flag_key,
-            "enabled": enabled,
-            "flag_kind": flag.flag_kind.value,
+            "old_enabled": old_enabled,
+            "new_enabled": enabled,
+            "flag_kind": flag_kind.value,
+            "version": new_version,
             "updated_by": updated_by,
         }
         await connection.execute(
@@ -456,6 +497,6 @@ async def write_feature_flag(
     return FeatureFlagWriteResponse(
         flag_key=flag_key,
         enabled=enabled,
-        flag_kind=flag.flag_kind.value,
-        version=1,  # Simple version for now
+        flag_kind=flag_kind.value,
+        version=new_version,
     )

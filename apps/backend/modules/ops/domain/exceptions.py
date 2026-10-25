@@ -9,3 +9,12 @@ from __future__ import annotations
 
 class OpsError(Exception):
     """Base error for the ops module."""
+
+
+class InvalidFeatureFlagWriteError(OpsError):
+    """Raised when a feature flag write is not allowed."""
+
+    def __init__(self, flag_key: str, reason: str) -> None:
+        super().__init__(f"Feature flag '{flag_key}' write not allowed: {reason}")
+        self.flag_key = flag_key
+        self.reason = reason

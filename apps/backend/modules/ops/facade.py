@@ -1,7 +1,5 @@
 """MOD-014: typed public facade for ops (#771, #772, #773)."""
 
-from __future__ import annotations
-
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -13,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
 from bus.events import EVENT_AUDIT_EVENT
+from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.settings import (
     EDITABLE_AI_KEYS,
     EffectiveSetting,
@@ -189,7 +188,7 @@ class OpsFacade:
             )
 
         # Invalidate cache
-        self._cache = OpsSettingsCache(ttl_seconds=self._cache._ttl_seconds)
+        self._cache = OpsSettingsCache(ttl_seconds=self._cache.ttl_seconds)
 
         return {"key": key, "value": validated, "version": new_version}
 
@@ -248,8 +247,8 @@ class OpsFacade:
                 enabled=enabled,
                 updated_by=updated_by,
             )
-        except ValueError as e:
+        except InvalidFeatureFlagWriteError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "INVALID_FEATURE_FLAG_WRITE", "message": str(e)},
+                detail={"code": "INVALID_FEATURE_FLAG_WRITE", "message": e.reason},
             ) from e
