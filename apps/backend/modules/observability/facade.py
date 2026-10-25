@@ -231,6 +231,7 @@ from modules.observability.schema.models import (
     observability_business_daily,
     observability_care_attribution_edges,
     observability_consumed_events,
+    observability_csp_aggregates,
     observability_error_events,
     observability_evaluation_scores,
     observability_http_minute,
@@ -958,6 +959,57 @@ async def accumulate_business_count(
                     literal_column("'{count}'::text[]"),
                     func.to_jsonb(existing_count + 1),
                 ),
+                "updated_at": func.now(),
+            },
+        )
+    )
+    await connection.execute(statement)
+
+
+async def accumulate_csp_aggregate(
+    connection: AsyncConnection,
+    *,
+    aggregate_date: date,
+    directive: str,
+    disposition: str,
+    blocked_source: str,
+    document_uri: str,
+) -> None:
+    """Increment one CSP violation aggregate in ``observability_csp_aggregates``.
+
+    The CSP report collector (PHASE-14B Batch 2, #776) calls this for every
+    normalized violation report. The row is keyed by
+    ``(aggregate_date, directive, disposition, blocked_source, document_uri)``
+    with ``aggregate_date`` as the UTC date of the violation. The increment is
+    atomic via ``ON CONFLICT DO UPDATE``: ``count`` is bumped in place, so
+    concurrent reports accumulate without a read-modify-write race.
+
+    Runs in its own transaction (the collector endpoint is public and
+    unauthenticated, so there is no consumed-event ledger to join). The
+    collector never stores raw reports, query strings, or PHI - only the
+    reporting fields the dashboard groups by are kept (#765).
+    """
+    table = observability_csp_aggregates
+    statement = (
+        insert(table)
+        .values(
+            aggregate_date=aggregate_date,
+            directive=directive[:100],
+            disposition=disposition[:30],
+            blocked_source=blocked_source[:255],
+            document_uri=document_uri[:255],
+            count=1,
+        )
+        .on_conflict_do_update(
+            index_elements=[
+                "aggregate_date",
+                "directive",
+                "disposition",
+                "blocked_source",
+                "document_uri",
+            ],
+            set_={
+                "count": table.c.count + 1,
                 "updated_at": func.now(),
             },
         )
@@ -5947,3 +5999,30 @@ class ObservabilityFacade:
             task_type=task_type,
             error_type=error_type,
         )
+
+    async def accumulate_csp_aggregate(
+        self,
+        *,
+        aggregate_date: date,
+        directive: str,
+        disposition: str,
+        blocked_source: str,
+        document_uri: str,
+    ) -> None:
+        """Record one normalized CSP violation into the daily aggregate.
+
+        Called by the public CSP report collector endpoint (#776). The endpoint
+        normalizes both legacy (``report-uri``) and modern (``report-to``) CSP
+        report formats, strips query strings, caps lengths, and calls this
+        method to increment the daily aggregate counter. Never stores raw
+        reports, query strings, or PHI.
+        """
+        async with self._engine.begin() as connection:
+            await accumulate_csp_aggregate(
+                connection,
+                aggregate_date=aggregate_date,
+                directive=directive,
+                disposition=disposition,
+                blocked_source=blocked_source,
+                document_uri=document_uri,
+            )
