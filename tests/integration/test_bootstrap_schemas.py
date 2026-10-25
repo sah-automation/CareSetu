@@ -169,6 +169,7 @@ EXPECTED_OPS_TABLES = {
     "ops.ops_settings",
     "ops.ops_setting_history",
     "ops.ops_feature_flags",
+    "ops.ops_feature_flag_history",
     "ops.ops_outbox",
     "ops.consumed_events",
 }

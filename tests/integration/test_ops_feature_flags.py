@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -10,6 +12,21 @@ from modules.ops.domain.settings import (
     FeatureFlagWriteResponse,
 )
 from modules.ops.facade import OpsFacade
+
+
+@pytest.fixture(autouse=True)
+async def _reset_ops_feature_flags(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Truncate the ops flag tables; ``clean_tables`` only clears outboxes."""
+    from sqlalchemy import text
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "TRUNCATE TABLE ops.ops_feature_flag_history, "
+                "ops.ops_feature_flags RESTART IDENTITY CASCADE"
+            )
+        )
+    yield
 
 
 class TestFeatureFlagFacade:
@@ -62,7 +79,7 @@ class TestFeatureFlagFacade:
         assert result.flag_key == "test.runtime_flag"
         assert result.enabled is True
         assert result.flag_kind == "runtime"
-        assert result.version == 1
+        assert result.version == 2
 
         # Verify the flag was updated
         flag = await facade.get_feature_flag("test.runtime_flag")
@@ -75,9 +92,9 @@ class TestFeatureFlagFacade:
         """Writing a restart-required flag should be refused with clear error."""
         from datetime import UTC, datetime
 
-        from fastapi import HTTPException
         from sqlalchemy import insert
 
+        from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
         from modules.ops.schema.models import ops_feature_flags
 
         async with engine.begin() as conn:
@@ -93,32 +110,28 @@ class TestFeatureFlagFacade:
                 )
             )
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(InvalidFeatureFlagWriteError) as exc_info:
             await facade.write_feature_flag(
                 flag_key="test.restart_flag",
                 enabled=True,
                 updated_by=123,
             )
 
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == "INVALID_FEATURE_FLAG_WRITE"
-        assert "restart-required" in exc_info.value.detail["message"].lower()
-        assert "cannot be edited" in exc_info.value.detail["message"].lower()
+        assert "restart-required" in exc_info.value.reason.lower()
+        assert "cannot be edited" in exc_info.value.reason.lower()
 
     async def test_write_nonexistent_flag_refused(self, facade: OpsFacade) -> None:
         """Writing a non-existent flag should be refused."""
-        from fastapi import HTTPException
+        from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(InvalidFeatureFlagWriteError) as exc_info:
             await facade.write_feature_flag(
                 flag_key="nonexistent",
                 enabled=True,
                 updated_by=123,
             )
 
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == "INVALID_FEATURE_FLAG_WRITE"
-        assert "not found" in exc_info.value.detail["message"].lower()
+        assert "not found" in exc_info.value.reason.lower()
 
 
 class TestFeatureFlagIntegration:
@@ -190,9 +203,9 @@ class TestFeatureFlagIntegration:
         """Admin cannot write a restart-required flag."""
         from datetime import UTC, datetime
 
-        from fastapi import HTTPException
         from sqlalchemy import insert
 
+        from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
         from modules.ops.schema.models import ops_feature_flags
 
         async with engine.begin() as conn:
@@ -210,13 +223,11 @@ class TestFeatureFlagIntegration:
 
         facade = OpsFacade(engine=engine, settings=Settings())
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(InvalidFeatureFlagWriteError) as exc_info:
             await facade.write_feature_flag(
                 flag_key="test.admin_no_write",
                 enabled=True,
                 updated_by=456,
             )
 
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == "INVALID_FEATURE_FLAG_WRITE"
-        assert "restart-required" in exc_info.value.detail["message"].lower()
+        assert "restart-required" in exc_info.value.reason.lower()

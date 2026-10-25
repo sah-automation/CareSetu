@@ -125,6 +125,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/operator/login",
         # PHASE-5 review fix P1 (#272): operator MFA TOTP enrollment.
         "/v1/auth/operator/mfa/enroll",
+        # #768: the admin-only operator user list for user management.
+        "/v1/auth/operator/users",
         # T05 (#298): partner-scoped session issuance for registered partners.
         "/v1/auth/partner/session",
         # F014 T02 (#462): partner OTP login - sends a challenge only when the
@@ -257,6 +259,12 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-14A B5 (#735): the one operator WRITE in the module - the
         # acknowledgement that fills the alert row's acked_by/acked_at columns.
         "/v1/operator/observability/alerts/{alert_id}/acknowledge",
+        # MOD-014 ops (#771/#773): effective-settings read, settings write,
+        # feature-flag list/read and the runtime flag write.
+        "/v1/operator/settings",
+        "/v1/operator/settings/effective",
+        "/v1/operator/feature-flags",
+        "/v1/operator/feature-flags/{flag_key}",
     }
 
 
