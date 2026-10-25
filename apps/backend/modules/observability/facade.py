@@ -238,6 +238,7 @@ from modules.observability.schema.models import (
     observability_product_actor_daily,
     observability_product_events,
     observability_rollup_runs,
+    observability_security_signals,
 )
 from observability.langfuse_metrics import LangfuseDailyMetrics, pull_daily_metrics
 from observability.logging import SERVICE_API
@@ -499,6 +500,7 @@ __all__ = [
     "UsageRow",
     "accumulate_ai_usage",
     "accumulate_business_count",
+    "accumulate_security_signal",
     "acknowledge_alert",
     "close_ai_queue_item",
     "drain_error_buffer",
@@ -1012,6 +1014,42 @@ async def accumulate_csp_aggregate(
                 "count": table.c.count + 1,
                 "updated_at": func.now(),
             },
+        )
+    )
+    await connection.execute(statement)
+
+
+async def accumulate_security_signal(
+    connection: AsyncConnection,
+    envelope: Envelope[BaseModel],
+    signal_kind: str,
+    subject_key: str,
+) -> None:
+    """Increment one minute-granular security signal in ``observability_security_signals``.
+
+    The row is keyed by ``(minute_ts, signal_kind, subject_key)`` with
+    ``minute_ts`` taken from the envelope's occurrence timestamp truncated to
+    the minute (UTC). The increment is atomic via ``ON CONFLICT DO UPDATE``:
+    ``count`` is bumped in place, so concurrent deliveries of distinct events
+    accumulate without a read-modify-write race.
+
+    Runs inside the handler's SAME transaction as the ``consumed_events``
+    ledger write (the ledger row is recorded first by ``run_handler``), so a
+    replayed ``event_id`` never reaches this effect and a crash rolls both back
+    together (ADR-0002 §3).
+
+    PHI-free by construction: ``subject_key`` is a one-way hash of the subject
+    identity (or empty string when there is no subject to key on), never a raw
+    reference, phone number, OTP value, or free text.
+    """
+    table = observability_security_signals
+    minute_ts = envelope.occurred_at.astimezone(UTC).replace(second=0, microsecond=0)
+    statement = (
+        insert(table)
+        .values(minute_ts=minute_ts, signal_kind=signal_kind, subject_key=subject_key, count=1)
+        .on_conflict_do_update(
+            index_elements=["minute_ts", "signal_kind", "subject_key"],
+            set_={"count": table.c.count + 1, "updated_at": func.now()},
         )
     )
     await connection.execute(statement)
