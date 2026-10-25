@@ -132,6 +132,7 @@ async def read_feature_flag(
             detail={
                 "code": "FEATURE_FLAG_NOT_FOUND",
                 "message": f"Feature flag '{flag_key}' not found",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
             },
         )
     return FeatureFlagReadResponse(
@@ -145,30 +146,49 @@ async def read_feature_flag(
 
 
 @router.put(
-    "/v1/operator/feature-flags",
-    response_model=FeatureFlagWriteResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Write a runtime feature flag with history and audit (admin only)",
-)
-@router.post(
-    "/v1/operator/feature-flags",
+    "/v1/operator/feature-flags/{flag_key}",
     response_model=FeatureFlagWriteResponse,
     status_code=status.HTTP_200_OK,
     summary="Write a runtime feature flag with history and audit (admin only)",
 )
 async def write_feature_flag(
     request: Request,
+    flag_key: str,
     body: FeatureFlagWriteRequest,
     principal: Annotated[Principal, Depends(require_admin)],
 ) -> FeatureFlagWriteResponse:
+    if body.flag_key != flag_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "FLAG_KEY_MISMATCH",
+                "message": "Flag key in path and body must match",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+
     facade = _facade(request)
 
     async def _call() -> FeatureFlagWriteResponse:
-        result = await facade.write_feature_flag(
-            flag_key=body.flag_key,
-            enabled=body.enabled,
-            updated_by=int(principal.subject_id) if principal.subject_id is not None else None,
-        )
+        from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
+
+        try:
+            result = await facade.write_feature_flag(
+                flag_key=flag_key,
+                enabled=body.enabled,
+                updated_by=int(principal.subject_id) if principal.subject_id is not None else None,
+            )
+        except InvalidFeatureFlagWriteError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_FEATURE_FLAG_WRITE",
+                    "message": e.reason,
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
         return FeatureFlagWriteResponse(
             flag_key=result.flag_key,
             enabled=result.enabled,
