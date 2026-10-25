@@ -114,6 +114,29 @@ class FeatureFlagWriteResponse:
     version: int
 
 
+# Alert kinds from observability (rollup + consumer)
+ALERT_KINDS: frozenset[str] = frozenset(
+    {
+        "ai_budget",
+        "provider_health_drop",
+        "breaker_open",
+        "outbox_backlog",
+        "outbox_dead_letter",
+        "queue_age",
+        "cost_outlier",
+        "error_rate_high",
+        "provider_rate_limited",
+        "latency_objective_breach",
+        "audit_tamper",
+        "ai_egress",
+    }
+)
+
+
+# Valid routing targets for notification routing
+NOTIFICATION_ROUTING_TARGETS: frozenset[str] = frozenset({"slack", "email", "none"})
+
+
 # Allowlisted operational AI knobs that are editable (writes in #772)
 EDITABLE_AI_KEYS: frozenset[str] = frozenset(
     {
@@ -122,6 +145,17 @@ EDITABLE_AI_KEYS: frozenset[str] = frozenset(
         "ai.timeout_seconds",
         "ai.fallback_enabled",
     }
+)
+
+
+# Allowlisted notification routing settings that are editable (writes in #774)
+EDITABLE_NOTIFICATION_KEYS: frozenset[str] = frozenset(
+    {
+        "notification.email.recipients",
+        "notification.channels.slack.enabled",
+        "notification.channels.email.enabled",
+    }
+    | {f"notification.routing.{kind}" for kind in ALERT_KINDS}
 )
 
 
@@ -153,10 +187,11 @@ COMPOSITION_ROOT_READ_ONLY_KEYS: frozenset[str] = frozenset(
 
 
 ALL_READ_ONLY_KEYS: frozenset[str] = READ_ONLY_SENSITIVE_KEYS | COMPOSITION_ROOT_READ_ONLY_KEYS
+ALL_EDITABLE_KEYS: frozenset[str] = EDITABLE_AI_KEYS | EDITABLE_NOTIFICATION_KEYS
 
 
 def is_editable(key: str) -> bool:
-    return key in EDITABLE_AI_KEYS
+    return key in ALL_EDITABLE_KEYS
 
 
 def is_read_only(key: str) -> bool:
@@ -168,7 +203,7 @@ def requires_restart(key: str) -> bool:
         return True
     if key in COMPOSITION_ROOT_READ_ONLY_KEYS:
         return True
-    if key in EDITABLE_AI_KEYS:
+    if key in EDITABLE_AI_KEYS or key in EDITABLE_NOTIFICATION_KEYS:
         return False
     return False
 
@@ -275,11 +310,24 @@ class EffectiveSettingsResolver:
             ), SettingSource.DEFAULT.value
         return None, SettingSource.DEFAULT.value
 
+    def _get_notification_default(self, key: str) -> tuple[object | None, str]:
+        """Get default values for notification settings (no env config)."""
+        if key.startswith("notification.routing."):
+            return "none", SettingSource.DEFAULT.value
+        if key == "notification.email.recipients":
+            return [], SettingSource.DEFAULT.value
+        if key == "notification.channels.slack.enabled":
+            return False, SettingSource.DEFAULT.value
+        if key == "notification.channels.email.enabled":
+            return False, SettingSource.DEFAULT.value
+        return None, SettingSource.DEFAULT.value
+
     def resolve_all(self, db_overrides: dict[str, Any]) -> list[EffectiveSetting]:
         results: list[EffectiveSetting] = []
         # Collect all keys we care about
         all_keys = (
             list(EDITABLE_AI_KEYS)
+            + list(EDITABLE_NOTIFICATION_KEYS)
             + list(READ_ONLY_SENSITIVE_KEYS)
             + list(COMPOSITION_ROOT_READ_ONLY_KEYS)
         )
@@ -303,8 +351,18 @@ class EffectiveSettingsResolver:
                     )
                     value = val
                 else:
-                    source = SettingSource.DEFAULT.value
-                    value = val
+                    # Check notification defaults only for notification keys
+                    if key.startswith("notification."):
+                        val, src = self._get_notification_default(key)
+                        if val is not None:
+                            source = src
+                            value = val
+                        else:
+                            source = SettingSource.DEFAULT.value
+                            value = None
+                    else:
+                        source = SettingSource.DEFAULT.value
+                        value = None
             spec = get_setting_spec(key)
             # Never return raw for secrets/read-only sensitive
             if key in READ_ONLY_SENSITIVE_KEYS or key in ALL_READ_ONLY_KEYS:
@@ -338,3 +396,72 @@ def validate_feature_flag_write(flag: FeatureFlag, enabled: bool) -> None:
             "flag is restart-required and cannot be edited at runtime; "
             "restart the service to change",
         )
+
+
+def validate_notification_routing_value(value: str) -> None:
+    """Validate a notification routing value.
+
+    Args:
+        value: The routing value to validate ("slack", "email", or "none").
+
+    Raises:
+        ValueError: If the value is not a valid routing target.
+    """
+    if value not in NOTIFICATION_ROUTING_TARGETS:
+        valid = ", ".join(sorted(NOTIFICATION_ROUTING_TARGETS))
+        raise ValueError(f"Invalid routing target '{value}'. Must be one of: {valid}")
+
+
+def validate_email_recipients(value: list[str]) -> None:
+    """Validate email recipients list.
+
+    Args:
+        value: List of email addresses.
+
+    Raises:
+        ValueError: If the value is not a valid list of email addresses.
+    """
+    if not isinstance(value, list):
+        raise ValueError("Email recipients must be a list")
+    for email in value:
+        if not isinstance(email, str) or "@" not in email:
+            raise ValueError(f"Invalid email address: {email}")
+
+
+def validate_channel_enabled(value: bool) -> None:
+    """Validate channel enabled value.
+
+    Args:
+        value: Boolean value.
+
+    Raises:
+        ValueError: If the value is not a boolean.
+    """
+    if not isinstance(value, bool):
+        raise ValueError("Channel enabled must be a boolean")
+
+
+def validate_notification_setting(key: str, value: object) -> None:
+    """Validate a notification setting write.
+
+    Args:
+        key: The setting key.
+        value: The value to validate.
+
+    Raises:
+        ValueError: If the value is invalid for the given key.
+    """
+    if key.startswith("notification.routing."):
+        if not isinstance(value, str):
+            raise ValueError(f"Routing value for '{key}' must be a string")
+        validate_notification_routing_value(value)
+    elif key == "notification.email.recipients":
+        if not isinstance(value, list):
+            raise ValueError("Email recipients must be a list")
+        validate_email_recipients(value)
+    elif key in ("notification.channels.slack.enabled", "notification.channels.email.enabled"):
+        if not isinstance(value, bool):
+            raise ValueError("Channel enabled must be a boolean")
+        validate_channel_enabled(value)
+    else:
+        raise ValueError(f"Unknown notification setting key: {key}")
