@@ -1,13 +1,12 @@
-"""MOD-014: HTTP adapter for effective settings read/write and feature flags (#771, #772, #773)."""
+"""MOD-014: HTTP adapter for effective settings read and feature flags (#771, #773)."""
 
 from __future__ import annotations
 
-from typing import Annotated, Any, cast
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict
 
-from app.config import Settings
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_admin, require_operator
@@ -28,21 +27,6 @@ class EffectiveSettingsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     settings: list[EffectiveSettingResponse]
-
-
-class SettingWriteRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    key: str
-    value: Any
-
-
-class SettingWriteResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    key: str
-    value: Any
-    version: int
 
 
 class FeatureFlagReadResponse(BaseModel):
@@ -85,10 +69,6 @@ def _facade(request: Request) -> OpsFacade:
     return cast(OpsFacade, request.app.state.ops_facade)
 
 
-def _settings(request: Request) -> Settings:
-    return cast(Settings, request.app.state.settings)
-
-
 @router.get(
     "/v1/operator/settings/effective",
     response_model=EffectiveSettingsResponse,
@@ -114,42 +94,6 @@ async def read_effective_settings(
             for item in settings_list
         ]
     )
-
-
-@router.put(
-    "/v1/operator/settings",
-    response_model=SettingWriteResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Write an allowlisted setting with history and audit (admin only)",
-)
-@router.post(
-    "/v1/operator/settings",
-    response_model=SettingWriteResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Write an allowlisted setting with history and audit (admin only)",
-)
-async def write_setting(
-    request: Request,
-    body: SettingWriteRequest,
-    principal: Annotated[Principal, Depends(require_admin)],
-) -> SettingWriteResponse:
-    facade = _facade(request)
-
-    async def _call() -> SettingWriteResponse:
-        result = await facade.write_setting(
-            key=body.key,
-            value=body.value,
-            updated_by=int(principal.subject_id) if principal.subject_id is not None else None,
-        )
-        return SettingWriteResponse(
-            key=result["key"],
-            value=result["value"],
-            version=result["version"],
-        )
-
-    namespace = f"ops:{principal.subject_id}" if principal.subject_id is not None else "ops"
-    response = await run_idempotent(request, _call, namespace=namespace)
-    return response
 
 
 @router.get(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.settings import (
     FeatureFlag,
     FeatureFlagKind,
@@ -64,7 +65,7 @@ class TestFeatureFlagDomain:
             created_at="2026-01-01T00:00:00",
             updated_at="2026-01-01T00:00:00",
         )
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(InvalidFeatureFlagWriteError) as exc_info:
             validate_feature_flag_write(flag, False)
         assert "restart-required" in str(exc_info.value).lower()
         assert "cannot be edited" in str(exc_info.value).lower()
