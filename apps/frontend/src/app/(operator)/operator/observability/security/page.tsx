@@ -4,6 +4,7 @@
 // Shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
 // prompt-injection counts, and webhook monitoring status.
 
+import { cn } from "@/lib/utils";
 import {
   ObservabilityPanelPage,
   ReadPanel,
@@ -12,9 +13,9 @@ import {
   fetchSecurity,
   type SecuritySummary,
   type SecuritySignalView,
+  type CspAggregateView,
 } from "@/lib/operator/observability";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
-import { formatPct } from "@/lib/operator/observability-format";
 
 const NO_SECURITY_BODY = "The security scan has not recorded any signals yet.";
 
@@ -97,8 +98,6 @@ function CspRow({ csp }: { csp: CspAggregateView }) {
     </tr>
   );
 }
-
-import { cn } from "@/lib/utils";
 
 export default function ObservabilitySecurityPage() {
   const security = usePanelRead(() => fetchSecurity());
