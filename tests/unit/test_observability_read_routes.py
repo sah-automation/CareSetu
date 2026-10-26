@@ -37,6 +37,17 @@ from modules.observability.domain.product import (
     non_clinical_event_word,
     product_steps,
 )
+from modules.observability.domain.security_detector import (
+    SECURITY_SIGNAL_AUTH_FAILURE,
+    SECURITY_SIGNAL_CONSENT_REVOCATION,
+    SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+    SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+    SECURITY_SIGNAL_OTP_LOCKOUT,
+    SECURITY_SIGNAL_PROMPT_INJECTION,
+    SECURITY_SIGNAL_RATE_LIMIT,
+    SECURITY_SIGNAL_RECORD_DENIAL,
+    SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+)
 from modules.observability.facade import (
     ACTIVE_USER_SOURCE_CONVENTION,
     ACTIVE_USER_WINDOW_CONVENTION,
@@ -69,6 +80,7 @@ from modules.observability.facade import (
     CostSummary,
     CostTrend,
     CostTrendPoint,
+    CspAggregateView,
     Deeplinks,
     DependencyHealth,
     DoctorSpend,
@@ -97,6 +109,8 @@ from modules.observability.facade import (
     RetentionCohortDay,
     RetentionCohortsRead,
     RouteThroughputRow,
+    SecuritySignalView,
+    SecuritySummary,
     SystemHealth,
     TaskTypeSpend,
     ThroughputPoint,
@@ -129,6 +143,7 @@ BUSINESS_PATH = "/v1/operator/observability/business"
 FUNNEL_PATH = "/v1/operator/observability/product/funnel"
 ACTIVE_USERS_PATH = "/v1/operator/observability/product/active-users"
 RETENTION_PATH = "/v1/operator/observability/product/retention-cohorts"
+SECURITY_PATH = "/v1/operator/observability/security"
 
 _ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
@@ -452,6 +467,169 @@ _ERRORS = ErrorFeedPage(
     ],
 )
 
+#: The security summary stub the route serialises. PHASE-14B Batch 2 (#782):
+#: shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+#: prompt-injection counts, and webhook monitoring status.
+_SECURITY = SecuritySummary(
+    signals=[
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_AUTH_FAILURE,
+            count_last_5m=12,
+            threshold=10,
+            alert_kind="auth_failure_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+            count_last_5m=3,
+            threshold=5,
+            alert_kind="operator_mfa_failure_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_RECORD_DENIAL,
+            count_last_5m=0,
+            threshold=10,
+            alert_kind="record_denial_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_RATE_LIMIT,
+            count_last_5m=7,
+            threshold=20,
+            alert_kind="rate_limit_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_PROMPT_INJECTION,
+            count_last_5m=2,
+            threshold=3,
+            alert_kind="prompt_injection_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OTP_LOCKOUT,
+            count_last_5m=1,
+            threshold=None,
+            alert_kind="otp_lockout",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="operator_mfa_lockout",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_CONSENT_REVOCATION,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="consent_revocation",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="webhook_signature_failure",
+            is_deferred=True,
+            deferred_reason="No inbound webhook exists",
+        ),
+    ],
+    csp_aggregates=[
+        CspAggregateView(
+            directive="script-src",
+            disposition="enforce",
+            blocked_source="https://evil.example.com",
+            count=5,
+        ),
+        CspAggregateView(
+            directive="img-src",
+            disposition="report-only",
+            blocked_source="",
+            count=2,
+        ),
+    ],
+    prompt_injection_count=2,
+    webhook_monitoring_status="deferred",
+    webhook_monitoring_reason="No inbound webhook exists",
+)
+
+#: The empty security summary stub: no signals, no CSP aggregates, zero counts.
+_EMPTY_SECURITY = SecuritySummary(
+    signals=[
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_AUTH_FAILURE,
+            count_last_5m=0,
+            threshold=10,
+            alert_kind="auth_failure_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+            count_last_5m=0,
+            threshold=5,
+            alert_kind="operator_mfa_failure_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_RECORD_DENIAL,
+            count_last_5m=0,
+            threshold=10,
+            alert_kind="record_denial_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_RATE_LIMIT,
+            count_last_5m=0,
+            threshold=20,
+            alert_kind="rate_limit_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_PROMPT_INJECTION,
+            count_last_5m=0,
+            threshold=3,
+            alert_kind="prompt_injection_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OTP_LOCKOUT,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="otp_lockout",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="operator_mfa_lockout",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_CONSENT_REVOCATION,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="consent_revocation",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="webhook_signature_failure",
+            is_deferred=True,
+            deferred_reason="No inbound webhook exists",
+        ),
+    ],
+    csp_aggregates=[],
+    prompt_injection_count=0,
+    webhook_monitoring_status="deferred",
+    webhook_monitoring_reason="No inbound webhook exists",
+)
+
 
 _BUSINESS = BusinessRead(
     period="month_to_date",
@@ -689,6 +867,8 @@ class StubObservabilityFacade:
         self.funnel_calls: list[tuple[int, str | None]] = []
         self.active_user_days: list[int] = []
         self.retention_days: list[int] = []
+        self.security_summary_calls: list[dict[str, Any]] = []
+        self.security_summary_empty = False
 
     async def get_cost_summary(self) -> CostSummary:
         self.summary_calls += 1
@@ -756,6 +936,12 @@ class StubObservabilityFacade:
         return AlertAcknowledgement(
             alert=entry, already_acknowledged=self.acknowledgement_is_repeat
         )
+
+    async def get_security_summary(
+        self, *, window_minutes: int, settings: Settings
+    ) -> SecuritySummary:
+        self.security_summary_calls.append({"window_minutes": window_minutes})
+        return _EMPTY_SECURITY if self.security_summary_empty else _SECURITY
 
     async def get_error_feed(
         self,
@@ -1105,6 +1291,125 @@ def test_throughput_rates_are_exact_decimals_not_binary_floats() -> None:
     assert Decimal(body["error_rate"]) == Decimal("0.2143")
     assert isinstance(body["requests_per_minute"], str)
     assert Decimal(body["requests_per_minute"]) == Decimal("0.23")
+
+
+# ------------------------------------------------------------- security (#782)
+
+
+def test_operator_reads_security_summary_with_signals_csp_and_prompt_injection() -> None:
+    """Security posture summary: auth/lockout trends, consent/rate-limit anomalies,
+    CSP violations, prompt-injection counts, and webhook monitoring status.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(SECURITY_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.security_summary_calls == [{"window_minutes": 5}]
+    body = response.json()
+
+    # Signals cover all tracked kinds with thresholds and alert kinds
+    assert len(body["signals"]) == 9
+    signal_kinds = {s["signal_kind"] for s in body["signals"]}
+    expected_kinds = {
+        "auth_failure",
+        "operator_mfa_failure",
+        "record_denial",
+        "rate_limit",
+        "prompt_injection",
+        "otp_lockout",
+        "operator_mfa_lockout",
+        "consent_revocation",
+        "webhook_signature_failure",
+    }
+    assert signal_kinds == expected_kinds
+
+    # Threshold signals have threshold and alert_kind
+    auth_failure = next(s for s in body["signals"] if s["signal_kind"] == "auth_failure")
+    assert auth_failure["count_last_5m"] == 12
+    assert auth_failure["threshold"] == 10
+    assert auth_failure["alert_kind"] == "auth_failure_high"
+    assert auth_failure["is_deferred"] is False
+
+    # Irreversible signals have no threshold but have alert_kind
+    otp_lockout = next(s for s in body["signals"] if s["signal_kind"] == "otp_lockout")
+    assert otp_lockout["count_last_5m"] == 1
+    assert otp_lockout["threshold"] is None
+    assert otp_lockout["alert_kind"] == "otp_lockout"
+    assert otp_lockout["is_deferred"] is False
+
+    # Webhook signature failure is deferred
+    webhook = next(s for s in body["signals"] if s["signal_kind"] == "webhook_signature_failure")
+    assert webhook["count_last_5m"] == 0
+    assert webhook["threshold"] is None
+    assert webhook["alert_kind"] == "webhook_signature_failure"
+    assert webhook["is_deferred"] is True
+    assert webhook["deferred_reason"] == "No inbound webhook exists"
+
+    # CSP aggregates
+    assert len(body["csp_aggregates"]) == 2
+    assert body["csp_aggregates"][0]["directive"] == "script-src"
+    assert body["csp_aggregates"][0]["disposition"] == "enforce"
+    assert body["csp_aggregates"][0]["blocked_source"] == "https://evil.example.com"
+    assert body["csp_aggregates"][0]["count"] == 5
+
+    # Prompt injection count
+    assert body["prompt_injection_count"] == 2
+
+    # Webhook monitoring status
+    assert body["webhook_monitoring_status"] == "deferred"
+    assert body["webhook_monitoring_reason"] == "No inbound webhook exists"
+
+
+def test_security_summary_empty_state_returns_zero_counts_and_empty_csp() -> None:
+    """Empty and degraded states: zero counts, empty CSP, but all signal kinds present."""
+    facade = StubObservabilityFacade()
+    facade.security_summary_empty = True
+    client = _client(facade)
+
+    response = client.get(SECURITY_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    body = response.json()
+
+    # All signal kinds present with zero counts
+    assert len(body["signals"]) == 9
+    for signal in body["signals"]:
+        assert signal["count_last_5m"] == 0
+
+    # No CSP aggregates
+    assert body["csp_aggregates"] == []
+
+    # Zero prompt injection count
+    assert body["prompt_injection_count"] == 0
+
+    # Webhook monitoring still deferred
+    assert body["webhook_monitoring_status"] == "deferred"
+    assert body["webhook_monitoring_reason"] == "No inbound webhook exists"
+
+
+def test_security_summary_no_phi_or_raw_reports() -> None:
+    """Response never contains PHI, raw CSP reports, or subject keys."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(SECURITY_PATH, headers=_operator()).json()
+
+    # No raw reports, no subject keys, no phone numbers, no free text
+    response_str = str(body)
+    assert "subject_key" not in response_str
+    assert "phone" not in response_str.lower()
+    assert "raw" not in response_str.lower()
+
+
+def test_security_route_refuses_anonymous_and_non_operator_callers() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    assert client.get(SECURITY_PATH).status_code == 401
+    assert client.get(SECURITY_PATH, headers=_bearer(_token(scope="patient"))).status_code == 403
+    assert facade.security_summary_calls == []
 
 
 def test_health_reports_dependencies_outbox_and_breakers() -> None:
@@ -2296,6 +2601,7 @@ _ALL_PATHS = [
     FUNNEL_PATH,
     ACTIVE_USERS_PATH,
     RETENTION_PATH,
+    SECURITY_PATH,
 ]
 
 
@@ -2340,6 +2646,7 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.deeplink_settings == []
         and facade.business_periods == []
         and facade.funnel_calls == []
+        and facade.security_summary_calls == []
     )
 
 

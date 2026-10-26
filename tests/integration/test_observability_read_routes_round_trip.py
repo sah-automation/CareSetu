@@ -111,6 +111,7 @@ BUSINESS_PATH = "/v1/operator/observability/business"
 FUNNEL_PATH = "/v1/operator/observability/product/funnel"
 ACTIVE_USERS_PATH = "/v1/operator/observability/product/active-users"
 RETENTION_PATH = "/v1/operator/observability/product/retention-cohorts"
+SECURITY_PATH = "/v1/operator/observability/security"
 
 
 async def _seed(connection: AsyncConnection) -> None:
@@ -222,6 +223,48 @@ async def _seed_outbox(connection: AsyncConnection) -> None:
     )
 
 
+async def _seed_security(connection: AsyncConnection) -> None:
+    """Security signals and CSP aggregates for the security summary route.
+
+    Uses the last 5 minutes as the window, so we seed minute_ts values within
+    that window.
+    """
+    from datetime import UTC
+
+    now = datetime.now(UTC)
+    minute_1 = now - timedelta(minutes=1)
+    minute_2 = now - timedelta(minutes=2)
+    minute_3 = now - timedelta(minutes=3)
+
+    # Security signals - various kinds with counts
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_security_signals "
+            "(minute_ts, signal_kind, subject_key, count) VALUES "
+            "(:m1, 'auth_failure', 'subject-hash-1', 12), "
+            "(:m2, 'auth_failure', 'subject-hash-2', 8), "
+            "(:m1, 'operator_mfa_failure', 'subject-hash-3', 3), "
+            "(:m3, 'rate_limit', 'subject-hash-4', 7), "
+            "(:m2, 'prompt_injection', '', 2), "
+            "(:m1, 'otp_lockout', 'subject-hash-5', 1), "
+            "(:m3, 'consent_revocation', 'subject-hash-6', 1)"
+        ),
+        {"m1": minute_1, "m2": minute_2, "m3": minute_3},
+    )
+
+    # CSP aggregates for today
+    today = now.date()
+    await connection.execute(
+        text(
+            "INSERT INTO observability.observability_csp_aggregates "
+            "(aggregate_date, directive, disposition, blocked_source, document_uri, count) VALUES "
+            "(:today, 'script-src', 'enforce', 'https://evil.example.com', '/app', 5), "
+            "(:today, 'img-src', 'report-only', '', '/app', 2)"
+        ),
+        {"today": today},
+    )
+
+
 @pytest_asyncio.fixture
 async def seeded_engine(engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
     """The truncated engine with the seeded observability aggregates in it."""
@@ -237,6 +280,14 @@ async def rolled_engine(seeded_engine: AsyncEngine) -> AsyncIterator[AsyncEngine
         await _seed_rollup_and_alerts(connection)
         await _seed_outbox(connection)
     yield seeded_engine
+
+
+@pytest_asyncio.fixture
+async def secured_engine(rolled_engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
+    """The rolled engine plus security signals and CSP aggregates."""
+    async with rolled_engine.begin() as connection:
+        await _seed_security(connection)
+    yield rolled_engine
 
 
 def _token(scope: str = "operator") -> str:
@@ -1000,6 +1051,120 @@ async def test_deeplinks_with_no_vendor_configured_answer_absent_links(
     assert response.json() == {}
 
 
+# ------------------------------------------------------------- security (#782)
+
+
+async def test_security_summary_matches_seeded_signals_and_csp(
+    secured_engine: AsyncEngine, database_url: str
+) -> None:
+    """Security posture summary against real seeded data.
+
+    Asserts auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+    prompt-injection counts, and webhook monitoring status.
+    """
+    from app.config import (
+        DEFAULT_SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD,
+        DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD,
+        DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD,
+        DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD,
+    )
+
+    with _client(database_url) as client:
+        body = client.get(SECURITY_PATH, headers=_bearer()).json()
+
+    # All 9 signal kinds present
+    assert len(body["signals"]) == 9
+    signal_kinds = {s["signal_kind"] for s in body["signals"]}
+    expected_kinds = {
+        "auth_failure",
+        "operator_mfa_failure",
+        "record_denial",
+        "rate_limit",
+        "prompt_injection",
+        "otp_lockout",
+        "operator_mfa_lockout",
+        "consent_revocation",
+        "webhook_signature_failure",
+    }
+    assert signal_kinds == expected_kinds
+
+    # auth_failure: 12 + 8 = 20 in last 5 minutes
+    auth_failure = next(s for s in body["signals"] if s["signal_kind"] == "auth_failure")
+    assert auth_failure["count_last_5m"] == 20
+    assert auth_failure["threshold"] == DEFAULT_SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD
+    assert auth_failure["alert_kind"] == "auth_failure_high"
+    assert auth_failure["is_deferred"] is False
+
+    # operator_mfa_failure: 3
+    mfa_failure = next(s for s in body["signals"] if s["signal_kind"] == "operator_mfa_failure")
+    assert mfa_failure["count_last_5m"] == 3
+    assert mfa_failure["threshold"] == DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD
+    assert mfa_failure["alert_kind"] == "operator_mfa_failure_high"
+
+    # rate_limit: 7
+    rate_limit = next(s for s in body["signals"] if s["signal_kind"] == "rate_limit")
+    assert rate_limit["count_last_5m"] == 7
+    assert rate_limit["threshold"] == DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD
+    assert rate_limit["alert_kind"] == "rate_limit_high"
+
+    # prompt_injection: 2
+    prompt_inj = next(s for s in body["signals"] if s["signal_kind"] == "prompt_injection")
+    assert prompt_inj["count_last_5m"] == 2
+    assert prompt_inj["threshold"] == DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD
+    assert prompt_inj["alert_kind"] == "prompt_injection_high"
+
+    # otp_lockout: 1 (irreversible, no threshold)
+    otp_lockout = next(s for s in body["signals"] if s["signal_kind"] == "otp_lockout")
+    assert otp_lockout["count_last_5m"] == 1
+    assert otp_lockout["threshold"] is None
+    assert otp_lockout["alert_kind"] == "otp_lockout"
+
+    # consent_revocation: 1 (irreversible, no threshold)
+    consent_rev = next(s for s in body["signals"] if s["signal_kind"] == "consent_revocation")
+    assert consent_rev["count_last_5m"] == 1
+    assert consent_rev["threshold"] is None
+    assert consent_rev["alert_kind"] == "consent_revocation"
+
+    # CSP aggregates
+    assert len(body["csp_aggregates"]) == 2
+    script_src = next(c for c in body["csp_aggregates"] if c["directive"] == "script-src")
+    assert script_src["disposition"] == "enforce"
+    assert script_src["blocked_source"] == "https://evil.example.com"
+    assert script_src["count"] == 5
+
+    img_src = next(c for c in body["csp_aggregates"] if c["directive"] == "img-src")
+    assert img_src["disposition"] == "report-only"
+    assert img_src["count"] == 2
+
+    # Prompt injection count from signals
+    assert body["prompt_injection_count"] == 2
+
+    # Webhook monitoring deferred
+    assert body["webhook_monitoring_status"] == "deferred"
+    assert body["webhook_monitoring_reason"] == "No inbound webhook exists"
+
+
+async def test_security_summary_empty_state(rolled_engine: AsyncEngine, database_url: str) -> None:
+    """Empty security summary: zero counts, empty CSP, all signal kinds present."""
+    with _client(database_url) as client:
+        body = client.get(SECURITY_PATH, headers=_bearer()).json()
+
+    assert len(body["signals"]) == 9
+    for signal in body["signals"]:
+        assert signal["count_last_5m"] == 0
+    assert body["csp_aggregates"] == []
+    assert body["prompt_injection_count"] == 0
+    assert body["webhook_monitoring_status"] == "deferred"
+
+
+async def test_security_route_refuses_anonymous_and_non_operator(
+    rolled_engine: AsyncEngine, database_url: str
+) -> None:
+    with _client(database_url) as client:
+        assert client.get(SECURITY_PATH).status_code == 401
+        assert client.get(SECURITY_PATH, headers=_bearer("patient")).status_code == 403
+
+
 async def test_c1b_routes_refuse_anonymous_and_non_operator_callers(
     rolled_engine: AsyncEngine, database_url: str
 ) -> None:
@@ -1011,6 +1176,7 @@ async def test_c1b_routes_refuse_anonymous_and_non_operator_callers(
             HEALTH_PATH,
             ALERTS_PATH,
             DEEPLINKS_PATH,
+            SECURITY_PATH,
         ):
             assert client.get(path).status_code == 401
             assert client.get(path, headers=_bearer("patient")).status_code == 403
