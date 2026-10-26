@@ -274,6 +274,9 @@ DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD = 5
 DEFAULT_SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD = 10
 DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD = 50
 DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD = 10
+# Security summary (PHASE-14B Batch 2, #781): the window for the operator
+# security posture summary read. Configuration per coding-standards §9.1.
+DEFAULT_SECURITY_SUMMARY_WINDOW_MINUTES = 5
 # Prompt-injection heuristics (PHASE-14B Batch 2, #780): advisory text checks on
 # the transcript immediately before it leaves for the structuring provider. Off
 # until a deployment opts in, like every other new safety behavior in this
@@ -585,6 +588,9 @@ class Settings:
     # and emits a PHI-free finding. Off by default; the detector threshold above
     # only governs the alert scan over whatever signals arrive.
     prompt_injection_heuristics_enabled: bool = DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED
+    # Security summary (PHASE-14B Batch 2, #781): the window for the operator
+    # security posture summary read. Configuration per coding-standards §9.1.
+    security_summary_window_minutes: int = DEFAULT_SECURITY_SUMMARY_WINDOW_MINUTES
     # Batch-3 observability feature gates (#753): additive and disabled by
     # default, one gate per feature that shipped in this batch, so a deployment
     # opts in per feature and local dev / tests / CI run without them. The A5
@@ -772,6 +778,8 @@ class Settings:
             raise ValueError("security_detector_window_minutes must be positive")
         if self.security_detector_cooldown_seconds <= 0:
             raise ValueError("security_detector_cooldown_seconds must be positive")
+        if self.security_summary_window_minutes <= 0:
+            raise ValueError("security_summary_window_minutes must be positive")
         for name, value in (
             (
                 "security_detector_auth_failure_threshold",
@@ -1282,6 +1290,9 @@ def get_settings() -> Settings:
         ),
         prompt_injection_heuristics_enabled=_env_bool(
             "PROMPT_INJECTION_HEURISTICS_ENABLED", DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED
+        ),
+        security_summary_window_minutes=_env_int(
+            "SECURITY_SUMMARY_WINDOW_MINUTES", DEFAULT_SECURITY_SUMMARY_WINDOW_MINUTES
         ),
         evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
         annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),

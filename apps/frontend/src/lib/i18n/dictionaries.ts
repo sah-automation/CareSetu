@@ -1077,6 +1077,7 @@ const en = {
     usage: "Usage",
     quality: "Quality",
     health: "Health",
+    security: "Security",
     settings: "Settings",
     // #538: section-group labels for the redesigned full-shell sidebar. Nav
     // items declare a group via NavItemDef.group; the sidebar composes ordered
@@ -3063,6 +3064,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       usage: "उपयोग",
       quality: "गुणवत्ता",
       health: "स्वास्थ्य",
+      security: "सुरक्षा",
       settings: "सेटिंग्स",
       sections: {
         work: "कार्य",

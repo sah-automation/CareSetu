@@ -471,7 +471,11 @@ class IdentityFacade:
             # requested tier, defaulting to the non-admin ``operator`` tier
             # (spec #761). ON CONFLICT keeps a duplicate invite from changing an
             # existing admin's authority.
-            created_by_val = invited_by_identity_id if invited_by_identity_id and invited_by_identity_id != 0 else None
+            created_by_val = (
+                invited_by_identity_id
+                if invited_by_identity_id and invited_by_identity_id != 0
+                else None
+            )
             updated_by_val = created_by_val
             # Only set if inviter actually exists to satisfy FK
             if created_by_val is not None:

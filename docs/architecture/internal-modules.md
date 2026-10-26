@@ -822,6 +822,7 @@ _(Each module owns its data, its schema, and its state transitions; cross-module
 | `record.accessed`                              | `MOD-003` (LHR)             | `MOD-011`, `MOD-013`                                                                                                                | JSON           | At-least-once              |
 | `record.denied`                                | `MOD-003` (LHR)             | `MOD-011`                                                                                                                           | JSON           | At-least-once              |
 | `audit.tamper_detected`                        | `MOD-011` (trigger)         | `MOD-013` (alert feed; delivery deferred)                                                                                           | JSON           | At-least-once              |
+| `webhook_signature_failure`                    | (deferred)                  | `MOD-013` (security signals - deferred, #781)                                                                                       | JSON           | At-least-once              |
 
 > `intake.captured` carries `patient_id` (int), `mode` (`voice` | `text`), and `duration_s` (float | None) alongside `intake_id`; `duration_s` is the audio duration in seconds for voice intake, None for text (T06 #370).
 

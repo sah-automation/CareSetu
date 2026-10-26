@@ -102,6 +102,7 @@ from modules.observability.facade import (
     QualityReport,
     ReliabilityReport,
     RetentionCohortsRead,
+    SecuritySummary,
     SystemHealth,
     ThroughputReport,
     UsageReport,
@@ -473,6 +474,29 @@ async def read_health(
     del principal
     settings = _settings(request)
     return await _facade(request).get_health(cache_configured=bool(settings.redis_url.strip()))
+
+
+@router.get(
+    "/v1/operator/observability/security",
+    response_model=SecuritySummary,
+    status_code=status.HTTP_200_OK,
+    summary="Read the operator security posture summary (operator only)",
+)
+async def read_security(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> SecuritySummary:
+    """Security posture summary: auth/lockout trends, consent/rate-limit anomalies,
+    CSP violations, prompt-injection counts, and webhook monitoring status.
+
+    PHASE-14B Batch 2 (#781): webhook-signature monitoring is deferred and shows
+    a deferred status rather than live data.
+    """
+    del principal
+    settings = _settings(request)
+    return await _facade(request).get_security_summary(
+        window_minutes=settings.security_summary_window_minutes, settings=settings
+    )
 
 
 @router.get(

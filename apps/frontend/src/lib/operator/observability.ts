@@ -2239,3 +2239,85 @@ export async function fetchDeeplinks(
     "The API returned an unexpected observability deeplinks shape",
   );
 }
+
+// ------------------------------------------------ the security lens (#781)
+
+/** One security signal kind's recent count and status. */
+export interface SecuritySignalView {
+  signal_kind: string;
+  count_last_5m: number;
+  threshold: number | null;
+  alert_kind: string | null;
+  is_deferred: boolean;
+  deferred_reason: string | null;
+}
+
+/** One CSP directive's daily violation count. */
+export interface CspAggregateView {
+  directive: string;
+  disposition: string;
+  blocked_source: string;
+  count: number;
+}
+
+/**
+ * Operator security posture summary (PHASE-14B Batch 2, #781).
+ *
+ * Shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+ * prompt-injection counts, and webhook monitoring status.
+ */
+export interface SecuritySummary {
+  signals: SecuritySignalView[];
+  csp_aggregates: CspAggregateView[];
+  prompt_injection_count: number;
+  webhook_monitoring_status: string;
+  webhook_monitoring_reason: string;
+}
+
+function isSecuritySignalView(value: unknown): value is SecuritySignalView {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "signal_kind",
+      "count_last_5m",
+      "threshold",
+      "alert_kind",
+      "is_deferred",
+      "deferred_reason",
+    ])
+  );
+}
+
+function isCspAggregateView(value: unknown): value is CspAggregateView {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["directive", "disposition", "blocked_source", "count"])
+  );
+}
+
+function isSecuritySummary(value: unknown): value is SecuritySummary {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "signals",
+      "csp_aggregates",
+      "prompt_injection_count",
+      "webhook_monitoring_status",
+      "webhook_monitoring_reason",
+    ]) &&
+    isArrayOf(value.signals, isSecuritySignalView) &&
+    isArrayOf(value.csp_aggregates, isCspAggregateView)
+  );
+}
+
+/**
+ * Read the operator security posture summary (#781).
+ */
+export async function fetchSecurity(): Promise<SecuritySummary> {
+  const data = await request<unknown>(`${OBSERVABILITY_BASE}/security`);
+  return guardShape(
+    data,
+    isSecuritySummary,
+    "The API returned an unexpected security summary shape",
+  );
+}
