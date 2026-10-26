@@ -129,6 +129,17 @@ ALERT_KINDS: frozenset[str] = frozenset(
         "latency_objective_breach",
         "audit_tamper",
         "ai_egress",
+        # Security detector (#779): five threshold kinds and four irreversible
+        # incident kinds, including the reserved webhook-signature kind (#781).
+        "auth_failure_high",
+        "operator_mfa_failure_high",
+        "record_denial_high",
+        "rate_limit_high",
+        "prompt_injection_high",
+        "otp_lockout",
+        "operator_mfa_lockout",
+        "consent_revocation",
+        "webhook_signature_failure",
     }
 )
 
