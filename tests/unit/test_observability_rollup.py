@@ -26,15 +26,24 @@ from modules.observability.domain.consumer import (
 )
 from modules.observability.domain.rollup import (
     ALERT_KIND_AI_BUDGET,
+    ALERT_KIND_AUTH_FAILURE_HIGH,
     ALERT_KIND_BREAKER_OPEN,
+    ALERT_KIND_CONSENT_REVOCATION,
     ALERT_KIND_COST_OUTLIER,
     ALERT_KIND_ERROR_RATE_HIGH,
     ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+    ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+    ALERT_KIND_OPERATOR_MFA_LOCKOUT,
+    ALERT_KIND_OTP_LOCKOUT,
     ALERT_KIND_OUTBOX_BACKLOG,
     ALERT_KIND_OUTBOX_DEAD_LETTER,
+    ALERT_KIND_PROMPT_INJECTION_HIGH,
     ALERT_KIND_PROVIDER_HEALTH_DROP,
     ALERT_KIND_PROVIDER_RATE_LIMITED,
     ALERT_KIND_QUEUE_AGE,
+    ALERT_KIND_RATE_LIMIT_HIGH,
+    ALERT_KIND_RECORD_DENIAL_HIGH,
+    ALERT_KIND_WEBHOOK_SIGNATURE_FAILURE,
     BREAKER_STATE_CLOSED,
     BREAKER_STATE_OPEN,
     COST_OUTLIER_BASELINE_DAYS,
@@ -577,6 +586,15 @@ def test_the_two_alert_vocabularies_are_disjoint_and_cover_every_rollup_kind() -
         ALERT_KIND_ERROR_RATE_HIGH,
         ALERT_KIND_PROVIDER_RATE_LIMITED,
         ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+        ALERT_KIND_AUTH_FAILURE_HIGH,
+        ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+        ALERT_KIND_RECORD_DENIAL_HIGH,
+        ALERT_KIND_RATE_LIMIT_HIGH,
+        ALERT_KIND_PROMPT_INJECTION_HIGH,
+        ALERT_KIND_OTP_LOCKOUT,
+        ALERT_KIND_OPERATOR_MFA_LOCKOUT,
+        ALERT_KIND_CONSENT_REVOCATION,
+        ALERT_KIND_WEBHOOK_SIGNATURE_FAILURE,
     }
 
     assert not RESOLVABLE_ALERT_KINDS & NON_RESOLVABLE_ALERT_KINDS
@@ -597,6 +615,11 @@ def test_the_two_alert_vocabularies_are_disjoint_and_cover_every_rollup_kind() -
         ALERT_KIND_ERROR_RATE_HIGH,
         ALERT_KIND_PROVIDER_RATE_LIMITED,
         ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+        ALERT_KIND_AUTH_FAILURE_HIGH,
+        ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+        ALERT_KIND_RECORD_DENIAL_HIGH,
+        ALERT_KIND_RATE_LIMIT_HIGH,
+        ALERT_KIND_PROMPT_INJECTION_HIGH,
     ):
         assert alert_kind_resolves(kind), kind
 
@@ -612,21 +635,33 @@ def test_the_auto_resolve_policy_is_explicit_about_every_kind() -> None:
     # Standing conditions: a level that returns to normal.
     for kind in (
         ALERT_KIND_AI_BUDGET,
-        ALERT_KIND_BREAKER_OPEN,
         ALERT_KIND_OUTBOX_BACKLOG,
         ALERT_KIND_OUTBOX_DEAD_LETTER,
         ALERT_KIND_QUEUE_AGE,
+        ALERT_KIND_BREAKER_OPEN,
         ALERT_KIND_COST_OUTLIER,
         ALERT_KIND_ERROR_RATE_HIGH,
         ALERT_KIND_PROVIDER_RATE_LIMITED,
         ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+        ALERT_KIND_AUTH_FAILURE_HIGH,
+        ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+        ALERT_KIND_RECORD_DENIAL_HIGH,
+        ALERT_KIND_RATE_LIMIT_HIGH,
+        ALERT_KIND_PROMPT_INJECTION_HIGH,
     ):
         assert kind in RESOLVABLE_ALERT_KINDS, kind
         assert kind not in NON_RESOLVABLE_ALERT_KINDS, kind
 
-    # The one exception, and the reason the deny-set exists at all.
-    assert {ALERT_KIND_PROVIDER_HEALTH_DROP} == NON_RESOLVABLE_ALERT_KINDS
-    assert not alert_kind_resolves(ALERT_KIND_PROVIDER_HEALTH_DROP)
+    # The exceptions, and the reason the deny-set exists at all.
+    assert {
+        ALERT_KIND_PROVIDER_HEALTH_DROP,
+        ALERT_KIND_OTP_LOCKOUT,
+        ALERT_KIND_OPERATOR_MFA_LOCKOUT,
+        ALERT_KIND_CONSENT_REVOCATION,
+        ALERT_KIND_WEBHOOK_SIGNATURE_FAILURE,
+    } == NON_RESOLVABLE_ALERT_KINDS
+    for kind in NON_RESOLVABLE_ALERT_KINDS:
+        assert not alert_kind_resolves(kind), kind
 
 
 def test_the_resolve_step_reads_both_vocabularies_and_unknown_kinds_resolve_to_nothing() -> None:

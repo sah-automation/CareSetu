@@ -76,7 +76,13 @@ from modules.iam.adapters import register_handlers as iam_register_handlers
 from modules.intake.adapters import register_handlers as intake_register_handlers
 from modules.notify.adapters import register_handlers as notify_register_handlers
 from modules.observability.adapters import register_handlers as observability_register_handlers
-from modules.observability.facade import drain_error_buffer, drain_http_counter
+from modules.observability.facade import (
+    SECURITY_SCAN_INTERVAL_SECONDS,
+    SecurityDetectorThresholds,
+    drain_error_buffer,
+    drain_http_counter,
+    run_security_scan,
+)
 from modules.ops.adapters import register_handlers as ops_register_handlers
 from modules.partner.adapters import register_handlers as partner_register_handlers
 from modules.partner.facade import PartnerFacade
@@ -433,12 +439,55 @@ async def _run_http_counter_drain(engine: AsyncEngine | None = None) -> None:
         )
 
 
+async def _run_security_scan(engine: AsyncEngine | None = None) -> None:
+    """Run one security detector pass over the recent signal window (#779).
+
+    The pass reads already-aggregated signals and writes alerts through the
+    module facade, so it shares the worker's engine when the scheduler supplies
+    one and builds a short-lived engine when invoked on its own. A failure is
+    logged and swallowed: the signal rows remain in the table, so the next
+    five-minute pass retries, while letting the exception reach APScheduler
+    would kill the recurring job over a transient database blip.
+    """
+    settings = get_settings()
+    thresholds = SecurityDetectorThresholds(
+        auth_failure=settings.security_detector_auth_failure_threshold,
+        operator_mfa_failure=settings.security_detector_operator_mfa_failure_threshold,
+        record_denial=settings.security_detector_record_denial_threshold,
+        rate_limit=settings.security_detector_rate_limit_threshold,
+        prompt_injection=settings.security_detector_prompt_injection_threshold,
+        window_minutes=settings.security_detector_window_minutes,
+        cooldown_seconds=settings.security_detector_cooldown_seconds,
+    )
+    owned = engine is None
+    scan_engine = engine if engine is not None else create_async_engine(settings.database_url)
+    try:
+        with start_span(
+            "scheduler.security_detector_scan",
+            attributes={"job.name": "security-detector-scan", "job.system": "apscheduler"},
+        ):
+            report = await run_security_scan(scan_engine, thresholds=thresholds)
+    except Exception:
+        logger.exception("security detector scan failed; next pass retries")
+        return
+    finally:
+        if owned:
+            await scan_engine.dispose()
+    if report.alerts_raised or report.alerts_resolved:
+        logger.info(
+            "security detector scan raised %d alert(s) and resolved %d",
+            report.alerts_raised,
+            report.alerts_resolved,
+        )
+
+
 def build_scheduler(
     settings: Settings,
     *,
     sweep_callback: Callable[[], Awaitable[None]] = _run_credential_sweep,
     drain_callback: Callable[[], Awaitable[None]] = _run_error_drain,
     counter_drain_callback: Callable[[], Awaitable[None]] = _run_http_counter_drain,
+    security_scan_callback: Callable[[], Awaitable[None]] = _run_security_scan,
 ) -> AsyncIOScheduler:
     """Build the worker's periodic-job scheduler (PHASE-6 T04a, #315).
 
@@ -473,6 +522,12 @@ def build_scheduler(
     information (a bucket split across two passes still lands on one row, since the
     upsert ADDS) and firing slower only makes the operator's "recent past" stale.
 
+    The fourth is PHASE-14B Batch 2's security detector (#779), also on an
+    ``IntervalTrigger`` but fixed at five minutes: it reads one shared signal
+    table, not in-process state, and its cadence is the acceptance criterion.
+    Like the other gates it is registered ONLY when
+    ``settings.security_detection_enabled`` is on.
+
     Every registered job uses ``coalesce`` + a fixed job id so late or missed
     firings cannot stack duplicate passes across a sleep, and ``max_instances=1``
     so a drain that is slower than its interval skips rather than overlaps.
@@ -505,6 +560,19 @@ def build_scheduler(
             IntervalTrigger(seconds=settings.http_counter_drain_interval_seconds),
             id="http-counter-fold",
             name="observability-http-counter-fold",
+            coalesce=True,
+            max_instances=1,
+        )
+    # #779: the security detector is region-agnostic and reads the shared signal
+    # table, so it is an interval job like the drains. Its five-minute cadence is
+    # fixed by the batch spec rather than a setting; the window, cooldown and
+    # thresholds beside it are configurable.
+    if settings.security_detection_enabled:
+        scheduler.add_job(
+            security_scan_callback,
+            IntervalTrigger(seconds=SECURITY_SCAN_INTERVAL_SECONDS),
+            id="security-detector-scan",
+            name="security-detector-scan",
             coalesce=True,
             max_instances=1,
         )
@@ -578,6 +646,7 @@ async def run_worker_until_stopped(
         resolved_settings,
         drain_callback=partial(_run_error_drain, engine=engine),
         counter_drain_callback=partial(_run_http_counter_drain, engine=engine),
+        security_scan_callback=partial(_run_security_scan, engine=engine),
     )
     try:
         async with engine.connect() as connection:

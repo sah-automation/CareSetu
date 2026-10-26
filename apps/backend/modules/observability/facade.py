@@ -207,6 +207,10 @@ from modules.observability.domain.rollup import (
     provider_status,
     ratio,
 )
+from modules.observability.domain.security_detector import (
+    SECURITY_SCAN_INTERVAL_SECONDS,
+    SecurityDetectorThresholds,
+)
 from modules.observability.error_stream import ErrorDrainReport, drain_error_buffer
 from modules.observability.http_counter_stream import (
     HttpCounterDrainReport,
@@ -240,6 +244,7 @@ from modules.observability.schema.models import (
     observability_rollup_runs,
     observability_security_signals,
 )
+from modules.observability.security_detector import SecurityScanReport, run_security_scan
 from observability.langfuse_metrics import LangfuseDailyMetrics, pull_daily_metrics
 from observability.logging import SERVICE_API
 from observability.trace_ids import clamp_trace_id
@@ -442,6 +447,7 @@ __all__ = [
     "REQUESTS_PER_ACTIVE_USER_CONVENTION",
     "ROLLUP_MODE_BACKFILL",
     "ROLLUP_MODE_DAILY",
+    "SECURITY_SCAN_INTERVAL_SECONDS",
     "STICKINESS_CONVENTION",
     "UNAVAILABLE_REASONS",
     "UNAVAILABLE_REVENUE_NOT_CAPTURED",
@@ -492,6 +498,8 @@ __all__ = [
     "RollupRunState",
     "RollupThresholds",
     "RouteThroughputRow",
+    "SecurityDetectorThresholds",
+    "SecurityScanReport",
     "SystemHealth",
     "TaskTypeSpend",
     "ThroughputPoint",
@@ -528,6 +536,7 @@ __all__ = [
     "record_alert_event",
     "record_care_attribution_edge",
     "run_rollup",
+    "run_security_scan",
     "window_for",
 ]
 

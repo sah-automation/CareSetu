@@ -259,6 +259,21 @@ DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS = 900
 DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE = Decimal("3")
 DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS = 3
 DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT = 1
+# Security detector (PHASE-14B Batch 2, #779): a worker scan over the recent
+# ``observability_security_signals`` rows. Off until a deployment opts in, like
+# every other new safety behavior in this batch. The window bounds how much
+# history one pass counts; the cooldown stops a cleared-then-recurring condition
+# from raising a second alert immediately; each threshold is the count within the
+# window that raises that signal kind's alert. Every value is a limit an operator
+# may need to tune, so every value is configuration (coding-standards §9.1).
+DEFAULT_SECURITY_DETECTION_ENABLED = False
+DEFAULT_SECURITY_DETECTOR_WINDOW_MINUTES = 15
+DEFAULT_SECURITY_DETECTOR_COOLDOWN_SECONDS = 1800
+DEFAULT_SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD = 20
+DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD = 5
+DEFAULT_SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD = 10
+DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD = 50
+DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD = 10
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -543,6 +558,23 @@ class Settings:
     observability_provider_rate_limit_alert_count: int = (
         DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT
     )
+    # Security detector (PHASE-14B Batch 2, #779): the scan gate and its
+    # thresholds. Off by default so deploying this batch changes no behavior
+    # until the operator opts in.
+    security_detection_enabled: bool = DEFAULT_SECURITY_DETECTION_ENABLED
+    security_detector_window_minutes: int = DEFAULT_SECURITY_DETECTOR_WINDOW_MINUTES
+    security_detector_cooldown_seconds: int = DEFAULT_SECURITY_DETECTOR_COOLDOWN_SECONDS
+    security_detector_auth_failure_threshold: int = DEFAULT_SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD
+    security_detector_operator_mfa_failure_threshold: int = (
+        DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD
+    )
+    security_detector_record_denial_threshold: int = (
+        DEFAULT_SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD
+    )
+    security_detector_rate_limit_threshold: int = DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD
+    security_detector_prompt_injection_threshold: int = (
+        DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD
+    )
     # Batch-3 observability feature gates (#753): additive and disabled by
     # default, one gate per feature that shipped in this batch, so a deployment
     # opts in per feature and local dev / tests / CI run without them. The A5
@@ -726,6 +758,34 @@ class Settings:
             # Zero refusals is the ABSENCE of the condition, not a mild form of
             # it; a threshold of zero would make the alert permanent.
             raise ValueError("observability_provider_rate_limit_alert_count must be positive")
+        if self.security_detector_window_minutes <= 0:
+            raise ValueError("security_detector_window_minutes must be positive")
+        if self.security_detector_cooldown_seconds <= 0:
+            raise ValueError("security_detector_cooldown_seconds must be positive")
+        for name, value in (
+            (
+                "security_detector_auth_failure_threshold",
+                self.security_detector_auth_failure_threshold,
+            ),
+            (
+                "security_detector_operator_mfa_failure_threshold",
+                self.security_detector_operator_mfa_failure_threshold,
+            ),
+            (
+                "security_detector_record_denial_threshold",
+                self.security_detector_record_denial_threshold,
+            ),
+            (
+                "security_detector_rate_limit_threshold",
+                self.security_detector_rate_limit_threshold,
+            ),
+            (
+                "security_detector_prompt_injection_threshold",
+                self.security_detector_prompt_injection_threshold,
+            ),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
         parse_ai_pricing_table(self.ai_pricing_table)
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
@@ -1180,6 +1240,35 @@ def get_settings() -> Settings:
         observability_provider_rate_limit_alert_count=_env_int(
             "OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT",
             DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT,
+        ),
+        security_detection_enabled=_env_bool(
+            "SECURITY_DETECTION_ENABLED", DEFAULT_SECURITY_DETECTION_ENABLED
+        ),
+        security_detector_window_minutes=_env_int(
+            "SECURITY_DETECTOR_WINDOW_MINUTES", DEFAULT_SECURITY_DETECTOR_WINDOW_MINUTES
+        ),
+        security_detector_cooldown_seconds=_env_int(
+            "SECURITY_DETECTOR_COOLDOWN_SECONDS", DEFAULT_SECURITY_DETECTOR_COOLDOWN_SECONDS
+        ),
+        security_detector_auth_failure_threshold=_env_int(
+            "SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD,
+        ),
+        security_detector_operator_mfa_failure_threshold=_env_int(
+            "SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD,
+        ),
+        security_detector_record_denial_threshold=_env_int(
+            "SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD,
+        ),
+        security_detector_rate_limit_threshold=_env_int(
+            "SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD,
+        ),
+        security_detector_prompt_injection_threshold=_env_int(
+            "SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD,
         ),
         evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
         annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),
