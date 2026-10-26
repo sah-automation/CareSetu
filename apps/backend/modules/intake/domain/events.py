@@ -27,10 +27,11 @@ from __future__ import annotations
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
@@ -43,6 +44,7 @@ from bus.events import (
     EVENT_PRE_SUMMARY_LOW_CONFIDENCE,
     EVENT_PRE_SUMMARY_READY,
 )
+from modules.intake.domain.prompt_injection import MAX_SCORE, PromptInjectionCategory
 
 PRODUCER_MODULE = "intake"
 
@@ -238,6 +240,20 @@ class AiEgressRecordedPayload(BaseModel):
     intake_id: int
     ai_job_id: int
     reason: str
+
+
+class AiEgressPromptInjectionDetectedPayload(BaseModel):
+    """Subject of ``ai_egress.prompt_injection_detected``: the screen matched.
+
+    The advisory finding from the intake pipeline's pre-egress screen (#780).
+    It carries category names and a bounded score only - never the transcript,
+    a matched substring, an intake id, or a patient id - so a consumer cannot
+    reconstruct the screened content. MOD-013 records one minute-granular
+    ``prompt_injection`` security signal per finding.
+    """
+
+    categories: list[PromptInjectionCategory] = Field(min_length=1)
+    score: int = Field(ge=0, le=MAX_SCORE)
 
 
 class IntakeDoctorAssignedPayload(BaseModel):
@@ -506,6 +522,18 @@ def ai_egress_recorded_envelope(
         event_type=EVENT_AI_EGRESS_RECORDED,
         producer=PRODUCER_MODULE,
         payload=AiEgressRecordedPayload(intake_id=intake_id, ai_job_id=ai_job_id, reason=reason),
+    )
+
+
+def ai_egress_prompt_injection_detected_envelope(
+    *, categories: tuple[PromptInjectionCategory, ...], score: int
+) -> Envelope[AiEgressPromptInjectionDetectedPayload]:
+    """Build the ``ai_egress.prompt_injection_detected`` advisory envelope."""
+    return Envelope[AiEgressPromptInjectionDetectedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
+        producer=PRODUCER_MODULE,
+        payload=AiEgressPromptInjectionDetectedPayload(categories=list(categories), score=score),
     )
 
 

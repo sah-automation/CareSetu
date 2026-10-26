@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
     EVENT_CONSENT_REVOKED,
     EVENT_OPERATOR_MFA_FAILED,
     EVENT_OTP_FAILED,
@@ -42,6 +43,9 @@ from modules.iam.domain.events import (
     otp_failed_envelope,
     patient_auth_failed_envelope,
 )
+from modules.intake.domain.events import (
+    ai_egress_prompt_injection_detected_envelope,
+)
 from modules.observability.adapters import register_handlers as register_obs_handlers
 from modules.observability.domain.consumer import (
     ConsentLifecycleTelemetryPayload,
@@ -50,12 +54,16 @@ from modules.observability.domain.consumer import (
     OtpFailedTelemetryPayload,
     PatientAuthFailedEventPayload,
     PatientAuthFailedTelemetryPayload,
+    PromptInjectionDetectedTelemetryPayload,
     RecordDeniedTelemetryPayload,
 )
 from modules.observability.domain.pseudonym import (
     ACTOR_KIND_DOCTOR,
     ACTOR_KIND_PATIENT,
     actor_key,
+)
+from modules.observability.domain.security_detector import (
+    SECURITY_SIGNAL_PROMPT_INJECTION,
 )
 from modules.observability.facade import accumulate_security_signal
 
@@ -78,6 +86,7 @@ def test_register_handlers_registers_security_signal_consumers() -> None:
     assert len(registry.handlers_for(EVENT_OTP_FAILED)) >= 1
     assert len(registry.handlers_for(EVENT_RECORD_DENIED)) >= 1
     assert len(registry.handlers_for(EVENT_CONSENT_REVOKED)) >= 1
+    assert len(registry.handlers_for(EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED)) == 1
 
 
 def test_register_handlers_registers_unclaimed_payload_models() -> None:
@@ -216,6 +225,20 @@ def test_record_denied_payload_revalidates_into_security_mirror() -> None:
     assert not hasattr(mirror, "denial_reason")
     assert not hasattr(mirror, "scope")
     assert not hasattr(mirror, "accessed_at")
+
+
+def test_prompt_injection_payload_revalidates_into_the_narrow_mirror() -> None:
+    """#780: the security mirror carries categories and score only."""
+    envelope = ai_egress_prompt_injection_detected_envelope(
+        categories=("instruction_override", "system_prompt_probing"),
+        score=75,
+    )
+
+    mirror = PromptInjectionDetectedTelemetryPayload.model_validate(envelope.payload.model_dump())
+
+    assert mirror.categories == ["instruction_override", "system_prompt_probing"]
+    assert mirror.score == 75
+    assert set(mirror.model_dump()) == {"categories", "score"}
 
 
 def test_consent_revoked_payload_revalidates_into_lifecycle_mirror() -> None:
@@ -567,6 +590,51 @@ async def test_record_denial_handler_buckets_partner_actors_under_empty_key(
     args = accumulate.await_args.args
     assert args[2] == "record_denial"
     assert args[3] == ""
+
+
+@pytest.mark.asyncio
+async def test_prompt_injection_handler_accumulates_with_an_empty_subject_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finding names no actor, so it counts under the empty subject bucket.
+
+    Replaying the same ``event_id`` remains a ledger no-op.
+    """
+    registry = HandlerRegistry()
+    register_obs_handlers(registry)
+    handler = registry.handlers_for(EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED)[0]
+
+    engine = MagicMock()
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+    engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr("bus.handler_harness._delivery_engine", lambda: engine)
+
+    delivered: set[str] = set()
+    accumulate = AsyncMock()
+
+    async def fake_ledger(
+        conn: object, schema: str, envelope: Envelope[BaseModel], handler_result: object
+    ) -> bool:
+        del conn, schema, handler_result
+        if str(envelope.event_id) in delivered:
+            return False
+        delivered.add(str(envelope.event_id))
+        return True
+
+    monkeypatch.setattr("bus.handler_harness.record_consumed_event", fake_ledger)
+    monkeypatch.setattr("modules.observability.adapters.accumulate_security_signal", accumulate)
+
+    envelope = ai_egress_prompt_injection_detected_envelope(categories=("exfiltration",), score=55)
+
+    await handler(envelope)
+    assert accumulate.await_count == 1
+    args = accumulate.await_args.args
+    assert args[2] == SECURITY_SIGNAL_PROMPT_INJECTION
+    assert args[3] == ""
+
+    await handler(envelope)
+    assert accumulate.await_count == 1
 
 
 @pytest.mark.asyncio

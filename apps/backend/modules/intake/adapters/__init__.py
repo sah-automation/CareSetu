@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
@@ -43,6 +44,7 @@ from modules.intake.adapters.pipeline import (
     _run_structuring_pipeline,
 )
 from modules.intake.domain.events import (
+    AiEgressPromptInjectionDetectedPayload,
     AiEgressRecordedPayload,
     AiJobCompletedPayload,
     AiJobFailedPayload,
@@ -118,6 +120,7 @@ def register_handlers(registry: HandlerRegistry) -> None:
         (EVENT_AI_JOB_FAILED, AiJobFailedPayload),
         (EVENT_AI_JOB_QUEUED, AiJobQueuedPayload),
         (EVENT_AI_EGRESS_RECORDED, AiEgressRecordedPayload),
+        (EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED, AiEgressPromptInjectionDetectedPayload),
         (EVENT_INTAKE_DOCTOR_ASSIGNED, IntakeDoctorAssignedPayload),
         (EVENT_INTAKE_COMPOSER_OPENED, IntakeComposerOpenedPayload),
     ):

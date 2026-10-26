@@ -135,6 +135,12 @@ EVENT_AI_JOB_FAILED = "ai_job.failed"
 # Telemetry, deliberately NOT in ``REGULATED_ACT_TYPES``.
 EVENT_AI_JOB_QUEUED = "ai_job.queued"
 EVENT_AI_EGRESS_RECORDED = "ai_egress.recorded"
+# MOD-005 (intake): emitted when the advisory prompt-injection screen matches
+# before the structuring egress (#780). Advisory only - the pipeline proceeds.
+# The payload carries category names and a bounded score, never the transcript
+# or a matched substring. MOD-013 consumes it into the ``prompt_injection``
+# security signal. Telemetry, deliberately NOT in ``REGULATED_ACT_TYPES``.
+EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED = "ai_egress.prompt_injection_detected"
 # MOD-005 (intake): emitted at the moment a patient picks their doctor, in the
 # SAME transaction as the ``assigned_partner_id`` write (B4d, #720). Carries the
 # intake, patient and doctor references, so doctor attribution rides an event

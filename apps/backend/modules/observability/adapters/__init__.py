@@ -67,6 +67,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.config import get_settings
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
@@ -117,6 +118,7 @@ from modules.observability.domain.consumer import (
     PartnerVerificationStartedTelemetryPayload,
     PatientAuthFailedEventPayload,
     PatientAuthFailedTelemetryPayload,
+    PromptInjectionDetectedTelemetryPayload,
     RecordAccessTelemetryPayload,
     RecordDeniedTelemetryPayload,
     TamperDetectedTelemetryPayload,
@@ -129,6 +131,7 @@ from modules.observability.domain.product import (
     product_steps,
 )
 from modules.observability.domain.pseudonym import ACTOR_KIND_DOCTOR, ACTOR_KIND_PATIENT, actor_key
+from modules.observability.domain.security_detector import SECURITY_SIGNAL_PROMPT_INJECTION
 from modules.observability.facade import (
     OBSERVABILITY_SCHEMA,
     accumulate_ai_usage,
@@ -702,3 +705,33 @@ def register_handlers(registry: HandlerRegistry) -> None:
         )
 
     registry.register(EVENT_RECORD_DENIED, record_record_denial_signal)
+
+    async def record_prompt_injection_signal(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``ai_egress.prompt_injection_detected``: count the finding.
+
+        The producer sheds the transcript and matched text before publishing, so
+        the payload carries categories and a score only. This handler re-validates
+        through the mirror and records one minute-granular ``prompt_injection``
+        signal with an EMPTY subject key: the payload deliberately names no actor,
+        so the signal is an anonymous platform count rather than a per-patient
+        trail.
+        """
+
+        async def _impl(
+            connection: AsyncConnection,
+            payload: PromptInjectionDetectedTelemetryPayload,
+        ) -> None:
+            del payload
+            await accumulate_security_signal(
+                connection, envelope, SECURITY_SIGNAL_PROMPT_INJECTION, ""
+            )
+
+        await run_handler(
+            envelope,
+            PromptInjectionDetectedTelemetryPayload,
+            _impl,
+            "record_prompt_injection_signal",
+            OBSERVABILITY_SCHEMA,
+        )
+
+    registry.register(EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED, record_prompt_injection_signal)

@@ -274,6 +274,11 @@ DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD = 5
 DEFAULT_SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD = 10
 DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD = 50
 DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD = 10
+# Prompt-injection heuristics (PHASE-14B Batch 2, #780): advisory text checks on
+# the transcript immediately before it leaves for the structuring provider. Off
+# until a deployment opts in, like every other new safety behavior in this
+# batch; a finding is recorded and the pipeline proceeds.
+DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED = False
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -575,6 +580,11 @@ class Settings:
     security_detector_prompt_injection_threshold: int = (
         DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD
     )
+    # The producer-side half of the prompt-injection visibility (#780): when on,
+    # the intake pipeline screens the transcript before the structuring egress
+    # and emits a PHI-free finding. Off by default; the detector threshold above
+    # only governs the alert scan over whatever signals arrive.
+    prompt_injection_heuristics_enabled: bool = DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED
     # Batch-3 observability feature gates (#753): additive and disabled by
     # default, one gate per feature that shipped in this batch, so a deployment
     # opts in per feature and local dev / tests / CI run without them. The A5
@@ -1269,6 +1279,9 @@ def get_settings() -> Settings:
         security_detector_prompt_injection_threshold=_env_int(
             "SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD",
             DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD,
+        ),
+        prompt_injection_heuristics_enabled=_env_bool(
+            "PROMPT_INJECTION_HEURISTICS_ENABLED", DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED
         ),
         evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
         annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),
