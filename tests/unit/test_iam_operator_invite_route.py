@@ -52,7 +52,9 @@ class StubIamFacade:
         return []
 
 
-def _token(*, scope: str = "operator", subject_id: int = _ADMIN_ID, tier: str | None = "admin") -> str:
+def _token(
+    *, scope: str = "operator", subject_id: int = _ADMIN_ID, tier: str | None = "admin"
+) -> str:
     return issue_token(
         jti=uuid.uuid4().hex,
         subject_id=subject_id,
@@ -152,4 +154,3 @@ def test_operator_invite_route_sits_behind_the_gateway_stack() -> None:
     middlewares = {middleware.cls for middleware in app.user_middleware}
     assert JWTVerifyMiddleware in middlewares
     assert "/v1/auth/operator/invite" in app.openapi()["paths"]
-

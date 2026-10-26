@@ -338,6 +338,12 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
           icon: HeartPulse,
         },
         {
+          key: "security",
+          labelKey: "security",
+          href: "/operator/observability/security",
+          icon: ShieldCheck,
+        },
+        {
           key: "settings",
           labelKey: "settings",
           href: "/operator/observability/settings",

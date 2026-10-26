@@ -123,6 +123,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.config import Settings
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
@@ -191,6 +192,11 @@ from modules.observability.domain.pseudonym import (
     actor_key,
 )
 from modules.observability.domain.rollup import (
+    ALERT_KIND_AUTH_FAILURE_HIGH,
+    ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+    ALERT_KIND_PROMPT_INJECTION_HIGH,
+    ALERT_KIND_RATE_LIMIT_HIGH,
+    ALERT_KIND_RECORD_DENIAL_HIGH,
     ALERT_STATUS_ACKNOWLEDGED,
     ALERT_STATUS_OPEN,
     ALERT_STATUS_RESOLVED,
@@ -1928,6 +1934,40 @@ class Overview(BaseModel):
     last_rolled_date: date | None
 
 
+class SecuritySignalView(BaseModel):
+    """One security signal kind's recent count and status."""
+
+    signal_kind: str
+    count_last_5m: int
+    threshold: int | None
+    alert_kind: str | None
+    is_deferred: bool = False
+    deferred_reason: str | None = None
+
+
+class CspAggregateView(BaseModel):
+    """One CSP directive's daily violation count."""
+
+    directive: str
+    disposition: str
+    blocked_source: str
+    count: int
+
+
+class SecuritySummary(BaseModel):
+    """Operator security posture summary (PHASE-14B Batch 2, #781).
+
+    Shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+    prompt-injection counts, and webhook monitoring status.
+    """
+
+    signals: list[SecuritySignalView]
+    csp_aggregates: list[CspAggregateView]
+    prompt_injection_count: int
+    webhook_monitoring_status: str = "deferred"
+    webhook_monitoring_reason: str = "No inbound webhook exists"
+
+
 class LatencyRow(BaseModel):
     """One provider's rolled latency distribution.
 
@@ -3074,6 +3114,140 @@ async def query_overview(
             for entry in business_rows.mappings()
         ],
         last_rolled_date=last_rolled,
+    )
+
+
+async def query_security_summary(
+    connection: AsyncConnection, *, from_ts: datetime, to_ts: datetime, settings: Settings
+) -> SecuritySummary:
+    """Read the operator security posture summary (``/security``).
+
+    Aggregates security signals from the last window_minutes, CSP violations from
+    the last rolled day, and prompt-injection counts.
+    """
+    from modules.observability.domain.security_detector import (
+        SECURITY_IRREVERSIBLE_RULES,
+        SECURITY_SIGNAL_AUTH_FAILURE,
+        SECURITY_SIGNAL_CONSENT_REVOCATION,
+        SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+        SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+        SECURITY_SIGNAL_OTP_LOCKOUT,
+        SECURITY_SIGNAL_PROMPT_INJECTION,
+        SECURITY_SIGNAL_RATE_LIMIT,
+        SECURITY_SIGNAL_RECORD_DENIAL,
+        SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+    )
+
+    signals_table = observability_security_signals
+    csp_table = observability_csp_aggregates
+
+    # Build threshold map from settings
+    threshold_map: dict[str, tuple[str, int]] = {
+        SECURITY_SIGNAL_AUTH_FAILURE: (
+            ALERT_KIND_AUTH_FAILURE_HIGH,
+            settings.security_detector_auth_failure_threshold,
+        ),
+        SECURITY_SIGNAL_OPERATOR_MFA_FAILURE: (
+            ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+            settings.security_detector_operator_mfa_failure_threshold,
+        ),
+        SECURITY_SIGNAL_RECORD_DENIAL: (
+            ALERT_KIND_RECORD_DENIAL_HIGH,
+            settings.security_detector_record_denial_threshold,
+        ),
+        SECURITY_SIGNAL_RATE_LIMIT: (
+            ALERT_KIND_RATE_LIMIT_HIGH,
+            settings.security_detector_rate_limit_threshold,
+        ),
+        SECURITY_SIGNAL_PROMPT_INJECTION: (
+            ALERT_KIND_PROMPT_INJECTION_HIGH,
+            settings.security_detector_prompt_injection_threshold,
+        ),
+    }
+
+    # Build a map of irreversible signal kinds
+    irreversible_map = {rule.signal_kind: rule.alert_kind for rule in SECURITY_IRREVERSIBLE_RULES}
+
+    # All signal kinds we track
+    all_signal_kinds = [
+        SECURITY_SIGNAL_AUTH_FAILURE,
+        SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+        SECURITY_SIGNAL_RECORD_DENIAL,
+        SECURITY_SIGNAL_RATE_LIMIT,
+        SECURITY_SIGNAL_PROMPT_INJECTION,
+        SECURITY_SIGNAL_OTP_LOCKOUT,
+        SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+        SECURITY_SIGNAL_CONSENT_REVOCATION,
+        SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+    ]
+
+    # Query security signals from the window
+    signals_result = await connection.execute(
+        select(
+            signals_table.c.signal_kind,
+            func.coalesce(func.sum(signals_table.c.count), 0).label("total_count"),
+        )
+        .where(signals_table.c.minute_ts.between(from_ts, to_ts))
+        .group_by(signals_table.c.signal_kind)
+    )
+    signal_counts = {row.signal_kind: int(row.total_count) for row in signals_result.mappings()}
+
+    # Build signal views
+    signal_views = []
+    for sk in all_signal_kinds:
+        count = signal_counts.get(sk, 0)
+        is_deferred = sk == SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE
+        alert_kind = None
+        threshold = None
+
+        if sk in threshold_map:
+            alert_kind, threshold = threshold_map[sk]
+        elif sk in irreversible_map:
+            alert_kind = irreversible_map[sk]
+
+        signal_views.append(
+            SecuritySignalView(
+                signal_kind=sk,
+                count_last_5m=count,
+                threshold=threshold,
+                alert_kind=alert_kind,
+                is_deferred=is_deferred,
+                deferred_reason="No inbound webhook exists" if is_deferred else None,
+            )
+        )
+
+    # Query CSP aggregates from the last rolled date (or today if none)
+    from_ts_date = from_ts.date()
+    csp_result = await connection.execute(
+        select(
+            csp_table.c.directive,
+            csp_table.c.disposition,
+            csp_table.c.blocked_source,
+            func.coalesce(func.sum(csp_table.c.count), 0).label("total_count"),
+        )
+        .where(csp_table.c.aggregate_date == from_ts_date)
+        .group_by(csp_table.c.directive, csp_table.c.disposition, csp_table.c.blocked_source)
+        .order_by(csp_table.c.directive, csp_table.c.disposition, csp_table.c.blocked_source)
+    )
+    csp_aggregates = [
+        CspAggregateView(
+            directive=row.directive,
+            disposition=row.disposition,
+            blocked_source=row.blocked_source,
+            count=int(row.total_count),
+        )
+        for row in csp_result.mappings()
+    ]
+
+    # Query prompt-injection count from security signals
+    prompt_injection_count = signal_counts.get(SECURITY_SIGNAL_PROMPT_INJECTION, 0)
+
+    return SecuritySummary(
+        signals=signal_views,
+        csp_aggregates=csp_aggregates,
+        prompt_injection_count=prompt_injection_count,
+        webhook_monitoring_status="deferred",
+        webhook_monitoring_reason="No inbound webhook exists",
     )
 
 
@@ -5753,6 +5927,21 @@ class ObservabilityFacade:
         from_date, to_date = window_for(days, today=today)
         async with self._engine.begin() as connection:
             return await query_overview(connection, from_date=from_date, to_date=to_date)
+
+    async def get_security_summary(
+        self, *, now: datetime | None = None, window_minutes: int, settings: Settings
+    ) -> SecuritySummary:
+        """Read the operator security posture summary (PHASE-14B Batch 2, #781).
+
+        Shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+        prompt-injection counts, and webhook monitoring status.
+        """
+        to_ts = now if now is not None else datetime.now(UTC)
+        from_ts = to_ts - timedelta(minutes=window_minutes)
+        async with self._engine.begin() as connection:
+            return await query_security_summary(
+                connection, from_ts=from_ts, to_ts=to_ts, settings=settings
+            )
 
     async def get_latency(self) -> LatencyReport:
         """Read the rolled per-provider percentiles (no window - see ``LatencyReport``)."""
