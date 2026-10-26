@@ -79,6 +79,7 @@ from bus.events import (
     EVENT_CONSENT_REQUESTED,
     EVENT_CONSENT_REVOKED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
+    EVENT_OPERATOR_MFA_FAILED,
     EVENT_OTP_FAILED,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
@@ -106,6 +107,7 @@ from modules.observability.domain.consumer import (
     CaseConsultCompleteTelemetryPayload,
     ConsentLifecycleTelemetryPayload,
     IntakeDoctorAssignedTelemetryPayload,
+    OperatorMfaFailedTelemetryPayload,
     OtpFailedEventPayload,
     OtpFailedTelemetryPayload,
     PartnerCredentialReviewedTelemetryPayload,
@@ -569,16 +571,15 @@ def register_handlers(registry: HandlerRegistry) -> None:
 
     registry.register(EVENT_INTAKE_DOCTOR_ASSIGNED, record_care_attribution)
 
-    # Security signals (#777). Two categories the ticket names have no producer
-    # event to consume, so they are deliberately absent here rather than faked
+    # Security signals (#777). One category the ticket names has no producer
+    # event to consume, so it is deliberately absent here rather than faked
     # from another event:
-    # - Operator MFA failures/lockouts: ``issue_operator_session`` raises
-    #   ``InvalidOperatorCodeError`` with no outbox write today. #778 (T17) adds
-    #   that event and owns its signal.
     # - Rate-limit responses: ``app/gateway/rate_limit.py`` answers 429 with no
     #   event, and ``http_counter`` folds every status into 2xx/3xx/4xx/5xx, so
     #   there is nothing to consume. It needs its own producer before it can have
     #   a consumer.
+    # Operator MFA failures have a producer since #778 (T17): see
+    # ``record_operator_mfa_failure_signal`` below.
     async def record_auth_failure_signal(envelope: Envelope[BaseModel]) -> None:
         """Consume ``patient.auth_failed``: increment the auth_failure security signal.
 
@@ -634,6 +635,42 @@ def register_handlers(registry: HandlerRegistry) -> None:
         )
 
     registry.register(EVENT_OTP_FAILED, record_otp_failure_signal)
+
+    async def record_operator_mfa_failure_signal(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``operator.mfa_failed``: count the failure, and the lockout.
+
+        Every wrong operator TOTP code increments ``operator_mfa_failure``.
+        ``reason="lockout"`` is the failure that crossed the threshold, so it
+        also increments ``operator_mfa_lockout`` - a separate signal the
+        detector can alert on without counting every bad code. Subject is the
+        operator identity hashed to a pseudonymous key using the identity
+        (patient) namespace: operator profiles key the same ``iam_identities``
+        ids and the attribution vocabulary has no operator kind, so the one-way
+        hash still never names the operator. The TOTP code, secret, phone and
+        lockout lift time never reach ``observability_security_signals``.
+        """
+
+        async def _impl(
+            connection: AsyncConnection, payload: OperatorMfaFailedTelemetryPayload
+        ) -> None:
+            subject_key = actor_key(ACTOR_KIND_PATIENT, payload.identity_id)
+            await accumulate_security_signal(
+                connection, envelope, "operator_mfa_failure", subject_key
+            )
+            if payload.reason == "lockout":
+                await accumulate_security_signal(
+                    connection, envelope, "operator_mfa_lockout", subject_key
+                )
+
+        await run_handler(
+            envelope,
+            OperatorMfaFailedTelemetryPayload,
+            _impl,
+            "record_operator_mfa_failure_signal",
+            OBSERVABILITY_SCHEMA,
+        )
+
+    registry.register(EVENT_OPERATOR_MFA_FAILED, record_operator_mfa_failure_signal)
 
     async def record_record_denial_signal(envelope: Envelope[BaseModel]) -> None:
         """Consume ``record.denied``: increment the record_denial security signal.

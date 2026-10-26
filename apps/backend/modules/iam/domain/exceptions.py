@@ -71,6 +71,19 @@ class InvalidOperatorCodeError(SessionIssuanceError):
     """
 
 
+class OperatorMfaLockedError(OperatorMfaError):
+    """Operator TOTP login is locked after too many wrong codes (#778).
+
+    The refusal carries the whole seconds left on the lock so the edge can
+    answer 429 with ``Retry-After``. It subclasses ``OperatorMfaError`` so
+    broad MFA catches still recognise it as an authentication refusal.
+    """
+
+    def __init__(self, message: str, *, remaining_seconds: int) -> None:
+        super().__init__(message)
+        self.remaining_seconds = remaining_seconds
+
+
 class InvalidAccessTokenError(IamError):
     """Base for an access token the gateway must reject (spec #51 §2.5).
 

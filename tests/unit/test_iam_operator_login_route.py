@@ -23,6 +23,7 @@ from modules.iam.domain.exceptions import (
     IamError,
     InvalidOperatorCodeError,
     OperatorMfaError,
+    OperatorMfaLockedError,
     SessionIssuanceError,
 )
 from modules.iam.facade import SessionResult
@@ -121,6 +122,22 @@ def test_operator_login_wrong_code_is_refused_with_401() -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "INVALID_OPERATOR_CODE"
+
+
+def test_operator_login_locked_is_refused_with_429_and_retry_after() -> None:
+    facade = StubIamFacade()
+    facade.error = OperatorMfaLockedError(
+        "identity 11 is locked after repeated TOTP failures", remaining_seconds=321
+    )
+    client = _client(facade)
+
+    response = client.post(
+        "/v1/auth/operator/login", json={"phone": "9876543210", "code": "000000"}
+    )
+
+    assert response.status_code == 429
+    assert response.json()["code"] == "OPERATOR_MFA_LOCKED"
+    assert response.headers["Retry-After"] == "321"
 
 
 def test_operator_login_unknown_phone_stays_409_refused() -> None:

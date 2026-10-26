@@ -12,6 +12,7 @@ distinct event.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_CONSENT_REVOKED,
+    EVENT_OPERATOR_MFA_FAILED,
     EVENT_OTP_FAILED,
     EVENT_PATIENT_AUTH_FAILED,
     EVENT_RECORD_DENIED,
@@ -35,12 +37,15 @@ from modules.health.domain.events import (
 )
 from modules.iam.adapters import register_handlers as register_iam_handlers
 from modules.iam.domain.events import (
+    OperatorMfaFailedPayload,
+    operator_mfa_failed_envelope,
     otp_failed_envelope,
     patient_auth_failed_envelope,
 )
 from modules.observability.adapters import register_handlers as register_obs_handlers
 from modules.observability.domain.consumer import (
     ConsentLifecycleTelemetryPayload,
+    OperatorMfaFailedTelemetryPayload,
     OtpFailedEventPayload,
     OtpFailedTelemetryPayload,
     PatientAuthFailedEventPayload,
@@ -69,6 +74,7 @@ def test_register_handlers_registers_security_signal_consumers() -> None:
     register_obs_handlers(registry)
 
     assert len(registry.handlers_for(EVENT_PATIENT_AUTH_FAILED)) >= 1
+    assert len(registry.handlers_for(EVENT_OPERATOR_MFA_FAILED)) >= 1
     assert len(registry.handlers_for(EVENT_OTP_FAILED)) >= 1
     assert len(registry.handlers_for(EVENT_RECORD_DENIED)) >= 1
     assert len(registry.handlers_for(EVENT_CONSENT_REVOKED)) >= 1
@@ -124,6 +130,24 @@ def test_registered_iam_failure_mirrors_keep_the_full_producer_contract() -> Non
         OtpFailedTelemetryPayload.model_validate(canonical_otp.model_dump()),
         "phone_e164",
     )
+
+
+def test_operator_mfa_failed_model_is_claimed_and_drops_the_lift_time() -> None:
+    """IAM claims the producer model; the security view keeps identity and reason."""
+    registry = HandlerRegistry()
+    register_iam_handlers(registry)
+
+    assert registry.payload_model_for(EVENT_OPERATOR_MFA_FAILED) is OperatorMfaFailedPayload
+
+    envelope = operator_mfa_failed_envelope(
+        identity_id=12,
+        reason="lockout",
+        lockout_until=datetime(2026, 10, 26, 12, 30, tzinfo=UTC),
+    )
+    mirror = OperatorMfaFailedTelemetryPayload.model_validate(envelope.payload.model_dump())
+    assert mirror.identity_id == 12
+    assert mirror.reason == "lockout"
+    assert not hasattr(mirror, "lockout_until")
 
 
 def test_patient_auth_failed_payload_revalidates_into_security_mirror() -> None:
@@ -372,6 +396,65 @@ async def test_otp_failure_handler_accumulates_exactly_once_per_event_id(
     args = accumulate.await_args.args
     assert args[2] == "otp_failure"
     assert args[3] == actor_key(ACTOR_KIND_PATIENT, 8)
+
+
+@pytest.mark.asyncio
+async def test_operator_mfa_failure_handler_counts_failures_and_lockouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every failure counts; the lockout trip adds its own signal exactly once."""
+    registry = HandlerRegistry()
+    register_iam_handlers(registry)
+    register_consent_handlers(registry)
+    register_health_handlers(registry)
+    register_obs_handlers(registry)
+    handler = registry.handlers_for(EVENT_OPERATOR_MFA_FAILED)[0]
+
+    engine = MagicMock()
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+    engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr("bus.handler_harness._delivery_engine", lambda: engine)
+
+    delivered: set[str] = set()
+    accumulate = AsyncMock()
+
+    async def fake_ledger(
+        conn: object, schema: str, envelope: Envelope[BaseModel], handler_result: object
+    ) -> bool:
+        del conn, schema, handler_result
+        if str(envelope.event_id) in delivered:
+            return False
+        delivered.add(str(envelope.event_id))
+        return True
+
+    monkeypatch.setattr("bus.handler_harness.record_consumed_event", fake_ledger)
+    monkeypatch.setattr("modules.observability.adapters.accumulate_security_signal", accumulate)
+
+    failure = operator_mfa_failed_envelope(identity_id=9)
+    lockout = operator_mfa_failed_envelope(
+        identity_id=9,
+        reason="lockout",
+        lockout_until=datetime(2026, 10, 26, 12, 30, tzinfo=UTC),
+    )
+
+    await handler(failure)
+    assert accumulate.await_count == 1
+    args = accumulate.await_args.args
+    assert args[2] == "operator_mfa_failure"
+    assert args[3] == actor_key(ACTOR_KIND_PATIENT, 9)
+
+    await handler(failure)
+    assert accumulate.await_count == 1
+
+    await handler(lockout)
+    assert accumulate.await_count == 3
+    kinds = [call.args[2] for call in accumulate.await_args_list]
+    assert kinds == [
+        "operator_mfa_failure",
+        "operator_mfa_failure",
+        "operator_mfa_lockout",
+    ]
 
 
 @pytest.mark.asyncio

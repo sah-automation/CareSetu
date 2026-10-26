@@ -31,6 +31,10 @@ from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
     InvalidAccessTokenError as InvalidAccessTokenError,
 )
+from modules.iam.domain.mfa_lockout import (
+    DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
+    DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+)
 from modules.iam.domain.otp import (
     OTP_TTL_SECONDS as OTP_TTL_SECONDS,
 )
@@ -135,6 +139,8 @@ class IamFacade:
         access_token_ttl_seconds: int = 900,
         refresh_token_ttl_seconds: int = 2_592_000,
         mfa_secret_key: str = "",
+        operator_mfa_lockout_threshold: int = DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+        operator_mfa_lockout_seconds: int = DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
         media_store: ProfileMediaStore | None = None,
         photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
     ) -> None:
@@ -169,6 +175,8 @@ class IamFacade:
             access_token_ttl_seconds=access_token_ttl_seconds,
             refresh_token_ttl_seconds=refresh_token_ttl_seconds,
             mfa_secret_key=mfa_secret_key,
+            operator_mfa_lockout_threshold=operator_mfa_lockout_threshold,
+            operator_mfa_lockout_seconds=operator_mfa_lockout_seconds,
         )
 
     # -- Identity delegation (ADR-0006, ticket #169) -----------------------

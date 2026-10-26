@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_CREDENTIAL_INVALIDATED,
+    EVENT_OPERATOR_MFA_FAILED,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_REJECTED,
 )
@@ -34,6 +35,7 @@ from modules.iam.domain.consumer import (
     PartnerActivatedPayload,
     PartnerRejectedPayload,
 )
+from modules.iam.domain.events import OperatorMfaFailedPayload
 from modules.iam.session_facade import (
     grant_partner_role,
     suspend_partner_role,
@@ -44,15 +46,16 @@ _IAM_SCHEMA = "iam"
 
 def register_handlers(registry: HandlerRegistry) -> None:
     """Register the iam module's event handlers + payload models."""
-    # MOD-001 owns the payload mirrors for the partner lifecycle events it
-    # consumes (the consumer owns the model, cf. audit's ``register_payload_model``):
-    # the dispatcher reconstructs a claimed ``partner.activated`` /
-    # ``partner.rejected`` / ``credential.invalidated`` outbox row with them
-    # before fan-out, so a typed payload - never a raw dict - reaches the handler.
+    # MOD-001 owns the payload models for the partner lifecycle events it
+    # consumes (the consumer owns the model, cf. audit's ``register_payload_model``)
+    # and for the ``operator.mfa_failed`` event it publishes (#778). The
+    # dispatcher reconstructs the claimed outbox row with them before fan-out,
+    # so a typed payload - never a raw dict - reaches every handler.
     for event_type, payload_model in (
         (EVENT_PARTNER_ACTIVATED, PartnerActivatedPayload),
         (EVENT_PARTNER_REJECTED, PartnerRejectedPayload),
         (EVENT_CREDENTIAL_INVALIDATED, CredentialInvalidatedPayload),
+        (EVENT_OPERATOR_MFA_FAILED, OperatorMfaFailedPayload),
     ):
         registry.register_payload_model(event_type, payload_model)
 

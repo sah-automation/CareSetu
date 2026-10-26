@@ -431,6 +431,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         access_token_ttl_seconds=resolved_settings.gateway_access_token_ttl_seconds,
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
         mfa_secret_key=resolved_settings.iam_mfa_secret_key,
+        operator_mfa_lockout_threshold=resolved_settings.iam_operator_mfa_lockout_threshold,
+        operator_mfa_lockout_seconds=resolved_settings.iam_operator_mfa_lockout_seconds,
         media_store=profile_media_store,
         photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
     )

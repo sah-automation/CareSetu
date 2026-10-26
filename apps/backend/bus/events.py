@@ -62,6 +62,10 @@ EVENT_AUDIT_TAMPER_DETECTED = "audit.tamper_detected"
 # MOD-002 (partner): emitted when a partner credential account is created
 # synchronously by the iam facade (ADR-0010, ticket #245).
 EVENT_OPERATOR_INVITED = "operator.invited"
+# MOD-001 (iam): emitted for each failed operator TOTP verification. ``reason``
+# is ``failure``, or ``lockout`` on the trip with ``lockout_until`` naming the
+# lift time (PHASE-14B T17, #778).
+EVENT_OPERATOR_MFA_FAILED = "operator.mfa_failed"
 EVENT_PARTNER_REGISTERED = "partner.registered"
 # MOD-002 (partner): emitted when a verification round (first-time or
 # re-verification) opens, carrying the round/version in the payload so the

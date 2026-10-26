@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_OPERATOR_INVITED,
+    EVENT_OPERATOR_MFA_FAILED,
     EVENT_OTP_FAILED,
     EVENT_OTP_SENT,
     EVENT_PATIENT_AUTH_FAILED,
@@ -217,5 +218,37 @@ def operator_invited_envelope(
             phone_e164=phone_e164,
             invited_by_identity_id=invited_by_identity_id,
             tier=tier,
+        ),
+    )
+
+
+class OperatorMfaFailedPayload(BaseModel):
+    """Subject of ``operator.mfa_failed``: an operator's TOTP check failed.
+
+    ``reason`` is ``failure`` for a wrong code and ``lockout`` when this
+    failure crossed the threshold, with ``lockout_until`` naming when login
+    reopens. The payload carries the identity and lift time only - never the
+    code, its secret, or the phone.
+    """
+
+    identity_id: int
+    reason: Literal["failure", "lockout"]
+    lockout_until: datetime | None = None
+
+
+def operator_mfa_failed_envelope(
+    identity_id: int,
+    reason: Literal["failure", "lockout"] = "failure",
+    lockout_until: datetime | None = None,
+) -> Envelope[OperatorMfaFailedPayload]:
+    """Build the ``operator.mfa_failed`` envelope for the iam outbox."""
+    return Envelope[OperatorMfaFailedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_OPERATOR_MFA_FAILED,
+        producer=PRODUCER_MODULE,
+        payload=OperatorMfaFailedPayload(
+            identity_id=identity_id,
+            reason=reason,
+            lockout_until=lockout_until,
         ),
     )

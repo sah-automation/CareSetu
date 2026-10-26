@@ -35,6 +35,7 @@ from modules.iam.domain.exceptions import (
     InvalidOperatorCodeError,
     InvalidPhoneError,
     OperatorMfaError,
+    OperatorMfaLockedError,
     PatientProfileNotSetError,
     ProfilePhotoTransferError,
     ProfilePhotoValidationError,
@@ -673,6 +674,17 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _operator_mfa_locked(request: Request, exc: Exception) -> JSONResponse:
+        locked = cast(OperatorMfaLockedError, exc)
+        return error_response(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "OPERATOR_MFA_LOCKED",
+            "operator login is locked after too many MFA failures",
+            headers={"Retry-After": str(locked.remaining_seconds)},
+            log_tag="iam_rejection",
+            request=request,
+        )
+
     async def _refresh_token_unknown(request: Request, exc: Exception) -> JSONResponse:
         return error_response(
             status.HTTP_401_UNAUTHORIZED,
@@ -760,6 +772,7 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
     app.add_exception_handler(SessionIssuanceError, _session_refused)
     app.add_exception_handler(OperatorMfaError, _operator_mfa_failed)
+    app.add_exception_handler(OperatorMfaLockedError, _operator_mfa_locked)
     app.add_exception_handler(InvalidOperatorCodeError, _invalid_operator_code)
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
