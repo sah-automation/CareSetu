@@ -588,6 +588,18 @@ class OtpFailedTelemetryPayload(BaseModel):
     reason: str
 
 
+class OperatorMfaFailedTelemetryPayload(BaseModel):
+    """MOD-013's security-signal view of ``operator.mfa_failed``.
+
+    Keeps the identity reference and reason only - the lockout lift time, the
+    TOTP code and the phone number are all shed before storage. The identity is
+    hashed to a pseudonymous key.
+    """
+
+    identity_id: int
+    reason: str
+
+
 class RecordDeniedTelemetryPayload(BaseModel):
     """MOD-013's mirror of MOD-003's ``record.denied`` payload for security signals.
 

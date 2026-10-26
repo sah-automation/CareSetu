@@ -112,3 +112,29 @@ def test_patient_auth_failed_envelope_models_the_access_denial_emitter() -> None
         "reason": "access_denied",
         "attempts_left": None,
     }
+
+
+def test_operator_mfa_failed_defaults_to_a_single_failure() -> None:
+    envelope = events.operator_mfa_failed_envelope(identity_id=9)
+
+    assert envelope.event_type == "operator.mfa_failed"
+    assert envelope.producer == "iam"
+    assert envelope.payload.model_dump(mode="json") == {
+        "identity_id": 9,
+        "reason": "failure",
+        "lockout_until": None,
+    }
+
+
+def test_operator_mfa_failed_lockout_carries_the_lift_time() -> None:
+    envelope = events.operator_mfa_failed_envelope(
+        identity_id=9, reason="lockout", lockout_until=_LOCKOUT_UNTIL
+    )
+
+    assert envelope.payload.reason == "lockout"
+    assert envelope.payload.lockout_until == _LOCKOUT_UNTIL
+
+
+def test_operator_mfa_failed_rejects_an_unknown_reason() -> None:
+    with pytest.raises(ValidationError):
+        events.OperatorMfaFailedPayload(identity_id=9, reason="unknown")  # type: ignore[arg-type]

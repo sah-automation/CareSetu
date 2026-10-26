@@ -44,7 +44,7 @@ def evaluate_failure(
 
     ``consecutive_failures`` is the count persisted on the identity before this
     attempt and ``lockout_until`` is when the active window ends (``None`` when
-    the phone is not locked). The facade refuses a locked phone outright - under
+    the subject is not locked). The facade refuses a locked phone outright - under
     its ``FOR UPDATE`` identity lock it consults ``lockout_remaining_seconds``
     and rejects before ever calling this - so ``evaluate_failure`` is never
     reached with an open window: the in-window growth line below is defensive.
@@ -69,7 +69,7 @@ def evaluate_failure(
 
 
 def lockout_remaining_seconds(lockout_until: datetime | None, now: datetime) -> int | None:
-    """Seconds until the lockout lifts, or None when the phone is not locked.
+    """Seconds until the lockout lifts, or None when the subject is not locked.
 
     ``None`` covers both "never locked" and "lockout already expired" so a
     caller can treat any non-None value as an active lockout. The boundary is

@@ -10,6 +10,11 @@ import os
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from modules.iam.domain.mfa_lockout import (
+    DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
+    DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+)
+
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
 DEFAULT_APP_ENVIRONMENT = "production"
 # The app's human-maintained version (PHASE-14A A4, #696): the default Sentry
@@ -403,6 +408,13 @@ class Settings:
     # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
     # refuses to verify without it.
     iam_mfa_secret_key: str = ""
+    # Consecutive wrong operator TOTP codes before login locks, and how long
+    # the lock lasts (PHASE-14B T17, #778). The defaults live in
+    # ``modules.iam.domain.mfa_lockout`` so the policy and the environment share
+    # one source; override with ``IAM_OPERATOR_MFA_LOCKOUT_THRESHOLD`` /
+    # ``IAM_OPERATOR_MFA_LOCKOUT_SECONDS`` (listed in ``.env.example``).
+    iam_operator_mfa_lockout_threshold: int = DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD
+    iam_operator_mfa_lockout_seconds: int = DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS
     # Langfuse AI observability (plan-phase7-tracing-prep): the SDK keys for LLM
     # call tracing, consumed by the AI gateway port from Phase 7 onward. Both
     # empty by default = tracing disabled, the app boots cleanly without an
@@ -725,6 +737,10 @@ class Settings:
             raise ValueError("directory_max_results must be positive")
         if self.audit_retention_days < 0:
             raise ValueError("audit_retention_days must be zero or positive (0 = no expiry)")
+        if self.iam_operator_mfa_lockout_threshold < 1:
+            raise ValueError("iam_operator_mfa_lockout_threshold must be at least 1")
+        if self.iam_operator_mfa_lockout_seconds <= 0:
+            raise ValueError("iam_operator_mfa_lockout_seconds must be positive")
         if self.gateway_access_token_ttl_seconds <= 0:
             raise ValueError("gateway_access_token_ttl_seconds must be positive")
         if self.gateway_refresh_token_ttl_seconds <= 0:
@@ -1066,6 +1082,12 @@ def get_settings() -> Settings:
             "PARTNER_CREDENTIAL_SWEEP_CRON", DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON
         ),
         iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
+        iam_operator_mfa_lockout_threshold=_env_int(
+            "IAM_OPERATOR_MFA_LOCKOUT_THRESHOLD", DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD
+        ),
+        iam_operator_mfa_lockout_seconds=_env_int(
+            "IAM_OPERATOR_MFA_LOCKOUT_SECONDS", DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS
+        ),
         langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
         langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
         langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
