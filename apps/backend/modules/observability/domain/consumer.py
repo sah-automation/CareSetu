@@ -428,6 +428,18 @@ class AiEgressRecordedTelemetryPayload(BaseModel):
     reason: str
 
 
+class PromptInjectionDetectedTelemetryPayload(BaseModel):
+    """MOD-013's mirror of MOD-005's ``ai_egress.prompt_injection_detected``.
+
+    The producer's advisory finding already excludes the transcript and any
+    matched text. This mirror re-declares the narrow shape so the handler cannot
+    read more if the producer's payload grows later.
+    """
+
+    categories: list[str]
+    score: int
+
+
 class IntakeComposerOpenedTelemetryPayload(ProductStepPayload):
     """MOD-013's mirror of MOD-005's ``intake.composer_opened`` payload (B4e #739).
 
