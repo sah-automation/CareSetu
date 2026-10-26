@@ -224,6 +224,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/operator/observability/health",
         "/v1/operator/observability/alerts",
         "/v1/operator/observability/deeplinks",
+        # PHASE-14B Batch 2 (#782): the security summary read.
+        "/v1/operator/observability/security",
         # PHASE-14A B9 (#727): the per-minute request counter, which carries the
         # capture-liveness answer rather than only the numbers.
         "/v1/operator/observability/throughput",
