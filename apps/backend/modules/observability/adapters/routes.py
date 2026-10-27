@@ -871,8 +871,13 @@ async def seed_evaluation_dataset(
     The golden dataset contains transcription and structuring examples that mirror
     the two AI legs the product PRD scores. Only admin-tier operators may call this.
     """
-    del principal
-    return await _facade(request).seed_evaluation_dataset(name=body.name, version=body.version)
+    subject_id = principal.subject_id
+
+    async def _call() -> EvaluationDatasetVersion:
+        return await _facade(request).seed_evaluation_dataset(name=body.name, version=body.version)
+
+    namespace = f"eval-seed:{subject_id}" if subject_id is not None else "eval-seed"
+    return await run_idempotent(request, _call, namespace=namespace)
 
 
 @router.get(
@@ -885,13 +890,17 @@ async def list_evaluation_dataset_versions(
     request: Request,
     principal: Annotated[Principal, Depends(require_admin)],
     name: str | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> EvaluationDatasetListResponse:
-    """List all evaluation dataset versions, optionally filtered by dataset name.
+    """List all evaluation dataset versions, optionally filtered by dataset name with pagination.
 
     Only admin-tier operators may call this.
     """
     del principal
-    return await _facade(request).list_evaluation_dataset_versions(name=name)
+    return await _facade(request).list_evaluation_dataset_versions(
+        name=name, page=page, page_size=page_size
+    )
 
 
 @router.get(
@@ -940,21 +949,28 @@ async def create_evaluation_dataset_draft(
 
     Only admin-tier operators may call this. The version must not already exist.
     """
-    del principal
+    subject_id = principal.subject_id
     facade = _facade(request)
-    try:
-        return await facade.create_evaluation_dataset_draft(
-            name=body.name, version=body.version, examples=body.examples
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "EVALUATION_DATASET_CREATE_FAILED",
-                "message": str(e),
-                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
-            },
-        ) from e
+
+    async def _call() -> EvaluationDatasetVersion:
+        try:
+            return await facade.create_evaluation_dataset_draft(
+                name=body.name, version=body.version, examples=body.examples
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_CREATE_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-create:{subject_id}" if subject_id is not None else "eval-create"
+    return await run_idempotent(request, _call, namespace=namespace)
 
 
 @router.post(
@@ -975,21 +991,28 @@ async def clone_evaluation_dataset(
     Only admin-tier operators may call this. The source dataset is copied entirely
     to the new version with 'draft' status. The new version must not already exist.
     """
-    del principal
+    subject_id = principal.subject_id
     facade = _facade(request)
-    try:
-        return await facade.clone_evaluation_dataset(
-            name=name, version=version, source_dataset_id=body.source_dataset_id
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "EVALUATION_DATASET_CLONE_FAILED",
-                "message": str(e),
-                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
-            },
-        ) from e
+
+    async def _call() -> EvaluationDatasetVersion:
+        try:
+            return await facade.clone_evaluation_dataset(
+                name=name, version=version, source_dataset_id=body.source_dataset_id
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_CLONE_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-clone:{subject_id}" if subject_id is not None else "eval-clone"
+    return await run_idempotent(request, _call, namespace=namespace)
 
 
 @router.patch(
@@ -1010,21 +1033,28 @@ async def edit_evaluation_dataset_draft(
     Only admin-tier operators may call this. Refuses if the version is not in 'draft'
     status (active/retired versions are immutable).
     """
-    del principal
+    subject_id = principal.subject_id
     facade = _facade(request)
-    try:
-        return await facade.edit_evaluation_dataset_draft(
-            name=name, version=version, examples=body.examples
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "EVALUATION_DATASET_EDIT_FAILED",
-                "message": str(e),
-                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
-            },
-        ) from e
+
+    async def _call() -> EvaluationDatasetVersion:
+        try:
+            return await facade.edit_evaluation_dataset_draft(
+                name=name, version=version, examples=body.examples
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_EDIT_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-edit:{subject_id}" if subject_id is not None else "eval-edit"
+    return await run_idempotent(request, _call, namespace=namespace)
 
 
 @router.post(
@@ -1044,19 +1074,26 @@ async def activate_evaluation_dataset_version(
     Only admin-tier operators may call this. Only draft versions can be activated.
     The previous active version (if any) is retired atomically.
     """
-    del principal
+    subject_id = principal.subject_id
     facade = _facade(request)
-    try:
-        return await facade.activate_evaluation_dataset_version(name=name, version=version)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "EVALUATION_DATASET_ACTIVATE_FAILED",
-                "message": str(e),
-                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
-            },
-        ) from e
+
+    async def _call() -> EvaluationDatasetActivateResponse:
+        try:
+            return await facade.activate_evaluation_dataset_version(name=name, version=version)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_ACTIVATE_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-activate:{subject_id}" if subject_id is not None else "eval-activate"
+    return await run_idempotent(request, _call, namespace=namespace)
 
 
 @router.post(
@@ -1076,19 +1113,26 @@ async def retire_evaluation_dataset_version(
     Only admin-tier operators may call this. Retiring an active version leaves no
     active version for that name. Already retired versions cannot be retired again.
     """
-    del principal
+    subject_id = principal.subject_id
     facade = _facade(request)
-    try:
-        return await facade.retire_evaluation_dataset_version(name=name, version=version)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "EVALUATION_DATASET_RETIRE_FAILED",
-                "message": str(e),
-                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
-            },
-        ) from e
+
+    async def _call() -> EvaluationDatasetVersion:
+        try:
+            return await facade.retire_evaluation_dataset_version(name=name, version=version)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_RETIRE_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-retire:{subject_id}" if subject_id is not None else "eval-retire"
+    return await run_idempotent(request, _call, namespace=namespace)
 
 
 def register_error_handlers(app: FastAPI) -> None:
