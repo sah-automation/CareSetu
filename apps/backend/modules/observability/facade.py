@@ -128,6 +128,7 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
 from bus.ledger import HANDLER_RESULT_ACTOR_KEY
+from modules.observability.domain.alert_delivery import AlertDeliveryConfig, ChannelAdapter
 from modules.observability.domain.annotation import review_annotation
 from modules.observability.domain.consumer import (
     AI_JOB_SPEND_STATUS_COMPLETED,
@@ -251,6 +252,7 @@ from modules.observability.schema.models import (
     observability_security_signals,
 )
 from modules.observability.security_detector import SecurityScanReport, run_security_scan
+from modules.ops.facade import OpsFacade
 from observability.langfuse_metrics import LangfuseDailyMetrics, pull_daily_metrics
 from observability.logging import SERVICE_API
 from observability.trace_ids import clamp_trace_id
@@ -5896,8 +5898,9 @@ class ObservabilityFacade:
         facade reads the current UTC day or instant.
     """
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, settings: Settings | None = None) -> None:
         self._engine = engine
+        self._settings = settings
 
     async def get_cost_summary(self) -> CostSummary:
         """Read this billing period's spend against the budget (no window)."""
@@ -6262,3 +6265,71 @@ class ObservabilityFacade:
                 blocked_source=blocked_source,
                 document_uri=document_uri,
             )
+
+    # Alert delivery (#784) - re-exports from domain for worker composition root
+    async def run_alert_router_job(self, *, ops_facade: OpsFacade) -> None:
+        """Run the alert delivery router job (re-exported for worker)."""
+        from modules.observability.domain.alert_delivery import run_alert_router_job
+
+        await run_alert_router_job(self._engine, ops_facade)
+
+    async def run_alert_drainer_job(
+        self, *, ops_facade: OpsFacade, adapters: dict[str, ChannelAdapter]
+    ) -> None:
+        """Run the alert delivery drainer job (re-exported for worker)."""
+        from modules.observability.domain.alert_delivery import (
+            run_alert_drainer_job,
+        )
+
+        config = self._alert_delivery_config()
+        await run_alert_drainer_job(self._engine, ops_facade, adapters, config=config)
+
+    def _alert_delivery_config(self) -> AlertDeliveryConfig:
+        """Build alert delivery config from settings."""
+        from modules.observability.domain.alert_delivery import AlertDeliveryConfig
+
+        if self._settings is None:
+            return AlertDeliveryConfig()
+        return AlertDeliveryConfig(
+            max_attempts=self._settings.alert_delivery_max_attempts,
+            base_backoff_seconds=self._settings.alert_delivery_base_backoff_seconds,
+            max_backoff_seconds=self._settings.alert_delivery_max_backoff_seconds,
+            console_base_url=self._settings.alert_delivery_console_base_url,
+        )
+
+    def alert_delivery_adapters(self, settings: Settings) -> dict[str, ChannelAdapter]:
+        """Build channel adapters from settings (re-exported for worker)."""
+        from modules.observability.domain.alert_delivery import (
+            Channel,
+            SlackAdapter,
+            SmtpAdapter,
+        )
+
+        adapters: dict[str, ChannelAdapter] = {}
+        slack_webhook_url = settings.slack_webhook_url
+        if slack_webhook_url:
+            adapters[Channel.SLACK.value] = SlackAdapter(slack_webhook_url)
+
+        smtp_host = settings.smtp_host
+        smtp_port = settings.smtp_port
+        smtp_username = settings.smtp_username
+        smtp_password = settings.smtp_password
+        smtp_from = settings.smtp_from
+        smtp_to = settings.smtp_to
+        if all(v for v in [smtp_host, smtp_username, smtp_password, smtp_from, smtp_to]):
+            # Split comma-separated string into list
+            to_addrs = (
+                smtp_to
+                if isinstance(smtp_to, list)
+                else [addr.strip() for addr in smtp_to.split(",") if addr.strip()]
+            )
+            adapters[Channel.EMAIL.value] = SmtpAdapter(
+                host=smtp_host,
+                port=smtp_port,
+                username=smtp_username,
+                password=smtp_password,
+                from_addr=smtp_from,
+                to_addrs=to_addrs,
+                use_tls=settings.smtp_use_tls,
+            )
+        return adapters
