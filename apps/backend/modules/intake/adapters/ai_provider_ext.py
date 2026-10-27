@@ -41,6 +41,8 @@ from modules.intake.adapters.ai_gateway import (
     AiGateway,
     DraftRxRequest,
     DraftRxResult,
+    EvaluateRequest,
+    EvaluateResult,
     Ext002CallError,
     StructureRequest,
     StructureResult,
@@ -162,6 +164,10 @@ class CircuitBreakerAiGateway:
     @observe(name="ai_draft_rx", capture_input=False, capture_output=False)
     async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
         return await self._run_with_breaker("draft_rx", self._adapter.draft_rx(request))
+
+    @observe(name="ai_evaluate", capture_input=False, capture_output=False)
+    async def evaluate(self, request: EvaluateRequest) -> EvaluateResult:
+        return await self._run_with_breaker("evaluate", self._adapter.evaluate(request))
 
 
 def build_ai_gateway(settings: Settings) -> AiGateway:
