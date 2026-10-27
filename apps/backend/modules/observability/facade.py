@@ -6316,7 +6316,12 @@ class ObservabilityFacade:
         1. The notification.channels.slack.enabled gate is True (from effective settings)
         2. The SLACK_WEBHOOK_URL environment variable is set (from settings)
 
-        This ensures the gate-off path is a no-op and the secret is never used when disabled.
+        The SMTP adapter is only created if:
+        1. The notification.channels.email.enabled gate is True (from effective settings)
+        2. All SMTP credentials are set in the environment
+           (host, port, username, password, from, to)
+
+        This ensures the gate-off path is a no-op and secrets are never used when disabled.
         """
         from modules.observability.domain.alert_delivery import (
             Channel,
@@ -6338,13 +6343,23 @@ class ObservabilityFacade:
         if slack_enabled and slack_webhook_url:
             adapters[Channel.SLACK.value] = SlackAdapter(slack_webhook_url)
 
+        # Check SMTP channel gate from effective settings (defaults to False)
+        email_enabled = False
+        if effective_settings:
+            for setting in effective_settings:
+                if setting.key == "notification.channels.email.enabled":
+                    email_enabled = setting.value is True
+                    break
+
         smtp_host = settings.smtp_host
         smtp_port = settings.smtp_port
         smtp_username = settings.smtp_username
         smtp_password = settings.smtp_password
         smtp_from = settings.smtp_from
         smtp_to = settings.smtp_to
-        if all(v for v in [smtp_host, smtp_username, smtp_password, smtp_from, smtp_to]):
+        if email_enabled and all(
+            v for v in [smtp_host, smtp_port, smtp_username, smtp_password, smtp_from, smtp_to]
+        ):
             # Split comma-separated string into list
             to_addrs = (
                 smtp_to

@@ -225,8 +225,9 @@ class SmtpAdapter:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self._send_sync, msg)
             return DeliveryAttemptResult(success=True)
-        except Exception as e:
-            return DeliveryAttemptResult(success=False, error=str(e))
+        except Exception:
+            # Do not leak SMTP credentials in error messages
+            return DeliveryAttemptResult(success=False, error="SMTP delivery failed")
 
     def _send_sync(self, msg: MIMEMultipart) -> None:
         if self._use_tls:
