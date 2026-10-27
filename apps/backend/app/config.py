@@ -446,6 +446,22 @@ class Settings:
     langfuse_secret_key: str = ""
     langfuse_host: str = DEFAULT_LANGFUSE_HOST
     langfuse_timeout_seconds: float = DEFAULT_LANGFUSE_TIMEOUT_SECONDS
+    # Alert delivery (PHASE-14B Batch 2, #784): Slack webhook and SMTP credentials
+    # for notification channels. These are secrets - set in deployment environment,
+    # never committed. Empty by default = channel not configured.
+    slack_webhook_url: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_to: str = ""
+    smtp_use_tls: bool = True
+    # Alert delivery (PHASE-14B Batch 2, #784): delivery behavior tuning
+    alert_delivery_max_attempts: int = 5
+    alert_delivery_base_backoff_seconds: int = 30
+    alert_delivery_max_backoff_seconds: int = 3600
+    alert_delivery_console_base_url: str = "https://console.example.com"
     # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
     # knob (mock is the fail-closed default); the real provider key/base URL/
     # model. ``__post_init__`` refuses a real provider in dev/test unless demo
@@ -598,11 +614,15 @@ class Settings:
     # ``evaluation_enabled`` runs the #751 code-evaluator batch as part of the
     # daily Langfuse pull (``worker/langfuse_metrics.py``); with it off the
     # pull still runs and only the evaluators are skipped. ``annotation_queue_enabled``
-    # feeds the #752 doctor-review annotation queue from review-outcome events;
-    # with it off the outcome seats still record their funnel/business effects
-    # and only the annotation write is skipped (``modules.observability.adapters``).
+    # feeds the #752 doctor-review annotation queue from review-outcome events; with
+    # it off the outcome seats still record their funnel/business effects and only
+    # the annotation write is skipped (``modules.observability.adapters``).
     evaluation_enabled: bool = False
     annotation_queue_enabled: bool = False
+    # Alert delivery (PHASE-14B Batch 2, #784): durable delivery of alerts via
+    # Slack/email with retries and redelivery. Off by default so deploying this
+    # batch changes no behavior until the operator opts in.
+    alert_delivery_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -1296,4 +1316,19 @@ def get_settings() -> Settings:
         ),
         evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
         annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),
+        alert_delivery_enabled=_env_bool("ALERT_DELIVERY_ENABLED", False),
+        slack_webhook_url=os.environ.get("SLACK_WEBHOOK_URL", ""),
+        smtp_host=os.environ.get("SMTP_HOST", ""),
+        smtp_port=_env_int("SMTP_PORT", 587),
+        smtp_username=os.environ.get("SMTP_USERNAME", ""),
+        smtp_password=os.environ.get("SMTP_PASSWORD", ""),
+        smtp_from=os.environ.get("SMTP_FROM", ""),
+        smtp_to=os.environ.get("SMTP_TO", ""),
+        smtp_use_tls=_env_bool("SMTP_USE_TLS", True),
+        alert_delivery_max_attempts=_env_int("ALERT_DELIVERY_MAX_ATTEMPTS", 5),
+        alert_delivery_base_backoff_seconds=_env_int("ALERT_DELIVERY_BASE_BACKOFF_SECONDS", 30),
+        alert_delivery_max_backoff_seconds=_env_int("ALERT_DELIVERY_MAX_BACKOFF_SECONDS", 3600),
+        alert_delivery_console_base_url=os.environ.get(
+            "ALERT_DELIVERY_CONSOLE_BASE_URL", "https://console.example.com"
+        ),
     )

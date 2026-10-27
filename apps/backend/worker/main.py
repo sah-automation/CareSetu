@@ -78,12 +78,14 @@ from modules.notify.adapters import register_handlers as notify_register_handler
 from modules.observability.adapters import register_handlers as observability_register_handlers
 from modules.observability.facade import (
     SECURITY_SCAN_INTERVAL_SECONDS,
+    ObservabilityFacade,
     SecurityDetectorThresholds,
     drain_error_buffer,
     drain_http_counter,
     run_security_scan,
 )
 from modules.ops.adapters import register_handlers as ops_register_handlers
+from modules.ops.facade import OpsFacade
 from modules.partner.adapters import register_handlers as partner_register_handlers
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
@@ -528,6 +530,12 @@ def build_scheduler(
     Like the other gates it is registered ONLY when
     ``settings.security_detection_enabled`` is on.
 
+    The fifth and sixth are PHASE-14B Batch 2's alert delivery (#784): a router
+    that creates delivery rows for newly opened alerts, and a drainer that
+    processes them with exponential backoff. Both are interval jobs registered
+    ONLY when ``settings.alert_delivery_enabled`` is on. The router runs every
+    minute; the drainer runs every 30 seconds.
+
     Every registered job uses ``coalesce`` + a fixed job id so late or missed
     firings cannot stack duplicate passes across a sleep, and ``max_instances=1``
     so a drain that is slower than its interval skips rather than overlaps.
@@ -576,6 +584,11 @@ def build_scheduler(
             coalesce=True,
             max_instances=1,
         )
+    # #784: alert delivery router and drainer - gated behind alert_delivery_enabled
+    if settings.alert_delivery_enabled:
+        # The router runs every minute to pick up new alerts
+        # The drainer runs every 30 seconds to process pending deliveries
+        pass  # Jobs are added in run_worker_until_stopped with proper adapters
     return scheduler
 
 
@@ -648,6 +661,38 @@ async def run_worker_until_stopped(
         counter_drain_callback=partial(_run_http_counter_drain, engine=engine),
         security_scan_callback=partial(_run_security_scan, engine=engine),
     )
+
+    # #784: alert delivery router and drainer - gated behind alert_delivery_enabled
+    if resolved_settings.alert_delivery_enabled:
+        obs_facade = ObservabilityFacade(engine=engine, settings=resolved_settings)
+        ops_facade = OpsFacade(engine=engine, settings=resolved_settings)
+
+        # Build channel adapters from environment configuration via facade
+        adapters = obs_facade.alert_delivery_adapters(resolved_settings)
+
+        # Add router job (runs every minute)
+        scheduler.add_job(
+            partial(obs_facade.run_alert_router_job, ops_facade=ops_facade),
+            IntervalTrigger(seconds=60),
+            id="alert-delivery-router",
+            name="alert-delivery-router",
+            coalesce=True,
+            max_instances=1,
+        )
+
+        # Add drainer job (runs every 30 seconds)
+        if adapters:
+            scheduler.add_job(
+                partial(obs_facade.run_alert_drainer_job, ops_facade=ops_facade, adapters=adapters),
+                IntervalTrigger(seconds=30),
+                id="alert-delivery-drainer",
+                name="alert-delivery-drainer",
+                coalesce=True,
+                max_instances=1,
+            )
+        else:
+            logger.warning("alert delivery enabled but no channel adapters configured")
+
     try:
         async with engine.connect() as connection:
             tables: tuple[OutboxTable, ...] = await discover_outbox_tables(
