@@ -82,6 +82,7 @@ from modules.observability.facade import (
     SecurityDetectorThresholds,
     drain_error_buffer,
     drain_http_counter,
+    run_judge_job,
     run_security_scan,
 )
 from modules.ops.adapters import register_handlers as ops_register_handlers
@@ -483,6 +484,46 @@ async def _run_security_scan(engine: AsyncEngine | None = None) -> None:
         )
 
 
+async def _run_judge_job(engine: AsyncEngine | None = None) -> None:
+    """Run the LLM judge job over the active synthetic dataset (#789).
+
+    This job runs the completeness evaluator over the active dataset examples
+    with budget checks, temperature zero, strict JSON output, one retry on
+    parse failure, and stores scores with source=judge and a run reference.
+    Scores are advisory only and never gate approval.
+    """
+    settings = get_settings()
+    if not settings.llm_judge_enabled:
+        return
+    owned = engine is None
+    judge_engine = engine if engine is not None else create_async_engine(settings.database_url)
+    try:
+        with start_span(
+            "scheduler.llm_judge_run",
+            attributes={"job.name": "llm-judge-run", "job.system": "apscheduler"},
+        ):
+            obs_facade = ObservabilityFacade(engine=judge_engine, settings=settings)
+            report = await obs_facade.run_judge_job()
+    except Exception:
+        logger.exception("LLM judge run failed; next pass retries")
+        return
+    finally:
+        if owned:
+            await judge_engine.dispose()
+    if report.status == "completed":
+        logger.info(
+            "LLM judge run completed: %d examples scored, %d scores recorded",
+            report.examples_scored,
+            report.scores_recorded,
+        )
+    elif report.status in ("budget_exceeded", "partial", "failed", "disabled"):
+        logger.warning(
+            "LLM judge run finished with status %s: %s",
+            report.status,
+            report.failure_reason or "no details",
+        )
+
+
 def build_scheduler(
     settings: Settings,
     *,
@@ -490,6 +531,7 @@ def build_scheduler(
     drain_callback: Callable[[], Awaitable[None]] = _run_error_drain,
     counter_drain_callback: Callable[[], Awaitable[None]] = _run_http_counter_drain,
     security_scan_callback: Callable[[], Awaitable[None]] = _run_security_scan,
+    judge_job_callback: Callable[[], Awaitable[None]] = _run_judge_job,
 ) -> AsyncIOScheduler:
     """Build the worker's periodic-job scheduler (PHASE-6 T04a, #315).
 
@@ -589,6 +631,16 @@ def build_scheduler(
         # The router runs every minute to pick up new alerts
         # The drainer runs every 30 seconds to process pending deliveries
         pass  # Jobs are added in run_worker_until_stopped with proper adapters
+    # #789: LLM judge run - gated behind llm_judge_enabled
+    if settings.llm_judge_enabled:
+        scheduler.add_job(
+            judge_job_callback,
+            CronTrigger.from_crontab("0 3 * * *", timezone="UTC"),  # Daily at 03:00 UTC
+            id="llm-judge-run",
+            name="llm-judge-run",
+            coalesce=True,
+            max_instances=1,
+        )
     return scheduler
 
 

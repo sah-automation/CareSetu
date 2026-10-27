@@ -187,6 +187,12 @@ DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""
 DEFAULT_AI_FALLBACK_API_KEY = ""
 DEFAULT_AI_FALLBACK_MODEL = ""
+# LLM judge run (PHASE-14B Batch 2, #789): defaults for the synthetic judge.
+DEFAULT_LLM_JUDGE_ENABLED = False
+DEFAULT_LLM_JUDGE_MODEL = "gpt-4o-mini"
+DEFAULT_LLM_JUDGE_BUDGET_PAISE = 50_000
+DEFAULT_LLM_JUDGE_MAX_EXAMPLES = 100
+DEFAULT_LLM_JUDGE_PROMPT_VERSION = "v1"
 # Observability gates (PHASE-14A A5, #693; plan-phase14 §4, Appendix A.2):
 # every vendor gate is additive and disabled by default so local dev, tests and
 # CI are unchanged until one is set. Nothing reads these yet - later batch
@@ -623,6 +629,15 @@ class Settings:
     # Slack/email with retries and redelivery. Off by default so deploying this
     # batch changes no behavior until the operator opts in.
     alert_delivery_enabled: bool = False
+    # LLM judge run (PHASE-14B Batch 2, #789): runs the LLM judge over the active
+    # synthetic dataset with a budget cap, temperature zero, strict JSON output,
+    # one retry on parse failure, and scores stored with source judge and a run
+    # reference. Off by default; scores are advisory only.
+    llm_judge_enabled: bool = DEFAULT_LLM_JUDGE_ENABLED
+    llm_judge_model: str = DEFAULT_LLM_JUDGE_MODEL
+    llm_judge_budget_paise: int = DEFAULT_LLM_JUDGE_BUDGET_PAISE
+    llm_judge_max_examples: int = DEFAULT_LLM_JUDGE_MAX_EXAMPLES
+    llm_judge_prompt_version: str = DEFAULT_LLM_JUDGE_PROMPT_VERSION
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -1317,6 +1332,12 @@ def get_settings() -> Settings:
         evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
         annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),
         alert_delivery_enabled=_env_bool("ALERT_DELIVERY_ENABLED", False),
+        # LLM judge run (PHASE-14B Batch 2, #789)
+        llm_judge_enabled=_env_bool("LLM_JUDGE_ENABLED", DEFAULT_LLM_JUDGE_ENABLED),
+        llm_judge_model=os.environ.get("LLM_JUDGE_MODEL", DEFAULT_LLM_JUDGE_MODEL),
+        llm_judge_budget_paise=_env_int("LLM_JUDGE_BUDGET_PAISE", DEFAULT_LLM_JUDGE_BUDGET_PAISE),
+        llm_judge_max_examples=_env_int("LLM_JUDGE_MAX_EXAMPLES", DEFAULT_LLM_JUDGE_MAX_EXAMPLES),
+        llm_judge_prompt_version=os.environ.get("LLM_JUDGE_PROMPT_VERSION", DEFAULT_LLM_JUDGE_PROMPT_VERSION),
         slack_webhook_url=os.environ.get("SLACK_WEBHOOK_URL", ""),
         smtp_host=os.environ.get("SMTP_HOST", ""),
         smtp_port=_env_int("SMTP_PORT", 587),

@@ -46,6 +46,8 @@ from modules.intake.adapters.ai_gateway import (
     AiGateway,
     DraftRxRequest,
     DraftRxResult,
+    EvaluateRequest,
+    EvaluateResult,
     Ext002CallError,
     StructureRequest,
     StructureResult,
@@ -473,6 +475,97 @@ class OpenAiCompatibleAdapter:
             "draft_rx not supported in this phase",
             retries_exhausted=False,
         )
+
+    @observe(name="ai_evaluate", capture_input=False, capture_output=False)
+    async def evaluate(self, request: EvaluateRequest) -> EvaluateResult:
+        """Generic evaluation completion for LLM-as-judge tasks.
+
+        Posts to the chat/completions endpoint with the provided prompt,
+        forcing temperature=0 and response_format=json_object for
+        deterministic, parseable output.
+        """
+        started = time.monotonic()
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        try:
+            # Build messages from the prompt - the caller provides a complete prompt
+            messages = [
+                {"role": "system", "content": "You are an evaluator. Return only valid JSON."},
+                {"role": "user", "content": request.prompt},
+            ]
+            payload: dict[str, object] = {
+                "model": self._model,
+                "messages": messages,
+                "temperature": request.temperature,
+                "response_format": {"type": request.response_format},
+            }
+            data = await self._post("/chat/completions", json=payload)
+            prompt_tokens, completion_tokens = self._extract_usage_tokens(data)
+            if prompt_tokens or completion_tokens:
+                logger.info(
+                    "OpenAI-compatible evaluate tokens: prompt=%d completion=%d",
+                    prompt_tokens,
+                    completion_tokens,
+                )
+            # Parse the response content as JSON
+            choices = data.get("choices")
+            if not isinstance(choices, list) or len(choices) == 0:
+                raise Ext002CallError(
+                    "OpenAI-compatible /chat/completions returned no choices",
+                    retries_exhausted=False,
+                )
+            first_choice = choices[0]
+            if not isinstance(first_choice, dict):
+                raise Ext002CallError(
+                    "OpenAI-compatible /chat/completions returned unexpected choice format",
+                    retries_exhausted=False,
+                )
+            message = first_choice.get("message")
+            if not isinstance(message, dict):
+                raise Ext002CallError(
+                    "OpenAI-compatible /chat/completions returned no message in choice",
+                    retries_exhausted=False,
+                )
+            content = message.get("content")
+            if not isinstance(content, str):
+                raise Ext002CallError(
+                    "OpenAI-compatible /chat/completions returned non-string content",
+                    retries_exhausted=False,
+                )
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError as exc:
+                raise Ext002CallError(
+                    "OpenAI-compatible /chat/completions returned malformed JSON in content",
+                    retries_exhausted=False,
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise Ext002CallError(
+                    "OpenAI-compatible evaluate response content is not a JSON object",
+                    retries_exhausted=False,
+                )
+            result = EvaluateResult(
+                raw_response=parsed,
+                input_tokens=prompt_tokens or 0,
+                output_tokens=completion_tokens or 0,
+            )
+        except Ext002CallError:
+            self._record_span(
+                "evaluate",
+                status="failed",
+                started=started,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+            )
+            raise
+        self._record_span(
+            "evaluate",
+            status="success",
+            started=started,
+            input_tokens=prompt_tokens or 0,
+            output_tokens=completion_tokens or 0,
+        )
+        return result
 
 
 def build_openai_compatible_gateway(

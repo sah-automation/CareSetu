@@ -167,6 +167,7 @@ from modules.observability.domain.evaluation import (
     evaluate_day,
     golden_observation_metadata,
 )
+from modules.observability.domain.judge_run import JudgeRunReport, run_judge_job
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
@@ -513,6 +514,7 @@ __all__ = [
     "FunnelRead",
     "FunnelStepRow",
     "HttpCounterDrainReport",
+    "JudgeRunReport",
     "LatencyReport",
     "LatencyRow",
     "MarginPercent",
@@ -570,6 +572,7 @@ __all__ = [
     "record_ai_queue_open",
     "record_alert_event",
     "record_care_attribution_edge",
+    "run_judge_job",
     "run_rollup",
     "run_security_scan",
     "window_for",
@@ -7047,6 +7050,25 @@ class ObservabilityFacade:
 
         config = self._alert_delivery_config()
         await run_alert_drainer_job(self._engine, ops_facade, adapters, config=config)
+
+    async def run_judge_job(self) -> JudgeRunReport:
+        """Run the LLM judge job over the active synthetic dataset (re-exported for worker).
+
+        This job:
+        - Checks budget before and during the run
+        - Runs the completeness evaluator over the active dataset examples
+        - Uses temperature zero, strict JSON output, one retry on parse failure
+        - Stores scores with source=judge and a run reference
+        - Scores are advisory only and never gate approval
+        """
+        if self._settings is None:
+            from app.config import get_settings
+
+            settings = get_settings()
+        else:
+            settings = self._settings
+
+        return await run_judge_job(self._engine, settings)
 
     def _alert_delivery_config(self) -> AlertDeliveryConfig:
         """Build alert delivery config from settings."""
