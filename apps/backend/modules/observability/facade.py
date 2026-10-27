@@ -141,6 +141,9 @@ from modules.observability.domain.consumer import (
     IntakeDoctorAssignedTelemetryPayload,
     sanitize_failure_reason,
 )
+from modules.observability.domain.dataset_validation import (
+    validate_examples,
+)
 from modules.observability.domain.deeplinks import (
     DEFAULT_GRAFANA_WINDOW,
     GRAFANA_DASHBOARD_UID,
@@ -6607,6 +6610,16 @@ class ObservabilityFacade:
         if not examples:
             raise ValueError("At least one example is required")
 
+        # Validate examples before any database operation
+        validation_errors = validate_examples(examples)
+        if validation_errors:
+            error_messages = []
+            for err in validation_errors:
+                prefix = f"{err.field}: {err.message}"
+                suffix = f" (example: {err.example_ref})" if err.example_ref else ""
+                error_messages.append(prefix + suffix)
+            raise ValueError("Validation failed: " + "; ".join(error_messages))
+
         async with self._engine.begin() as connection:
             # Check for duplicate name+version
             existing = await connection.execute(
@@ -6696,6 +6709,16 @@ class ObservabilityFacade:
             if not examples:
                 raise ValueError(f"Source dataset {source_dataset_id} has no examples")
 
+            # Validate cloned examples before insert
+            validation_errors = validate_examples(examples)
+            if validation_errors:
+                error_messages = []
+                for err in validation_errors:
+                    prefix = f"{err.field}: {err.message}"
+                    suffix = f" (example: {err.example_ref})" if err.example_ref else ""
+                    error_messages.append(prefix + suffix)
+                raise ValueError("Validation failed: " + "; ".join(error_messages))
+
             now = datetime.now(UTC)
             result = await connection.execute(
                 insert(observability_evaluation_datasets)
@@ -6744,6 +6767,16 @@ class ObservabilityFacade:
 
         if not examples:
             raise ValueError("At least one example is required")
+
+        # Validate examples before any database operation
+        validation_errors = validate_examples(examples)
+        if validation_errors:
+            error_messages = []
+            for err in validation_errors:
+                prefix = f"{err.field}: {err.message}"
+                suffix = f" (example: {err.example_ref})" if err.example_ref else ""
+                error_messages.append(prefix + suffix)
+            raise ValueError("Validation failed: " + "; ".join(error_messages))
 
         async with self._engine.begin() as connection:
             # Get dataset and verify it's a draft
