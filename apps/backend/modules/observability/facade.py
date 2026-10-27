@@ -3073,6 +3073,8 @@ class EvaluationDatasetListResponse(BaseModel):
 
     versions: list[EvaluationDatasetVersion]
     total_count: int
+    page: int
+    page_size: int
 
 
 class EvaluationDatasetSeedRequest(BaseModel):
@@ -3099,8 +3101,6 @@ class EvaluationDatasetCloneRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str
-    version: int
     source_dataset_id: int
 
 
@@ -6477,10 +6477,22 @@ class ObservabilityFacade:
             )
 
     async def list_evaluation_dataset_versions(
-        self, *, name: str | None = None
+        self, *, name: str | None = None, page: int = 1, page_size: int = 25
     ) -> EvaluationDatasetListResponse:
-        """List evaluation dataset versions, optionally filtered by name."""
+        """List evaluation dataset versions, optionally filtered by name with pagination."""
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size must be between 1 and 100")
+
         async with self._engine.begin() as connection:
+            # Get total count
+            count_query = select(func.count()).select_from(observability_evaluation_datasets)
+            if name:
+                count_query = count_query.where(observability_evaluation_datasets.c.name == name)
+            total_count = (await connection.execute(count_query)).scalar() or 0
+
+            # Get paginated results
             query = select(
                 observability_evaluation_datasets.c.id,
                 observability_evaluation_datasets.c.name,
@@ -6494,6 +6506,9 @@ class ObservabilityFacade:
             )
             if name:
                 query = query.where(observability_evaluation_datasets.c.name == name)
+
+            offset = (page - 1) * page_size
+            query = query.limit(page_size).offset(offset)
 
             rows = (await connection.execute(query)).mappings().all()
 
@@ -6519,7 +6534,12 @@ class ObservabilityFacade:
                     )
                 )
 
-            return EvaluationDatasetListResponse(versions=versions, total_count=len(versions))
+            return EvaluationDatasetListResponse(
+                versions=versions,
+                total_count=total_count,
+                page=page,
+                page_size=page_size,
+            )
 
     async def get_evaluation_dataset_version(
         self, *, name: str, version: int
@@ -6924,6 +6944,14 @@ class ObservabilityFacade:
             if row["status"] == "retired":
                 raise ValueError("Dataset version is already retired")
 
+            # Get example count before retiring
+            example_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_examples)
+                .where(observability_evaluation_examples.c.dataset_id == row["id"])
+            )
+            example_count = example_count_result.scalar() or 0
+
             now = datetime.now(UTC)
             await connection.execute(
                 observability_evaluation_datasets.update()
@@ -6938,7 +6966,7 @@ class ObservabilityFacade:
                 status="retired",
                 created_at=row["created_at"].isoformat(),
                 updated_at=now.isoformat(),
-                example_count=0,
+                example_count=example_count,
                 is_active=False,
             )
 
