@@ -95,7 +95,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from time import perf_counter
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 from typing import cast as narrowing_cast
 from uuid import UUID
 
@@ -256,6 +256,14 @@ from modules.ops.facade import OpsFacade
 from observability.langfuse_metrics import LangfuseDailyMetrics, pull_daily_metrics
 from observability.logging import SERVICE_API
 from observability.trace_ids import clamp_trace_id
+
+
+class _EffectiveSettingProto(Protocol):
+    """Protocol for effective setting objects (avoids cross-module import)."""
+
+    key: str
+    value: object | None
+
 
 OBSERVABILITY_SCHEMA = "observability"
 
@@ -6297,8 +6305,19 @@ class ObservabilityFacade:
             console_base_url=self._settings.alert_delivery_console_base_url,
         )
 
-    def alert_delivery_adapters(self, settings: Settings) -> dict[str, ChannelAdapter]:
-        """Build channel adapters from settings (re-exported for worker)."""
+    def alert_delivery_adapters(
+        self,
+        settings: Settings,
+        effective_settings: list[_EffectiveSettingProto] | None = None,
+    ) -> dict[str, ChannelAdapter]:
+        """Build channel adapters from settings and effective settings (re-exported for worker).
+
+        The Slack adapter is only created if:
+        1. The notification.channels.slack.enabled gate is True (from effective settings)
+        2. The SLACK_WEBHOOK_URL environment variable is set (from settings)
+
+        This ensures the gate-off path is a no-op and the secret is never used when disabled.
+        """
         from modules.observability.domain.alert_delivery import (
             Channel,
             SlackAdapter,
@@ -6306,8 +6325,17 @@ class ObservabilityFacade:
         )
 
         adapters: dict[str, ChannelAdapter] = {}
+
+        # Check Slack channel gate from effective settings (defaults to False)
+        slack_enabled = False
+        if effective_settings:
+            for setting in effective_settings:
+                if setting.key == "notification.channels.slack.enabled":
+                    slack_enabled = setting.value is True
+                    break
+
         slack_webhook_url = settings.slack_webhook_url
-        if slack_webhook_url:
+        if slack_enabled and slack_webhook_url:
             adapters[Channel.SLACK.value] = SlackAdapter(slack_webhook_url)
 
         smtp_host = settings.smtp_host

@@ -667,8 +667,14 @@ async def run_worker_until_stopped(
         obs_facade = ObservabilityFacade(engine=engine, settings=resolved_settings)
         ops_facade = OpsFacade(engine=engine, settings=resolved_settings)
 
+        # Fetch effective settings to check channel gates
+        effective_settings = await ops_facade.get_effective_settings()
+
         # Build channel adapters from environment configuration via facade
-        adapters = obs_facade.alert_delivery_adapters(resolved_settings)
+        adapters = obs_facade.alert_delivery_adapters(
+            resolved_settings,
+            effective_settings,  # type: ignore[arg-type]
+        )
 
         # Add router job (runs every minute)
         scheduler.add_job(

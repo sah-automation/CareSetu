@@ -104,6 +104,8 @@ class SlackAdapter:
     channel_name = "slack"
 
     def __init__(self, webhook_url: str) -> None:
+        if not webhook_url or not webhook_url.startswith("https://hooks.slack.com/services/"):
+            raise ValueError("Invalid Slack webhook URL")
         self._webhook_url = webhook_url
 
     async def send(
@@ -166,11 +168,11 @@ class SlackAdapter:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(self._webhook_url, json=payload)
                 response.raise_for_status()
-                return DeliveryAttemptResult(
-                    success=True, response=response.json() if response.content else {}
-                )
-        except Exception as e:
-            return DeliveryAttemptResult(success=False, error=str(e))
+                response_json = await response.json() if response.content else {}
+                return DeliveryAttemptResult(success=True, response=response_json)
+        except Exception:
+            # Do not leak the webhook URL in error messages
+            return DeliveryAttemptResult(success=False, error="Slack delivery failed")
 
 
 class SmtpAdapter:
