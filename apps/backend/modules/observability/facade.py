@@ -100,7 +100,7 @@ from typing import cast as narrowing_cast
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import (
     CTE,
     ColumnElement,
@@ -162,11 +162,16 @@ from modules.observability.domain.evaluation import (
     SOURCE_JUDGE,
     EvaluationScore,
     evaluate_day,
+    golden_observation_metadata,
 )
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
     ProductOutcomeNotAllowed,
+)
+from modules.observability.domain.golden_dataset import (
+    GOLDEN_STRUCTURINGS,
+    GOLDEN_TRANSCRIPTIONS,
 )
 from modules.observability.domain.product import (
     FUNNEL_INTAKE,
@@ -244,6 +249,8 @@ from modules.observability.schema.models import (
     observability_consumed_events,
     observability_csp_aggregates,
     observability_error_events,
+    observability_evaluation_datasets,
+    observability_evaluation_examples,
     observability_evaluation_scores,
     observability_http_minute,
     observability_product_actor_daily,
@@ -490,6 +497,15 @@ __all__ = [
     "ErrorDrainReport",
     "ErrorFeedEntry",
     "ErrorFeedPage",
+    "EvaluationDatasetActivateResponse",
+    "EvaluationDatasetCloneRequest",
+    "EvaluationDatasetCreateRequest",
+    "EvaluationDatasetEditRequest",
+    "EvaluationDatasetExample",
+    "EvaluationDatasetListResponse",
+    "EvaluationDatasetSeedRequest",
+    "EvaluationDatasetVersion",
+    "EvaluationDatasetVersionDetail",
     "FunnelOutcomeTotals",
     "FunnelRead",
     "FunnelStepRow",
@@ -3007,6 +3023,102 @@ class Deeplinks(BaseModel):
     grafana: GrafanaDeeplinks | None = None
     sentry: SentryDeeplinks | None = None
     langfuse: LangfuseDeeplinks | None = None
+
+
+# ------------------------------------------------------- evaluation dataset API (#787)
+#
+# Versioned evaluation dataset management for admin operators. The golden dataset
+# (#751) is seeded as the initial active version; admins can create draft versions,
+# clone existing ones, edit drafts, and activate a version (which retires the
+# previous active version). Active versions are immutable - edits are refused.
+
+
+class EvaluationDatasetExample(BaseModel):
+    """One synthetic example in an evaluation dataset version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    example_ref: str
+    task_type: str
+    input: dict[str, object]
+    expected_output: dict[str, object]
+    tags: list[str]
+
+
+class EvaluationDatasetVersion(BaseModel):
+    """One version of a named evaluation dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    name: str
+    version: int
+    status: str
+    created_at: str
+    updated_at: str
+    example_count: int
+    is_active: bool
+
+
+class EvaluationDatasetVersionDetail(EvaluationDatasetVersion):
+    """A dataset version with its examples included."""
+
+    examples: list[EvaluationDatasetExample]
+
+
+class EvaluationDatasetListResponse(BaseModel):
+    """Paginated list of evaluation dataset versions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    versions: list[EvaluationDatasetVersion]
+    total_count: int
+
+
+class EvaluationDatasetSeedRequest(BaseModel):
+    """Request to seed the active dataset from the golden dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = "golden"
+    version: int = 1
+
+
+class EvaluationDatasetCreateRequest(BaseModel):
+    """Request to create a new draft dataset version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: int
+    examples: list[EvaluationDatasetExample]
+
+
+class EvaluationDatasetCloneRequest(BaseModel):
+    """Request to clone an existing dataset version as a new draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: int
+    source_dataset_id: int
+
+
+class EvaluationDatasetEditRequest(BaseModel):
+    """Request to edit a draft dataset version's examples."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    examples: list[EvaluationDatasetExample]
+
+
+class EvaluationDatasetActivateResponse(BaseModel):
+    """Response from activating a dataset version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    activated: EvaluationDatasetVersion
+    retired: EvaluationDatasetVersion | None
 
 
 # ------------------------------------------------------- operator read API (C1b)
@@ -6246,6 +6358,589 @@ class ObservabilityFacade:
             task_type=task_type,
             error_type=error_type,
         )
+
+    # --------------------------------------------------------- evaluation dataset API (#787)
+
+    async def seed_evaluation_dataset(
+        self, *, name: str = "golden", version: int = 1
+    ) -> EvaluationDatasetVersion:
+        """Seed the active evaluation dataset version from the golden dataset (#751).
+
+        Idempotent: if the named version already exists, returns it without changes.
+        Creates the dataset version with status 'active' and populates examples from
+        the synthetic golden dataset. The golden dataset contains transcription and
+        structuring examples that mirror the two AI legs the product PRD scores.
+        """
+        from datetime import UTC, datetime
+
+        async with self._engine.begin() as connection:
+            # Check if dataset version already exists
+            existing = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            row = existing.mappings().first()
+            if row:
+                # Count examples
+                example_count_result = await connection.execute(
+                    select(func.count())
+                    .select_from(observability_evaluation_examples)
+                    .where(observability_evaluation_examples.c.dataset_id == row["id"])
+                )
+                example_count = example_count_result.scalar() or 0
+                return EvaluationDatasetVersion(
+                    id=row["id"],
+                    name=row["name"],
+                    version=row["version"],
+                    status=row["status"],
+                    created_at=row["created_at"].isoformat(),
+                    updated_at=row["updated_at"].isoformat(),
+                    example_count=example_count,
+                    is_active=row["status"] == "active",
+                )
+
+            # Create dataset version as active
+            now = datetime.now(UTC)
+            result = await connection.execute(
+                insert(observability_evaluation_datasets)
+                .values(name=name, version=version, status="active", created_at=now, updated_at=now)
+                .returning(observability_evaluation_datasets.c.id)
+            )
+            dataset_id = result.scalar_one()
+
+            # Seed examples from golden dataset
+            examples_to_insert = []
+
+            # Transcription examples
+            for example in GOLDEN_TRANSCRIPTIONS:
+                _ = golden_observation_metadata("transcribe")
+                examples_to_insert.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "example_ref": example.example_id,
+                        "task_type": "transcribe",
+                        "input": {"hypothesis": example.hypothesis},
+                        "expected_output": {"reference": example.reference},
+                        "tags": ["golden", "transcription"],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+
+            # Structuring examples
+            for struct_example in GOLDEN_STRUCTURINGS:
+                _ = golden_observation_metadata("structure")
+                confidence_str = (
+                    "missing"
+                    if struct_example.confidence is None
+                    else str(struct_example.confidence)
+                )
+                examples_to_insert.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "example_ref": struct_example.example_id,
+                        "task_type": "structure",
+                        "input": {
+                            "produced_fields": struct_example.produced_fields,
+                            "confidence": confidence_str,
+                        },
+                        "expected_output": {"expected_fields": struct_example.expected_fields},
+                        "tags": ["golden", "structuring", f"confidence_{confidence_str}"],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+
+            if examples_to_insert:
+                await connection.execute(
+                    insert(observability_evaluation_examples).values(examples_to_insert)
+                )
+
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status="active",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                example_count=len(examples_to_insert),
+                is_active=True,
+            )
+
+    async def list_evaluation_dataset_versions(
+        self, *, name: str | None = None
+    ) -> EvaluationDatasetListResponse:
+        """List evaluation dataset versions, optionally filtered by name."""
+        async with self._engine.begin() as connection:
+            query = select(
+                observability_evaluation_datasets.c.id,
+                observability_evaluation_datasets.c.name,
+                observability_evaluation_datasets.c.version,
+                observability_evaluation_datasets.c.status,
+                observability_evaluation_datasets.c.created_at,
+                observability_evaluation_datasets.c.updated_at,
+            ).order_by(
+                observability_evaluation_datasets.c.name,
+                observability_evaluation_datasets.c.version.desc(),
+            )
+            if name:
+                query = query.where(observability_evaluation_datasets.c.name == name)
+
+            rows = (await connection.execute(query)).mappings().all()
+
+            versions = []
+            for row in rows:
+                # Count examples for each version
+                example_count_result = await connection.execute(
+                    select(func.count())
+                    .select_from(observability_evaluation_examples)
+                    .where(observability_evaluation_examples.c.dataset_id == row["id"])
+                )
+                example_count = example_count_result.scalar() or 0
+                versions.append(
+                    EvaluationDatasetVersion(
+                        id=row["id"],
+                        name=row["name"],
+                        version=row["version"],
+                        status=row["status"],
+                        created_at=row["created_at"].isoformat(),
+                        updated_at=row["updated_at"].isoformat(),
+                        example_count=example_count,
+                        is_active=row["status"] == "active",
+                    )
+                )
+
+            return EvaluationDatasetListResponse(versions=versions, total_count=len(versions))
+
+    async def get_evaluation_dataset_version(
+        self, *, name: str, version: int
+    ) -> EvaluationDatasetVersionDetail | None:
+        """Get a specific dataset version with its examples."""
+        async with self._engine.begin() as connection:
+            dataset_row = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            row = dataset_row.mappings().first()
+            if not row:
+                return None
+
+            # Get examples
+            examples_result = await connection.execute(
+                select(
+                    observability_evaluation_examples.c.example_ref,
+                    observability_evaluation_examples.c.task_type,
+                    observability_evaluation_examples.c.input,
+                    observability_evaluation_examples.c.expected_output,
+                    observability_evaluation_examples.c.tags,
+                )
+                .where(observability_evaluation_examples.c.dataset_id == row["id"])
+                .order_by(observability_evaluation_examples.c.example_ref)
+            )
+            examples = [
+                EvaluationDatasetExample(
+                    example_ref=ex["example_ref"],
+                    task_type=ex["task_type"],
+                    input=dict(ex["input"]),
+                    expected_output=dict(ex["expected_output"]),
+                    tags=list(ex["tags"]),
+                )
+                for ex in examples_result.mappings()
+            ]
+
+            return EvaluationDatasetVersionDetail(
+                id=row["id"],
+                name=row["name"],
+                version=row["version"],
+                status=row["status"],
+                created_at=row["created_at"].isoformat(),
+                updated_at=row["updated_at"].isoformat(),
+                example_count=len(examples),
+                is_active=row["status"] == "active",
+                examples=examples,
+            )
+
+    async def create_evaluation_dataset_draft(
+        self, *, name: str, version: int, examples: list[EvaluationDatasetExample]
+    ) -> EvaluationDatasetVersion:
+        """Create a new draft evaluation dataset version."""
+        from datetime import UTC, datetime
+
+        if not examples:
+            raise ValueError("At least one example is required")
+
+        async with self._engine.begin() as connection:
+            # Check for duplicate name+version
+            existing = await connection.execute(
+                select(observability_evaluation_datasets.c.id).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            if existing.scalar() is not None:
+                raise ValueError(f"Dataset version {name} v{version} already exists")
+
+            now = datetime.now(UTC)
+            result = await connection.execute(
+                insert(observability_evaluation_datasets)
+                .values(name=name, version=version, status="draft", created_at=now, updated_at=now)
+                .returning(observability_evaluation_datasets.c.id)
+            )
+            dataset_id = result.scalar_one()
+
+            # Insert examples
+            examples_to_insert = [
+                {
+                    "dataset_id": dataset_id,
+                    "example_ref": ex.example_ref,
+                    "task_type": ex.task_type,
+                    "input": ex.input,
+                    "expected_output": ex.expected_output,
+                    "tags": ex.tags,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for ex in examples
+            ]
+            await connection.execute(
+                insert(observability_evaluation_examples).values(examples_to_insert)
+            )
+
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status="draft",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                example_count=len(examples),
+                is_active=False,
+            )
+
+    async def clone_evaluation_dataset(
+        self, *, name: str, version: int, source_dataset_id: int
+    ) -> EvaluationDatasetVersion:
+        """Clone an existing dataset version as a new draft."""
+        from datetime import UTC, datetime
+
+        async with self._engine.begin() as connection:
+            # Check for duplicate name+version
+            existing = await connection.execute(
+                select(observability_evaluation_datasets.c.id).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            if existing.scalar() is not None:
+                raise ValueError(f"Dataset version {name} v{version} already exists")
+
+            # Get source examples
+            source_examples = await connection.execute(
+                select(
+                    observability_evaluation_examples.c.example_ref,
+                    observability_evaluation_examples.c.task_type,
+                    observability_evaluation_examples.c.input,
+                    observability_evaluation_examples.c.expected_output,
+                    observability_evaluation_examples.c.tags,
+                ).where(observability_evaluation_examples.c.dataset_id == source_dataset_id)
+            )
+            examples = [
+                EvaluationDatasetExample(
+                    example_ref=row["example_ref"],
+                    task_type=row["task_type"],
+                    input=dict(row["input"]),
+                    expected_output=dict(row["expected_output"]),
+                    tags=list(row["tags"]),
+                )
+                for row in source_examples.mappings()
+            ]
+
+            if not examples:
+                raise ValueError(f"Source dataset {source_dataset_id} has no examples")
+
+            now = datetime.now(UTC)
+            result = await connection.execute(
+                insert(observability_evaluation_datasets)
+                .values(name=name, version=version, status="draft", created_at=now, updated_at=now)
+                .returning(observability_evaluation_datasets.c.id)
+            )
+            dataset_id = result.scalar_one()
+
+            # Insert cloned examples
+            examples_to_insert = [
+                {
+                    "dataset_id": dataset_id,
+                    "example_ref": ex.example_ref,
+                    "task_type": ex.task_type,
+                    "input": ex.input,
+                    "expected_output": ex.expected_output,
+                    "tags": ex.tags,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for ex in examples
+            ]
+            await connection.execute(
+                insert(observability_evaluation_examples).values(examples_to_insert)
+            )
+
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status="draft",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                example_count=len(examples),
+                is_active=False,
+            )
+
+    async def edit_evaluation_dataset_draft(
+        self, *, name: str, version: int, examples: list[EvaluationDatasetExample]
+    ) -> EvaluationDatasetVersion:
+        """Edit a draft evaluation dataset version's examples.
+
+        Refuses if the version is not in 'draft' status (active/retired versions are immutable).
+        """
+        from datetime import UTC, datetime
+
+        if not examples:
+            raise ValueError("At least one example is required")
+
+        async with self._engine.begin() as connection:
+            # Get dataset and verify it's a draft
+            dataset_row = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.status,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            row = dataset_row.mappings().first()
+            if not row:
+                raise ValueError(f"Dataset version {name} v{version} not found")
+
+            if row["status"] != "draft":
+                raise ValueError(
+                    f"Cannot edit dataset version with status "
+                    f"'{row['status']}' - only draft versions are editable"
+                )
+
+            dataset_id = row["id"]
+            now = datetime.now(UTC)
+
+            # Delete existing examples
+            await connection.execute(
+                delete(observability_evaluation_examples).where(
+                    observability_evaluation_examples.c.dataset_id == dataset_id
+                )
+            )
+
+            # Insert new examples
+            examples_to_insert = [
+                {
+                    "dataset_id": dataset_id,
+                    "example_ref": ex.example_ref,
+                    "task_type": ex.task_type,
+                    "input": ex.input,
+                    "expected_output": ex.expected_output,
+                    "tags": ex.tags,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for ex in examples
+            ]
+            await connection.execute(
+                insert(observability_evaluation_examples).values(examples_to_insert)
+            )
+
+            # Update dataset updated_at
+            await connection.execute(
+                observability_evaluation_datasets.update()
+                .where(observability_evaluation_datasets.c.id == dataset_id)
+                .values(updated_at=now)
+            )
+
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status="draft",
+                created_at=row["created_at"].isoformat(),
+                updated_at=now.isoformat(),
+                example_count=len(examples),
+                is_active=False,
+            )
+
+    async def activate_evaluation_dataset_version(
+        self, *, name: str, version: int
+    ) -> EvaluationDatasetActivateResponse:
+        """Activate a dataset version, retiring the previous active version.
+
+        Only draft versions can be activated. The previous active version (if any)
+        is retired. This is an atomic operation.
+        """
+        from datetime import UTC, datetime
+
+        async with self._engine.begin() as connection:
+            # Get the version to activate
+            to_activate = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            activate_row = to_activate.mappings().first()
+            if not activate_row:
+                raise ValueError(f"Dataset version {name} v{version} not found")
+
+            if activate_row["status"] != "draft":
+                raise ValueError(
+                    f"Can only activate draft versions, not '{activate_row['status']}'"
+                )
+
+            # Find current active version (if any)
+            current_active = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.status == "active",
+                )
+            )
+            active_row = current_active.mappings().first()
+
+            now = datetime.now(UTC)
+
+            # Retire current active version (if exists and is different)
+            retired_version = None
+            if active_row and active_row["id"] != activate_row["id"]:
+                await connection.execute(
+                    observability_evaluation_datasets.update()
+                    .where(observability_evaluation_datasets.c.id == active_row["id"])
+                    .values(status="retired", updated_at=now)
+                )
+                retired_version = EvaluationDatasetVersion(
+                    id=active_row["id"],
+                    name=active_row["name"],
+                    version=active_row["version"],
+                    status="retired",
+                    created_at=active_row["created_at"].isoformat(),
+                    updated_at=now.isoformat(),
+                    example_count=0,  # Not needed for retired
+                    is_active=False,
+                )
+
+            # Activate the new version
+            await connection.execute(
+                observability_evaluation_datasets.update()
+                .where(observability_evaluation_datasets.c.id == activate_row["id"])
+                .values(status="active", updated_at=now)
+            )
+
+            # Count examples for activated version
+            example_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_examples)
+                .where(observability_evaluation_examples.c.dataset_id == activate_row["id"])
+            )
+            example_count = example_count_result.scalar() or 0
+
+            activated_version = EvaluationDatasetVersion(
+                id=activate_row["id"],
+                name=activate_row["name"],
+                version=activate_row["version"],
+                status="active",
+                created_at=activate_row["created_at"].isoformat(),
+                updated_at=now.isoformat(),
+                example_count=example_count,
+                is_active=True,
+            )
+
+            return EvaluationDatasetActivateResponse(
+                activated=activated_version,
+                retired=retired_version,
+            )
+
+    async def retire_evaluation_dataset_version(
+        self, *, name: str, version: int
+    ) -> EvaluationDatasetVersion:
+        """Retire a dataset version (draft or active).
+
+        Retiring an active version leaves no active version for that name.
+        """
+        from datetime import UTC, datetime
+
+        async with self._engine.begin() as connection:
+            dataset_row = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            row = dataset_row.mappings().first()
+            if not row:
+                raise ValueError(f"Dataset version {name} v{version} not found")
+
+            if row["status"] == "retired":
+                raise ValueError("Dataset version is already retired")
+
+            now = datetime.now(UTC)
+            await connection.execute(
+                observability_evaluation_datasets.update()
+                .where(observability_evaluation_datasets.c.id == row["id"])
+                .values(status="retired", updated_at=now)
+            )
+
+            return EvaluationDatasetVersion(
+                id=row["id"],
+                name=row["name"],
+                version=row["version"],
+                status="retired",
+                created_at=row["created_at"].isoformat(),
+                updated_at=now.isoformat(),
+                example_count=0,
+                is_active=False,
+            )
 
     async def accumulate_csp_aggregate(
         self,

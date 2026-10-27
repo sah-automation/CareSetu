@@ -55,14 +55,14 @@ from __future__ import annotations
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from app.config import Settings
 from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_operator
+from app.gateway.rbac import require_admin, require_operator
 from modules.observability.domain.deeplinks import (
     DEFAULT_GRAFANA_WINDOW,
     MAX_KEY_LENGTH,
@@ -94,6 +94,14 @@ from modules.observability.facade import (
     CostTrend,
     Deeplinks,
     ErrorFeedPage,
+    EvaluationDatasetActivateResponse,
+    EvaluationDatasetCloneRequest,
+    EvaluationDatasetCreateRequest,
+    EvaluationDatasetEditRequest,
+    EvaluationDatasetListResponse,
+    EvaluationDatasetSeedRequest,
+    EvaluationDatasetVersion,
+    EvaluationDatasetVersionDetail,
     FunnelRead,
     LatencyReport,
     ObservabilityFacade,
@@ -836,6 +844,251 @@ async def read_deeplinks(
         task_type=task_type,
         error_type=error_type,
     )
+
+
+# --------------------------------------------------------- evaluation dataset API (#787)
+#
+# Admin-only routes for managing versioned evaluation datasets. The golden dataset
+# is seeded as the initial active version; admins can create draft versions, clone
+# existing ones, edit drafts, and activate a version (which retires the previous
+# active version). Active versions are immutable - edits are refused.
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets/seed",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_200_OK,
+    summary="Seed the active evaluation dataset from the golden dataset (admin only)",
+)
+async def seed_evaluation_dataset(
+    request: Request,
+    body: EvaluationDatasetSeedRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Seed the active evaluation dataset version from the synthetic golden dataset (#751).
+
+    Idempotent: if the named version already exists, returns it without changes.
+    The golden dataset contains transcription and structuring examples that mirror
+    the two AI legs the product PRD scores. Only admin-tier operators may call this.
+    """
+    del principal
+    return await _facade(request).seed_evaluation_dataset(name=body.name, version=body.version)
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/datasets",
+    response_model=EvaluationDatasetListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List evaluation dataset versions (admin only)",
+)
+async def list_evaluation_dataset_versions(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    name: str | None = None,
+) -> EvaluationDatasetListResponse:
+    """List all evaluation dataset versions, optionally filtered by dataset name.
+
+    Only admin-tier operators may call this.
+    """
+    del principal
+    return await _facade(request).list_evaluation_dataset_versions(name=name)
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}",
+    response_model=EvaluationDatasetVersionDetail,
+    status_code=status.HTTP_200_OK,
+    summary="Get a specific evaluation dataset version with examples (admin only)",
+)
+async def get_evaluation_dataset_version(
+    request: Request,
+    name: str,
+    version: int,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersionDetail:
+    """Get a specific dataset version with its examples.
+
+    Only admin-tier operators may call this. Returns 404 if the version does not exist.
+    """
+    del principal
+    facade = _facade(request)
+    result = await facade.get_evaluation_dataset_version(name=name, version=version)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "EVALUATION_DATASET_NOT_FOUND",
+                "message": f"Dataset version {name} v{version} not found",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    return result
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new draft evaluation dataset version (admin only)",
+)
+async def create_evaluation_dataset_draft(
+    request: Request,
+    body: EvaluationDatasetCreateRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Create a new draft evaluation dataset version.
+
+    Only admin-tier operators may call this. The version must not already exist.
+    """
+    del principal
+    facade = _facade(request)
+    try:
+        return await facade.create_evaluation_dataset_draft(
+            name=body.name, version=body.version, examples=body.examples
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "EVALUATION_DATASET_CREATE_FAILED",
+                "message": str(e),
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        ) from e
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}/clone",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_201_CREATED,
+    summary="Clone an existing dataset version as a new draft (admin only)",
+)
+async def clone_evaluation_dataset(
+    request: Request,
+    name: str,
+    version: int,
+    body: EvaluationDatasetCloneRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Clone an existing dataset version as a new draft.
+
+    Only admin-tier operators may call this. The source dataset is copied entirely
+    to the new version with 'draft' status. The new version must not already exist.
+    """
+    del principal
+    facade = _facade(request)
+    try:
+        return await facade.clone_evaluation_dataset(
+            name=name, version=version, source_dataset_id=body.source_dataset_id
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "EVALUATION_DATASET_CLONE_FAILED",
+                "message": str(e),
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        ) from e
+
+
+@router.patch(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_200_OK,
+    summary="Edit a draft evaluation dataset version's examples (admin only)",
+)
+async def edit_evaluation_dataset_draft(
+    request: Request,
+    name: str,
+    version: int,
+    body: EvaluationDatasetEditRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Edit a draft evaluation dataset version's examples.
+
+    Only admin-tier operators may call this. Refuses if the version is not in 'draft'
+    status (active/retired versions are immutable).
+    """
+    del principal
+    facade = _facade(request)
+    try:
+        return await facade.edit_evaluation_dataset_draft(
+            name=name, version=version, examples=body.examples
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "EVALUATION_DATASET_EDIT_FAILED",
+                "message": str(e),
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        ) from e
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}/activate",
+    response_model=EvaluationDatasetActivateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Activate a dataset version, retiring the previous active version (admin only)",
+)
+async def activate_evaluation_dataset_version(
+    request: Request,
+    name: str,
+    version: int,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetActivateResponse:
+    """Activate a dataset version, retiring the previous active version.
+
+    Only admin-tier operators may call this. Only draft versions can be activated.
+    The previous active version (if any) is retired atomically.
+    """
+    del principal
+    facade = _facade(request)
+    try:
+        return await facade.activate_evaluation_dataset_version(name=name, version=version)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "EVALUATION_DATASET_ACTIVATE_FAILED",
+                "message": str(e),
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        ) from e
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}/retire",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_200_OK,
+    summary="Retire a dataset version (admin only)",
+)
+async def retire_evaluation_dataset_version(
+    request: Request,
+    name: str,
+    version: int,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Retire a dataset version (draft or active).
+
+    Only admin-tier operators may call this. Retiring an active version leaves no
+    active version for that name. Already retired versions cannot be retired again.
+    """
+    del principal
+    facade = _facade(request)
+    try:
+        return await facade.retire_evaluation_dataset_version(name=name, version=version)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "EVALUATION_DATASET_RETIRE_FAILED",
+                "message": str(e),
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        ) from e
 
 
 def register_error_handlers(app: FastAPI) -> None:
