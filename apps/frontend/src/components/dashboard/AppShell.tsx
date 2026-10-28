@@ -1,7 +1,7 @@
 "use client";
 
 // PHASE-2.6 T06 (#197): one shell component family parameterized by role,
-// producing the two blueprint densities (§2.3):
+// producing the two blueprint densities (A2.3):
 //
 //   Light (patient): top bar + slim desktop top-nav, bottom tab bar on
 //     phones - never a sidebar at any width.
@@ -16,13 +16,22 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { listOpenCases } from "@/lib/care/api";
+import { useAuth } from "@/lib/auth/AuthContext";
 
-import { NAV_CONFIG, sidebarStorageKey } from "./nav-config";
+import { filterNavItems, NAV_CONFIG, sidebarStorageKey } from "./nav-config";
 import { BottomTabs } from "./BottomTabs";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
+
+function useAuthOrNull() {
+  try {
+    return useAuth();
+  } catch {
+    return null;
+  }
+}
 
 export function AppShell({
   role,
@@ -69,6 +78,10 @@ function FullShellBody({
   children: ReactNode;
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  const auth = useAuthOrNull();
+  const isAdmin =
+    auth?.user?.roles?.includes("operator") === true &&
+    auth?.user?.tier === "admin";
 
   // PHASE-8.1 T8 (#483): the doctor Cases tab carries a live count pill fed
   // from the existing open-cases read (listOpenCases) - one fetch per full
@@ -81,15 +94,16 @@ function FullShellBody({
   // stale, the account menu reads the same source the Profile page edits, and an
   // edit on either side lands on both without a reload.
   const navItems = useMemo(() => {
-    if (role !== "doctor" || openCasesCount === undefined) {
-      return undefined;
-    }
-    return NAV_CONFIG[role].map((item: NavItemDef) =>
-      item.key === "cases" && !item.soon
-        ? { ...item, count: openCasesCount }
-        : item,
-    );
-  }, [role, openCasesCount]);
+    const base =
+      role === "doctor" && openCasesCount !== undefined
+        ? NAV_CONFIG[role].map((item: NavItemDef) =>
+            item.key === "cases" && !item.soon
+              ? { ...item, count: openCasesCount }
+              : item,
+          )
+        : NAV_CONFIG[role];
+    return filterNavItems(base, isAdmin);
+  }, [role, openCasesCount, isAdmin]);
 
   // Adopt this role's stored preference after mount (hydration-safe), then
   // mirror every change back into storage under the role's own key.
