@@ -2512,3 +2512,133 @@ export async function fetchEvaluation(): Promise<EvaluationReadResponse> {
     ),
   };
 }
+// #795: admin controls for the operator Evals page.
+
+export interface HumanLabelInput {
+  example_ref: string;
+  evaluator: string;
+  value: number;
+  data_type?: string;
+  score_date?: string;
+  trace_id?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export async function listEvaluationDatasetVersions(
+  name?: string,
+  page: number = 1,
+  pageSize: number = 25,
+): Promise<{
+  versions: EvaluationDatasetVersion[];
+  total_count: number;
+  page: number;
+  page_size: number;
+}> {
+  const query = new URLSearchParams();
+  if (name) query.set("name", name);
+  query.set("page", String(page));
+  query.set("page_size", String(pageSize));
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/datasets?${query.toString()}`,
+  );
+  return data as {
+    versions: EvaluationDatasetVersion[];
+    total_count: number;
+    page: number;
+    page_size: number;
+  };
+}
+
+export async function createEvaluationDatasetDraft(
+  name: string,
+  version: number,
+  examples: {
+    example_ref: string;
+    task_type: string;
+    input: Record<string, unknown>;
+    expected_output: Record<string, unknown>;
+    tags: string[];
+  }[],
+): Promise<EvaluationDatasetVersion> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/datasets`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, version, examples }),
+    },
+  );
+  return data as EvaluationDatasetVersion;
+}
+
+export async function editEvaluationDatasetDraft(
+  name: string,
+  version: number,
+  examples: {
+    example_ref: string;
+    task_type: string;
+    input: Record<string, unknown>;
+    expected_output: Record<string, unknown>;
+    tags: string[];
+  }[],
+): Promise<EvaluationDatasetVersion> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/datasets/${encodeURIComponent(
+      name,
+    )}/${version}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ examples }),
+    },
+  );
+  return data as EvaluationDatasetVersion;
+}
+
+export async function activateEvaluationDataset(
+  name: string,
+  version: number,
+): Promise<{
+  activated: EvaluationDatasetVersion;
+  retired: EvaluationDatasetVersion | null;
+}> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/datasets/${encodeURIComponent(
+      name,
+    )}/${version}/activate`,
+    { method: "POST" },
+  );
+  return data as {
+    activated: EvaluationDatasetVersion;
+    retired: EvaluationDatasetVersion | null;
+  };
+}
+
+export async function startJudgeRun(): Promise<JudgeRunProgress> {
+  const data = await request<unknown>(`${OBSERVABILITY_BASE}/evaluation/runs`, {
+    method: "POST",
+  });
+  return data as JudgeRunProgress;
+}
+
+export async function applyHumanLabel(
+  input: HumanLabelInput,
+): Promise<unknown> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/labels`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        example_ref: input.example_ref,
+        evaluator: input.evaluator,
+        value: input.value,
+        data_type: input.data_type,
+        score_date: input.score_date,
+        trace_id: input.trace_id ?? null,
+        metadata: input.metadata ?? {},
+      }),
+    },
+  );
+  return data;
+}
