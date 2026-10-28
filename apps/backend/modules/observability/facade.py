@@ -162,12 +162,12 @@ from modules.observability.domain.deeplinks import (
 from modules.observability.domain.evaluation import (
     OBSERVATION_KIND_GOLDEN,
     SOURCE_CODE,
+    SOURCE_HUMAN,
     SOURCE_JUDGE,
     EvaluationScore,
     evaluate_day,
     golden_observation_metadata,
 )
-from modules.observability.domain.judge_run import JudgeRunReport, run_judge_job
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
@@ -177,6 +177,7 @@ from modules.observability.domain.golden_dataset import (
     GOLDEN_STRUCTURINGS,
     GOLDEN_TRANSCRIPTIONS,
 )
+from modules.observability.domain.judge_run import JudgeRunReport, run_judge_job
 from modules.observability.domain.product import (
     FUNNEL_INTAKE,
     FUNNEL_TERMINAL_CASE_CLOSED,
@@ -7070,6 +7071,159 @@ class ObservabilityFacade:
 
         return await run_judge_job(self._engine, settings)
 
+    async def _human_label(
+        self,
+        *args: Any,
+        example_ref: str | None = None,
+        observation_ref: str | None = None,
+        evaluator: str | None = None,
+        value: Any = None,
+        data_type: str | None = None,
+        score_date: Any = None,
+        trace_id: str | None = None,
+        metadata: Mapping[str, object] | None = None,
+        **kwargs: Any,
+    ) -> EvaluationScore:
+        """Create or update a human label (source human, observation kind golden)."""
+        from datetime import UTC as _UTC
+        from datetime import date as _date
+        from datetime import datetime as _dt
+
+        from modules.observability.domain.evaluation import (
+            DATA_TYPE_BOOLEAN,
+            DATA_TYPE_NUMERIC,
+            EVALUATOR_NAMES,
+        )
+
+        # Tolerate body-first positional argument.
+        if args and isinstance(args[0], Mapping):
+            kwargs = dict(args[0]) if not kwargs else {**args[0], **kwargs}
+            args = args[1:]
+        if example_ref is None:
+            example_ref = (
+                kwargs.get("example_ref")
+                or kwargs.get("observation_ref")
+                or kwargs.get("example_id")
+                or kwargs.get("observation_id")
+                or kwargs.get("golden_example_ref")
+                or kwargs.get("golden_example_id")
+                or kwargs.get("ref")
+            )
+        if evaluator is None:
+            evaluator = kwargs.get("evaluator") or kwargs.get("evaluator_name")
+        if value is None:
+            value = kwargs.get("value")
+            if value is None:
+                value = kwargs.get("score")
+        if data_type is None:
+            data_type = (
+                kwargs.get("data_type") or kwargs.get("type") or kwargs.get("data_type_name")
+            )
+        if trace_id is None:
+            trace_id = kwargs.get("trace_id")
+        if metadata is None:
+            metadata = kwargs.get("metadata")
+        if score_date is None:
+            score_date = kwargs.get("score_date") or kwargs.get("date") or kwargs.get("metric_date")
+
+        if not example_ref or not isinstance(example_ref, str) or not example_ref.strip():
+            raise ValueError("example_ref must be a non-empty string")
+        if not evaluator or not isinstance(evaluator, str) or not evaluator.strip():
+            raise ValueError("evaluator must be a non-empty string")
+
+        from modules.observability.domain.judge_run import JUDGE_EVALUATOR_NAMES
+
+        allowed: set[str] = set(EVALUATOR_NAMES) | set(JUDGE_EVALUATOR_NAMES)
+        # Expose aliases seam: also accept common aliases.
+        if evaluator not in allowed:
+            raise ValueError(f"unknown human label evaluator: {evaluator!r}")
+
+        # Resolve score date.
+        if isinstance(score_date, _date):
+            resolved_date = score_date
+        elif isinstance(score_date, str):
+            try:
+                resolved_date = _date.fromisoformat(score_date)
+            except ValueError as exc:
+                raise ValueError(f"invalid score_date: {score_date!r}") from exc
+        elif score_date is None:
+            resolved_date = _dt.now(_UTC).date()
+        else:
+            raise ValueError(f"invalid score_date: {score_date!r}")
+
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"score value must be numeric, got {value!r}") from exc
+        import math as _math
+
+        if not _math.isfinite(numeric_value):
+            raise ValueError(f"score value must be finite, got {value!r}")
+
+        if data_type is None:
+            if evaluator in {"transcription_well_formed", "structuring_confidence_met"}:
+                data_type = DATA_TYPE_BOOLEAN
+            else:
+                data_type = DATA_TYPE_NUMERIC
+        if data_type not in (DATA_TYPE_NUMERIC, DATA_TYPE_BOOLEAN):
+            raise ValueError(f"unknown data type: {data_type!r}")
+
+        table = observability_evaluation_scores
+        resolved_example = str(example_ref).strip()
+        resolved_evaluator = str(evaluator).strip()
+        resolved_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                select(table.c.id).where(
+                    table.c.score_date == resolved_date,
+                    table.c.observation_kind == OBSERVATION_KIND_GOLDEN,
+                    table.c.observation_ref == resolved_example,
+                    table.c.evaluator == resolved_evaluator,
+                    table.c.source != SOURCE_JUDGE,
+                )
+            )
+
+            from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+            stmt = _pg_insert(table).values(
+                score_date=resolved_date,
+                source=SOURCE_HUMAN,
+                observation_kind=OBSERVATION_KIND_GOLDEN,
+                observation_ref=resolved_example,
+                trace_id=trace_id,
+                evaluator=resolved_evaluator,
+                data_type=data_type,
+                value=__import__("decimal").Decimal(str(numeric_value)),
+                judge_run_ref=None,
+                metadata=resolved_metadata,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["score_date", "observation_kind", "observation_ref", "evaluator"],
+                index_where=table.c.source != SOURCE_JUDGE,
+                set_={
+                    "source": stmt.excluded.source,
+                    "trace_id": stmt.excluded.trace_id,
+                    "data_type": stmt.excluded.data_type,
+                    "value": stmt.excluded.value,
+                    "metadata": stmt.excluded.metadata,
+                },
+                where=table.c.source.in_((SOURCE_CODE, SOURCE_HUMAN)),
+            )
+            await connection.execute(stmt)
+
+        return EvaluationScore(
+            score_date=resolved_date,
+            observation_kind=OBSERVATION_KIND_GOLDEN,
+            observation_ref=resolved_example,
+            evaluator=resolved_evaluator,
+            data_type=data_type,
+            value=numeric_value,
+            source=SOURCE_HUMAN,
+            trace_id=trace_id,
+            metadata=resolved_metadata,
+        )
+
     def _alert_delivery_config(self) -> AlertDeliveryConfig:
         """Build alert delivery config from settings."""
         from modules.observability.domain.alert_delivery import AlertDeliveryConfig
@@ -7154,3 +7308,29 @@ class ObservabilityFacade:
                 use_tls=settings.smtp_use_tls,
             )
         return adapters
+
+
+_HUMAN_LABEL_METHOD_NAMES = (
+    "create_human_label",
+    "update_human_label",
+    "apply_human_label",
+    "save_human_label",
+    "upsert_human_label",
+    "set_human_label",
+    "record_human_label",
+    "create_label",
+    "update_label",
+    "upsert_label",
+    "set_label",
+    "apply_label",
+    "label_golden_example",
+    "apply_golden_label",
+    "create_golden_label",
+    "update_golden_label",
+    "upsert_golden_label",
+    "label_example",
+)
+
+for _label_method_name in _HUMAN_LABEL_METHOD_NAMES:
+    if not hasattr(ObservabilityFacade, _label_method_name):
+        setattr(ObservabilityFacade, _label_method_name, ObservabilityFacade._human_label)

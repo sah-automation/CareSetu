@@ -1337,7 +1337,9 @@ def get_settings() -> Settings:
         llm_judge_model=os.environ.get("LLM_JUDGE_MODEL", DEFAULT_LLM_JUDGE_MODEL),
         llm_judge_budget_paise=_env_int("LLM_JUDGE_BUDGET_PAISE", DEFAULT_LLM_JUDGE_BUDGET_PAISE),
         llm_judge_max_examples=_env_int("LLM_JUDGE_MAX_EXAMPLES", DEFAULT_LLM_JUDGE_MAX_EXAMPLES),
-        llm_judge_prompt_version=os.environ.get("LLM_JUDGE_PROMPT_VERSION", DEFAULT_LLM_JUDGE_PROMPT_VERSION),
+        llm_judge_prompt_version=os.environ.get(
+            "LLM_JUDGE_PROMPT_VERSION", DEFAULT_LLM_JUDGE_PROMPT_VERSION
+        ),
         slack_webhook_url=os.environ.get("SLACK_WEBHOOK_URL", ""),
         smtp_host=os.environ.get("SMTP_HOST", ""),
         smtp_port=_env_int("SMTP_PORT", 587),

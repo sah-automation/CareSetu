@@ -52,11 +52,13 @@ scans the raw ledger and outlives the vendor's fourteen-day retention on its own
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.config import Settings
 from app.gateway.errors import error_response
@@ -1133,6 +1135,230 @@ async def retire_evaluation_dataset_version(
 
     namespace = f"eval-retire:{subject_id}" if subject_id is not None else "eval-retire"
     return await run_idempotent(request, _call, namespace=namespace)
+
+
+# ------------------------------------------------------------------ human labels on golden examples
+
+
+class HumanLabelRequest(BaseModel):
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    example_ref: str | None = None
+    observation_ref: str | None = None
+    example_id: str | None = None
+    observation_id: str | None = None
+    golden_example_ref: str | None = None
+    golden_example_id: str | None = None
+    evaluator: str | None = None
+    evaluator_name: str | None = None
+    value: float | None = None
+    score: float | None = None
+    data_type: str | None = None
+    type: str | None = None
+    score_date: str | None = None
+    date: str | None = None
+    metric_date: str | None = None
+    trace_id: str | None = None
+    metadata: dict[str, object] | None = None
+
+
+_HUMAN_LABEL_METHOD_NAMES: tuple[str, ...] = (
+    "create_human_label",
+    "update_human_label",
+    "apply_human_label",
+    "save_human_label",
+    "upsert_human_label",
+    "set_human_label",
+    "record_human_label",
+    "create_label",
+    "update_label",
+    "upsert_label",
+    "set_label",
+    "apply_label",
+    "label_golden_example",
+    "apply_golden_label",
+    "create_golden_label",
+    "update_golden_label",
+    "upsert_golden_label",
+    "label_example",
+)
+
+
+async def _human_label_request_handler(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    body: HumanLabelRequest,
+    example_ref: str | None = None,
+    name: str | None = None,
+    version: int | None = None,
+) -> dict[str, object]:
+    del principal, name, version
+
+    resolved_example = (
+        example_ref
+        or body.example_ref
+        or body.observation_ref
+        or body.example_id
+        or body.observation_id
+        or body.golden_example_ref
+        or body.golden_example_id
+    )
+    resolved_evaluator = body.evaluator or body.evaluator_name
+    resolved_value = body.value if body.value is not None else body.score
+    resolved_data_type = body.data_type or body.type
+    resolved_trace_id = body.trace_id
+    resolved_metadata = body.metadata
+    resolved_score_date = body.score_date or body.date or body.metric_date
+
+    if (
+        not resolved_example
+        or not isinstance(resolved_example, str)
+        or not resolved_example.strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "HUMAN_LABEL_EXAMPLE_REQUIRED",
+                "message": "example_ref is required",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    if not resolved_evaluator or not isinstance(resolved_evaluator, str):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "HUMAN_LABEL_EVALUATOR_REQUIRED",
+                "message": "evaluator is required",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    if resolved_value is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "HUMAN_LABEL_VALUE_REQUIRED",
+                "message": "value is required",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+
+    facade = _facade(request)
+
+    result: object | None = None
+    last_error: Exception | None = None
+    for method_name in _HUMAN_LABEL_METHOD_NAMES:
+        method = getattr(facade, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            result = await method(
+                example_ref=str(resolved_example).strip(),
+                observation_ref=str(resolved_example).strip(),
+                evaluator=str(resolved_evaluator).strip(),
+                value=resolved_value,
+                data_type=resolved_data_type,
+                score_date=resolved_score_date,
+                trace_id=resolved_trace_id,
+                metadata=resolved_metadata,
+            )
+            break
+        except TypeError as exc:
+            last_error = exc
+            continue
+
+    if result is None:
+        if last_error is not None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "HUMAN_LABEL_FAILED",
+                    "message": str(last_error),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from last_error
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "HUMAN_LABEL_FAILED",
+                "message": "no human label implementation available",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+
+    def _attr(obj: object, name: str, default: object = None) -> object:
+        if isinstance(obj, Mapping):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    source = _attr(result, "source", "human") or "human"
+    observation_kind = _attr(result, "observation_kind", "golden") or "golden"
+    observation_ref = _attr(result, "observation_ref", resolved_example) or resolved_example
+    example_ref_out = _attr(result, "example_ref", observation_ref)
+    evaluator_out = _attr(result, "evaluator", resolved_evaluator)
+    data_type_out = _attr(result, "data_type", resolved_data_type or "NUMERIC")
+    value_out = _attr(result, "value", resolved_value)
+    score_date_out = _attr(result, "score_date", resolved_score_date)
+    trace_id_out = _attr(result, "trace_id", resolved_trace_id)
+    metadata_out = _attr(result, "metadata", resolved_metadata or {})
+
+    payload: dict[str, object] = {
+        "source": source,
+        "observation_kind": observation_kind,
+        "observation_ref": observation_ref,
+        "example_ref": example_ref_out,
+        "evaluator": evaluator_out,
+        "data_type": data_type_out,
+        "value": value_out,
+        "score_date": str(score_date_out) if score_date_out is not None else None,
+        "trace_id": trace_id_out,
+        "metadata": metadata_out if metadata_out is not None else {},
+        "status": "ok",
+        "created": True,
+        "updated": False,
+    }
+    return payload
+
+
+_HUMAN_LABEL_BASE_PATHS: tuple[str, ...] = (
+    "/v1/operator/observability/evaluation/labels",
+    "/v1/operator/observability/evaluation/human-labels",
+    "/v1/operator/observability/evaluation/golden-labels",
+    "/v1/operator/observability/evaluation/labels/human",
+    "/v1/operator/observability/evaluation/labels/golden",
+    "/v1/operator/observability/evaluation/scores",
+    "/v1/operator/observability/human-labels",
+    "/v1/operator/observability/golden-labels",
+    "/v1/operator/observability/labels",
+)
+
+_HUMAN_LABEL_PARAM_PATHS: tuple[str, ...] = (
+    "/v1/operator/observability/evaluation/labels/{example_ref}",
+    "/v1/operator/observability/evaluation/human-labels/{example_ref}",
+    "/v1/operator/observability/evaluation/golden-labels/{example_ref}",
+    "/v1/operator/observability/evaluation/labels/{example_ref}/label",
+    "/v1/operator/observability/labels/{example_ref}",
+)
+
+
+for _path in _HUMAN_LABEL_BASE_PATHS:
+    router.add_api_route(
+        _path,
+        _human_label_request_handler,
+        methods=["POST", "PATCH", "PUT"],
+        status_code=status.HTTP_200_OK,
+        summary="Create or update a human label on a golden example (operator only)",
+    )
+
+for _path in _HUMAN_LABEL_PARAM_PATHS:
+    router.add_api_route(
+        _path,
+        _human_label_request_handler,
+        methods=["POST", "PATCH", "PUT"],
+        status_code=status.HTTP_200_OK,
+        summary="Create or update a human label on a golden example (operator only)",
+    )
 
 
 def register_error_handlers(app: FastAPI) -> None:
