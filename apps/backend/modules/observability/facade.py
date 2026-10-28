@@ -261,6 +261,7 @@ from modules.observability.schema.models import (
     observability_error_events,
     observability_evaluation_datasets,
     observability_evaluation_examples,
+    observability_evaluation_judge_runs,
     observability_evaluation_scores,
     observability_http_minute,
     observability_product_actor_daily,
@@ -457,6 +458,7 @@ __all__ = [
     "BUSINESS_PERIOD_TODAY",
     "BUSINESS_PERIOD_WEEK",
     "DEFAULT_ACTIVITY_WINDOW_MINUTES",
+    "DEFAULT_AGREEMENT_TOLERANCE",
     "DEFAULT_ALERT_PAGE_SIZE",
     "DEFAULT_ERROR_PAGE_SIZE",
     "DEFAULT_ERROR_WINDOW_MINUTES",
@@ -507,6 +509,7 @@ __all__ = [
     "ErrorDrainReport",
     "ErrorFeedEntry",
     "ErrorFeedPage",
+    "EvaluationAgreementRead",
     "EvaluationDatasetActivateResponse",
     "EvaluationDatasetCloneRequest",
     "EvaluationDatasetCreateRequest",
@@ -516,10 +519,13 @@ __all__ = [
     "EvaluationDatasetSeedRequest",
     "EvaluationDatasetVersion",
     "EvaluationDatasetVersionDetail",
+    "EvaluationReadResponse",
+    "EvaluationScoreRead",
     "FunnelOutcomeTotals",
     "FunnelRead",
     "FunnelStepRow",
     "HttpCounterDrainReport",
+    "JudgeRunProgress",
     "JudgeRunReport",
     "LatencyReport",
     "LatencyRow",
@@ -3131,6 +3137,76 @@ class EvaluationDatasetActivateResponse(BaseModel):
 
     activated: EvaluationDatasetVersion
     retired: EvaluationDatasetVersion | None
+
+
+# ------------------------------------------------------- evaluation read API (#793)
+#
+# Operator-read endpoints for the active dataset, judge run progress,
+# judge scores, and agreement. All synthetic-only, no PHI.
+
+
+class EvaluationScoreRead(BaseModel):
+    """One evaluation score for an operator read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evaluator: str
+    observation_ref: str
+    observation_kind: str
+    source: str
+    data_type: str
+    value: float
+    judge_run_ref: str | None = None
+    score_date: str
+    trace_id: str | None = None
+    metadata: dict[str, object] = {}
+
+
+class JudgeRunProgress(BaseModel):
+    """Judge run progress for the operator read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_ref: str
+    dataset_name: str
+    dataset_version: int
+    status: str
+    budget_paise: int
+    cost_paise: int
+    started_at: str | None = None
+    completed_at: str | None = None
+    failure_reason: str | None = None
+    example_count: int = 0
+    scored_count: int = 0
+    synthetic_only: bool = True
+
+
+class EvaluationAgreementRead(BaseModel):
+    """Agreement between judge and human for one evaluator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evaluator: str
+    count: int
+    mean_absolute_error: float
+    within_tolerance_share: float
+    kappa: float | None = None
+    tolerance: float
+    data_type: str
+    synthetic_only: bool = True
+    empty: bool = False
+
+
+class EvaluationReadResponse(BaseModel):
+    """Complete evaluation read response for operators."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active_dataset: EvaluationDatasetVersion | None = None
+    judge_run: JudgeRunProgress | None = None
+    judge_scores: list[EvaluationScoreRead] = []
+    agreement: list[EvaluationAgreementRead] = []
+    synthetic_only: bool = True
 
 
 # ------------------------------------------------------- operator read API (C1b)
@@ -7367,6 +7443,300 @@ class ObservabilityFacade:
         self, *args: Any, **kwargs: Any
     ) -> list[EvaluationAgreement]:
         return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    # --------------------------- evaluation read API (#793) ---------------------------
+
+    async def _get_active_golden_dataset(
+        self, connection: AsyncConnection
+    ) -> tuple[int, str, int, str, int, datetime, datetime] | None:
+        """Get the active golden dataset row.
+
+        Returns (id, name, version, status, example_count, created_at, updated_at)
+        or None if not found.
+        """
+        dataset_row = await connection.execute(
+            select(
+                observability_evaluation_datasets.c.id,
+                observability_evaluation_datasets.c.name,
+                observability_evaluation_datasets.c.version,
+                observability_evaluation_datasets.c.status,
+                observability_evaluation_datasets.c.created_at,
+                observability_evaluation_datasets.c.updated_at,
+            ).where(
+                observability_evaluation_datasets.c.name == "golden",
+                observability_evaluation_datasets.c.status == "active",
+            )
+        )
+        row = dataset_row.mappings().first()
+        if not row:
+            return None
+
+        example_count_result = await connection.execute(
+            select(func.count())
+            .select_from(observability_evaluation_examples)
+            .where(observability_evaluation_examples.c.dataset_id == row["id"])
+        )
+        example_count = example_count_result.scalar() or 0
+
+        return (
+            row["id"],
+            row["name"],
+            row["version"],
+            row["status"],
+            example_count,
+            row["created_at"],
+            row["updated_at"],
+        )
+
+    async def get_active_evaluation_dataset(
+        self,
+    ) -> EvaluationDatasetVersion | None:
+        """Get the active evaluation dataset version (operator read).
+
+        Returns the active version of the 'golden' dataset, or None if no
+        active version exists. This is a read-only endpoint for operators.
+        """
+        async with self._engine.begin() as connection:
+            result = await self._get_active_golden_dataset(connection)
+            if not result:
+                return None
+            dataset_id, name, version, status, example_count, created_at, updated_at = result
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status=status,
+                created_at=created_at.isoformat(),
+                updated_at=updated_at.isoformat(),
+                example_count=example_count,
+                is_active=True,
+            )
+
+    async def get_latest_judge_run(
+        self,
+    ) -> JudgeRunProgress | None:
+        """Get the latest judge run for the active dataset (operator read).
+
+        Returns the most recent judge run for the active golden dataset,
+        or None if no runs exist. This is a read-only endpoint for operators.
+        """
+        async with self._engine.begin() as connection:
+            # Get active dataset using shared helper
+            dataset_info = await self._get_active_golden_dataset(connection)
+            if not dataset_info:
+                return None
+            dataset_id, _, dataset_version, _, _, _, _ = dataset_info
+
+            # Get latest judge run for this dataset
+            run_row = await connection.execute(
+                select(
+                    observability_evaluation_judge_runs.c.run_ref,
+                    observability_evaluation_judge_runs.c.status,
+                    observability_evaluation_judge_runs.c.budget_paise,
+                    observability_evaluation_judge_runs.c.cost_paise,
+                    observability_evaluation_judge_runs.c.started_at,
+                    observability_evaluation_judge_runs.c.completed_at,
+                    observability_evaluation_judge_runs.c.failure_reason,
+                    observability_evaluation_judge_runs.c.created_at,
+                )
+                .where(observability_evaluation_judge_runs.c.dataset_version_id == dataset_id)
+                .order_by(observability_evaluation_judge_runs.c.created_at.desc())
+                .limit(1)
+            )
+            run = run_row.mappings().first()
+            if not run:
+                return None
+
+            # Count total examples in dataset
+            example_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_examples)
+                .where(observability_evaluation_examples.c.dataset_id == dataset_id)
+            )
+            example_count = example_count_result.scalar() or 0
+
+            # Count scored examples for this run
+            scored_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_scores)
+                .where(
+                    observability_evaluation_scores.c.judge_run_ref == run["run_ref"],
+                    observability_evaluation_scores.c.source == SOURCE_JUDGE,
+                )
+            )
+            scored_count = scored_count_result.scalar() or 0
+
+            return JudgeRunProgress(
+                run_ref=run["run_ref"],
+                dataset_name="golden",
+                dataset_version=dataset_version,
+                status=run["status"],
+                budget_paise=run["budget_paise"],
+                cost_paise=run["cost_paise"],
+                started_at=run["started_at"].isoformat() if run["started_at"] else None,
+                completed_at=run["completed_at"].isoformat() if run["completed_at"] else None,
+                failure_reason=run["failure_reason"],
+                example_count=example_count,
+                scored_count=scored_count,
+                synthetic_only=True,
+            )
+
+    async def get_judge_scores(
+        self,
+        *,
+        run_ref: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> tuple[list[EvaluationScoreRead], int]:
+        """Get judge scores for the latest or specified run (operator read).
+
+        Returns paginated judge scores for the given run_ref, or for the latest
+        judge run if run_ref is not specified. This is a read-only endpoint
+        for operators. No PHI is returned.
+        """
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size must be between 1 and 100")
+
+        async with self._engine.begin() as connection:
+            if run_ref is None:
+                # Get latest judge run using shared helper
+                dataset_info = await self._get_active_golden_dataset(connection)
+                if not dataset_info:
+                    return [], 0
+                dataset_id = dataset_info[0]
+
+                run_row = await connection.execute(
+                    select(observability_evaluation_judge_runs.c.run_ref)
+                    .where(observability_evaluation_judge_runs.c.dataset_version_id == dataset_id)
+                    .order_by(observability_evaluation_judge_runs.c.created_at.desc())
+                    .limit(1)
+                )
+                run = run_row.mappings().first()
+                if not run:
+                    return [], 0
+                run_ref = run["run_ref"]
+
+            # Get total count
+            total_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_scores)
+                .where(
+                    observability_evaluation_scores.c.judge_run_ref == run_ref,
+                    observability_evaluation_scores.c.source == SOURCE_JUDGE,
+                )
+            )
+            total_count = total_count_result.scalar() or 0
+
+            # Get paginated scores
+            scores_result = await connection.execute(
+                select(
+                    observability_evaluation_scores.c.evaluator,
+                    observability_evaluation_scores.c.observation_ref,
+                    observability_evaluation_scores.c.observation_kind,
+                    observability_evaluation_scores.c.source,
+                    observability_evaluation_scores.c.data_type,
+                    observability_evaluation_scores.c.value,
+                    observability_evaluation_scores.c.judge_run_ref,
+                    observability_evaluation_scores.c.score_date,
+                    observability_evaluation_scores.c.trace_id,
+                    observability_evaluation_scores.c.metadata,
+                )
+                .where(
+                    observability_evaluation_scores.c.judge_run_ref == run_ref,
+                    observability_evaluation_scores.c.source == SOURCE_JUDGE,
+                )
+                .order_by(
+                    observability_evaluation_scores.c.evaluator,
+                    observability_evaluation_scores.c.observation_ref,
+                )
+                .limit(page_size)
+                .offset((page - 1) * page_size)
+            )
+
+            scores = [
+                EvaluationScoreRead(
+                    evaluator=row["evaluator"],
+                    observation_ref=row["observation_ref"],
+                    observation_kind=row["observation_kind"],
+                    source=row["source"],
+                    data_type=row["data_type"],
+                    value=float(row["value"]),
+                    judge_run_ref=row["judge_run_ref"],
+                    score_date=row["score_date"].isoformat(),
+                    trace_id=row["trace_id"],
+                    metadata=dict(row["metadata"]) if row["metadata"] else {},
+                )
+                for row in scores_result.mappings()
+            ]
+
+            return scores, total_count
+
+    async def get_evaluation_agreement_read(
+        self,
+        *,
+        tolerance: float = DEFAULT_AGREEMENT_TOLERANCE,
+        evaluator: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> list[EvaluationAgreementRead]:
+        """Get judge-vs-human agreement for the active dataset (operator read).
+
+        Returns agreement metrics per evaluator. This is a read-only endpoint
+        for operators. The synthetic_only marker is always True. Paginated.
+        """
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size must be between 1 and 100")
+
+        agreements = await self.compute_evaluation_agreement(
+            tolerance=tolerance,
+            evaluator=evaluator,
+            synthetic_only=True,
+        )
+
+        # Apply pagination
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated = agreements[start:end]
+
+        return [
+            EvaluationAgreementRead(
+                evaluator=a.evaluator,
+                count=a.count,
+                mean_absolute_error=a.mean_absolute_error,
+                within_tolerance_share=a.within_tolerance_share,
+                kappa=a.kappa,
+                tolerance=a.tolerance,
+                data_type=a.data_type,
+                synthetic_only=a.synthetic_only,
+                empty=a.empty,
+            )
+            for a in paginated
+        ]
+
+    async def get_evaluation_read(
+        self,
+    ) -> EvaluationReadResponse:
+        """Get the complete evaluation read for operators.
+
+        Returns the active dataset, latest judge run progress, judge scores,
+        and agreement. All data is synthetic-only, no PHI.
+        """
+        active_dataset = await self.get_active_evaluation_dataset()
+        judge_run = await self.get_latest_judge_run()
+        judge_scores = await self.get_judge_scores(run_ref=judge_run.run_ref if judge_run else None)
+        agreement = await self.get_evaluation_agreement_read()
+
+        return EvaluationReadResponse(
+            active_dataset=active_dataset,
+            judge_run=judge_run,
+            judge_scores=judge_scores,
+            agreement=agreement,
+            synthetic_only=True,
+        )
 
     def _alert_delivery_config(self) -> AlertDeliveryConfig:
         """Build alert delivery config from settings."""
