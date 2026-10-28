@@ -36,6 +36,7 @@ export interface User {
   id: number;
   phone: string;
   roles: string[];
+  tier: string | null;
 }
 
 export interface AuthContextValue {
@@ -70,6 +71,7 @@ interface MeResponse {
   subject_id: string;
   phone: string;
   roles: string[];
+  tier: string | null;
 }
 
 interface RefreshResponse {
@@ -90,6 +92,7 @@ function applyMe(
     id: Number(me.subject_id),
     phone: me.phone,
     roles: me.roles,
+    tier: me.tier ?? null,
   });
   if (me.roles.length > 0) {
     const saved = readSelectedRole();

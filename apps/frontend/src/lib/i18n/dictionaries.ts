@@ -1155,6 +1155,19 @@ const en = {
     percent: (share: number) => `${(share * 100).toFixed(1)}%`,
     yes: "Yes",
     no: "No",
+    // #795: admin controls strings (both locales).
+    adminTitle: "Admin controls",
+    adminDatasetNameLabel: "Dataset name",
+    adminDatasetVersionLabel: "Dataset version",
+    adminDatasetExamplesLabel: "Examples (JSON)",
+    createDatasetDraft: "Create draft",
+    editDatasetDraft: "Edit draft",
+    activateDatasetVersion: "Activate version",
+    startJudgeRun: "Start judge run",
+    judgeRunBudgetCap: "Budget cap",
+    labelExample: "Apply human label",
+    adminErrorPrefix: "Could not save the admin change.",
+    labelErrorPrefix: "Could not apply the human label.",
   },
 
   // accountMenu.* surface - #526: chrome copy for the desktop account
@@ -3204,6 +3217,18 @@ export const STRINGS: Record<Lang, Dictionary> = {
       percent: (share: number) => `${(share * 100).toFixed(1)}%`,
       yes: "हाँ",
       no: "नहीं",
+      adminTitle: "प्रशासन नियंत्रण",
+      adminDatasetNameLabel: "डेटासेट नाम",
+      adminDatasetVersionLabel: "डेटासेट संस्करण",
+      adminDatasetExamplesLabel: "उदाहरण (JSON)",
+      createDatasetDraft: "ड्राफ्ट बनाएँ",
+      editDatasetDraft: "ड्राफ्ट संपादित करें",
+      activateDatasetVersion: "संस्करण सक्रिय करें",
+      startJudgeRun: "जज रन शुरू करें",
+      judgeRunBudgetCap: "बजट सीमा",
+      labelExample: "मानव लेबल लगाएँ",
+      adminErrorPrefix: "प्रशासन परिवर्तन सहेजा नहीं जा सका।",
+      labelErrorPrefix: "मानव लेबल लगाया नहीं जा सका।",
     },
 
     home: {

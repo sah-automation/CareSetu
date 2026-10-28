@@ -1565,3 +1565,36 @@ def register_error_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(AlertNotFoundError, _alert_not_found)
     app.add_exception_handler(AlertAlreadyResolvedError, _alert_already_resolved)
+
+
+# ------------------------------------------------------------------ judge run kickoff (#795)
+# Admin-only trigger for the LLM judge run over the active synthetic dataset.
+# Runs synchronously in the request path; the budget cap is enforced by the
+# worker-side domain entry point (the per-run budget lives on the run row).
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/runs",
+    response_model=JudgeRunProgress,
+    status_code=status.HTTP_200_OK,
+    summary="Start a judge run over the active dataset (admin only)",
+)
+async def start_judge_run(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> JudgeRunProgress:
+    """Run the LLM judge over the active dataset and return the latest run."""
+    del principal
+    facade = _facade(request)
+    await facade.run_judge_job()
+    run = await facade.get_latest_judge_run()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "EVALUATION_JUDGE_RUN_NOT_FOUND",
+                "message": "No judge run was created",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    return run

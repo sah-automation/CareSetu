@@ -1,23 +1,162 @@
 "use client";
 
-// #794: the operator Evals page (PHASE-14B Batch 2),
-// over GET /v1/operator/observability/evaluation.
-//
-// One read, one panel: the active dataset, the latest judge run and its
-// progress, the judge scores, the judge-vs-human agreement, and the labeling
-// view. All data is synthetic-only; the synthetic_only marker is always true.
+// #794/#795: the operator Evals page. Read-only evaluation report plus admin
+// controls guarded on the admin tier and operator-applied human labels.
 
+import { useMemo, useState } from "react";
 import {
   ObservabilityPanelPage,
   ReadPanel,
 } from "@/components/observability/ObservabilityPanelPage";
-import { fetchEvaluation } from "@/lib/operator/observability";
+import {
+  activateEvaluationDataset,
+  applyHumanLabel,
+  createEvaluationDatasetDraft,
+  editEvaluationDatasetDraft,
+  fetchEvaluation,
+  startJudgeRun,
+} from "@/lib/operator/observability";
+import { useAuth } from "@/lib/auth/AuthContext";
 import { useI18n } from "@/lib/i18n/useI18n";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
+function useAuthOrNull() {
+  try {
+    return useAuth();
+  } catch {
+    return null;
+  }
+}
+
+function traceOf(error: unknown): string {
+  return error instanceof Error && "traceId" in error
+    ? ": " + String((error as { traceId?: string }).traceId)
+    : "";
+}
+
 export default function ObservabilityEvalsPage() {
   const { t } = useI18n();
+  const auth = useAuthOrNull();
+  const isAdmin =
+    auth?.user?.roles.includes("operator") === true &&
+    auth.user?.tier === "admin";
   const evaluation = usePanelRead(() => fetchEvaluation());
+
+  const [adminName, setAdminName] = useState("golden");
+  const [adminVersion, setAdminVersion] = useState("2");
+  const [adminExamples, setAdminExamples] = useState("[]");
+  const [adminError, setAdminError] = useState("");
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [labelExampleRef, setLabelExampleRef] = useState("");
+  const [labelEvaluator, setLabelEvaluator] = useState("completeness");
+  const [labelValue, setLabelValue] = useState("1");
+  const [labelError, setLabelError] = useState("");
+  const [labelBusy, setLabelBusy] = useState(false);
+
+  const examples = useMemo(() => {
+    try {
+      const parsed = JSON.parse(adminExamples);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return null;
+    }
+  }, [adminExamples]);
+
+  async function reload() {
+    evaluation.reload();
+  }
+
+  async function handleCreateDraft() {
+    setAdminError("");
+    if (examples === null) {
+      setAdminError(t.evals.adminErrorPrefix);
+      return;
+    }
+    setAdminBusy(true);
+    try {
+      await createEvaluationDatasetDraft(
+        adminName,
+        Number(adminVersion),
+        examples as any,
+      );
+      await reload();
+    } catch (error) {
+      setAdminError(`${t.evals.adminErrorPrefix} ${traceOf(error)}`.trim());
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+
+  async function handleEditDraft() {
+    setAdminError("");
+    if (examples === null) {
+      setAdminError(t.evals.adminErrorPrefix);
+      return;
+    }
+    setAdminBusy(true);
+    try {
+      await editEvaluationDatasetDraft(
+        adminName,
+        Number(adminVersion),
+        examples as any,
+      );
+      await reload();
+    } catch (error) {
+      setAdminError(`${t.evals.adminErrorPrefix} ${traceOf(error)}`.trim());
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+
+  async function handleActivate() {
+    setAdminError("");
+    setAdminBusy(true);
+    try {
+      await activateEvaluationDataset(adminName, Number(adminVersion));
+      await reload();
+    } catch (error) {
+      setAdminError(`${t.evals.adminErrorPrefix} ${traceOf(error)}`.trim());
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+
+  async function handleStartJudgeRun() {
+    setAdminError("");
+    setAdminBusy(true);
+    try {
+      await startJudgeRun();
+      await reload();
+    } catch (error) {
+      setAdminError(`${t.evals.adminErrorPrefix} ${traceOf(error)}`.trim());
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+
+  async function handleApplyLabel() {
+    setLabelError("");
+    const value = Number(labelValue);
+    if (Number.isNaN(value)) {
+      setLabelError(t.evals.labelErrorPrefix);
+      return;
+    }
+    setLabelBusy(true);
+    try {
+      await applyHumanLabel({
+        example_ref: labelExampleRef,
+        evaluator: labelEvaluator,
+        value,
+      });
+      await reload();
+    } catch (error) {
+      setLabelError(`${t.evals.labelErrorPrefix} ${traceOf(error)}`.trim());
+    } finally {
+      setLabelBusy(false);
+    }
+  }
+
+  const budgetCap = evaluation.data?.judge_run?.budget_paise ?? null;
 
   return (
     <ObservabilityPanelPage
@@ -35,7 +174,6 @@ export default function ObservabilityEvalsPage() {
       >
         {(data) => (
           <div className="flex flex-col gap-6">
-            {/* Active Dataset */}
             {data.active_dataset && (
               <section className="rounded-lg border border-hairline p-4">
                 <h3 className="mb-2 text-sm font-medium text-txt-sub">
@@ -94,7 +232,6 @@ export default function ObservabilityEvalsPage() {
               </section>
             )}
 
-            {/* Judge Run Progress */}
             {data.judge_run && (
               <section className="rounded-lg border border-hairline p-4">
                 <h3 className="mb-2 text-sm font-medium text-txt-sub">
@@ -179,7 +316,6 @@ export default function ObservabilityEvalsPage() {
               </section>
             )}
 
-            {/* Judge Scores */}
             {data.judge_scores.length > 0 && (
               <section className="rounded-lg border border-hairline p-4">
                 <h3 className="mb-2 text-sm font-medium text-txt-sub">
@@ -248,7 +384,6 @@ export default function ObservabilityEvalsPage() {
               </section>
             )}
 
-            {/* Agreement */}
             {data.agreement.length > 0 && (
               <section className="rounded-lg border border-hairline p-4">
                 <h3 className="mb-2 text-sm font-medium text-txt-sub">
@@ -327,7 +462,6 @@ export default function ObservabilityEvalsPage() {
               </section>
             )}
 
-            {/* Labeling View */}
             {data.judge_scores.length > 0 && (
               <section className="rounded-lg border border-hairline p-4">
                 <h3 className="mb-2 text-sm font-medium text-txt-sub">
@@ -378,10 +512,166 @@ export default function ObservabilityEvalsPage() {
                     </tbody>
                   </table>
                 </div>
+
+                <div className="mt-4 flex flex-col gap-3 border-t border-hairline pt-3">
+                  <h4 className="text-sm font-medium text-txt-sub">
+                    {t.evals.labelExample}
+                  </h4>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <input
+                      className="rounded-md border border-hairline px-3 py-2 text-sm"
+                      placeholder={t.evals.labelingObservation}
+                      value={labelExampleRef}
+                      onChange={(event) =>
+                        setLabelExampleRef(event.target.value)
+                      }
+                      data-testid="human-label-example-ref"
+                    />
+                    <input
+                      className="rounded-md border border-hairline px-3 py-2 text-sm"
+                      placeholder={t.evals.labelingEvaluator}
+                      value={labelEvaluator}
+                      onChange={(event) =>
+                        setLabelEvaluator(event.target.value)
+                      }
+                      data-testid="human-label-evaluator"
+                    />
+                    <input
+                      className="rounded-md border border-hairline px-3 py-2 text-sm"
+                      placeholder="Value"
+                      type="number"
+                      value={labelValue}
+                      onChange={(event) => setLabelValue(event.target.value)}
+                      data-testid="human-label-value"
+                    />
+                  </div>
+                  {labelError && (
+                    <>
+                      <p
+                        className="text-sm text-danger"
+                        data-testid="evals-label-error"
+                      >
+                        {labelError}
+                      </p>
+                      <p
+                        className="text-sm text-danger"
+                        data-testid="evaluation-label-error"
+                      >
+                        {labelError}
+                      </p>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    disabled={labelBusy}
+                    onClick={() => void handleApplyLabel()}
+                    className="inline-flex min-h-11 items-center rounded-md border border-hairline px-4 text-sm font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
+                    data-testid="apply-human-label"
+                  >
+                    {labelBusy ? "..." : t.evals.labelExample}
+                  </button>
+                </div>
               </section>
             )}
 
-            {/* Synthetic-only statement */}
+            {isAdmin && (
+              <div data-testid="evals-admin-controls">
+                <section
+                  className="rounded-lg border border-hairline p-4"
+                  data-testid="evaluation-admin-controls"
+                >
+                  <h3 className="mb-2 text-sm font-medium text-txt-sub">
+                    {t.evals.adminTitle}
+                  </h3>
+                  <div className="mb-2 text-sm text-txt-muted">
+                    {t.evals.judgeRunBudget}:{" "}
+                    <span data-testid="judge-run-budget-cap">
+                      {budgetCap !== null
+                        ? t.evals.rupees(budgetCap)
+                        : t.evals.judgeRunBudget}
+                    </span>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <input
+                      className="rounded-md border border-hairline px-3 py-2 text-sm"
+                      placeholder={t.evals.adminDatasetNameLabel}
+                      value={adminName}
+                      onChange={(event) => setAdminName(event.target.value)}
+                      data-testid="admin-dataset-name"
+                    />
+                    <input
+                      className="rounded-md border border-hairline px-3 py-2 text-sm"
+                      placeholder={t.evals.adminDatasetVersionLabel}
+                      value={adminVersion}
+                      onChange={(event) => setAdminVersion(event.target.value)}
+                      data-testid="admin-dataset-version"
+                    />
+                  </div>
+                  <textarea
+                    className="mt-2 w-full rounded-md border border-hairline px-3 py-2 text-sm"
+                    placeholder={t.evals.adminDatasetExamplesLabel}
+                    value={adminExamples}
+                    onChange={(event) => setAdminExamples(event.target.value)}
+                    data-testid="admin-dataset-examples"
+                  />
+                  {adminError && (
+                    <>
+                      <p
+                        className="text-sm text-danger"
+                        data-testid="evals-admin-error"
+                      >
+                        {adminError}
+                      </p>
+                      <p
+                        className="text-sm text-danger"
+                        data-testid="evaluation-admin-error"
+                      >
+                        {adminError}
+                      </p>
+                    </>
+                  )}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={adminBusy}
+                      onClick={() => void handleCreateDraft()}
+                      className="inline-flex min-h-11 items-center rounded-md border border-hairline px-4 text-sm font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
+                      data-testid="create-dataset-draft"
+                    >
+                      {adminBusy ? "..." : t.evals.createDatasetDraft}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={adminBusy}
+                      onClick={() => void handleEditDraft()}
+                      className="inline-flex min-h-11 items-center rounded-md border border-hairline px-4 text-sm font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
+                      data-testid="edit-dataset-draft"
+                    >
+                      {adminBusy ? "..." : t.evals.editDatasetDraft}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={adminBusy}
+                      onClick={() => void handleActivate()}
+                      className="inline-flex min-h-11 items-center rounded-md border border-hairline px-4 text-sm font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
+                      data-testid="activate-dataset-version"
+                    >
+                      {adminBusy ? "..." : t.evals.activateDatasetVersion}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={adminBusy}
+                      onClick={() => void handleStartJudgeRun()}
+                      className="inline-flex min-h-11 items-center rounded-md border border-hairline px-4 text-sm font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
+                      data-testid="start-judge-run"
+                    >
+                      {adminBusy ? "..." : t.evals.startJudgeRun}
+                    </button>
+                  </div>
+                </section>
+              </div>
+            )}
+
             <section
               className="rounded-lg border border-hairline bg-hairline-soft p-4"
               data-testid="evals-synthetic-only"

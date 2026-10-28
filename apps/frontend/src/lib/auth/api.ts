@@ -72,6 +72,7 @@ export interface MeResult {
   subject_id: string;
   roles: string[];
   phone: string;
+  tier: string | null;
 }
 
 export interface DemoOtpResult {
