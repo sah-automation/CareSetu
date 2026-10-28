@@ -2321,3 +2321,194 @@ export async function fetchSecurity(): Promise<SecuritySummary> {
     "The API returned an unexpected security summary shape",
   );
 }
+
+// ------------------------------------------------ the evaluation read (#794)
+
+/** One evaluation score for an operator read. */
+export interface EvaluationScoreRead {
+  evaluator: string;
+  observation_ref: string;
+  observation_kind: string;
+  source: string;
+  data_type: string;
+  value: number;
+  judge_run_ref: string | null;
+  score_date: string;
+  trace_id: string | null;
+  metadata: Record<string, unknown>;
+}
+
+/** Judge run progress for the operator read. */
+export interface JudgeRunProgress {
+  run_ref: string;
+  dataset_name: string;
+  dataset_version: number;
+  status: string;
+  budget_paise: number;
+  cost_paise: number;
+  started_at: string | null;
+  completed_at: string | null;
+  failure_reason: string | null;
+  example_count: number;
+  scored_count: number;
+  synthetic_only: boolean;
+}
+
+/** Agreement between judge and human for one evaluator. */
+export interface EvaluationAgreementRead {
+  evaluator: string;
+  count: number;
+  mean_absolute_error: number;
+  within_tolerance_share: number;
+  kappa: number | null;
+  tolerance: number;
+  data_type: string;
+  synthetic_only: boolean;
+  empty: boolean;
+}
+
+/** Active evaluation dataset version. */
+export interface EvaluationDatasetVersion {
+  id: number;
+  name: string;
+  version: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  example_count: number;
+  is_active: boolean;
+}
+
+/** Complete evaluation read response for operators. */
+export interface EvaluationReadResponse {
+  active_dataset: EvaluationDatasetVersion | null;
+  judge_run: JudgeRunProgress | null;
+  judge_scores: EvaluationScoreRead[];
+  agreement: EvaluationAgreementRead[];
+  synthetic_only: boolean;
+}
+
+/** Decimal fields in the evaluation response (backend sends Decimal as JSON string). */
+const EVALUATION_SCORE_DECIMALS = ["value"] as const;
+const EVALUATION_AGREEMENT_DECIMALS = [
+  "mean_absolute_error",
+  "within_tolerance_share",
+  "kappa",
+  "tolerance",
+] as const;
+
+function isEvaluationScoreRead(value: unknown): value is EvaluationScoreRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "evaluator",
+      "observation_ref",
+      "observation_kind",
+      "source",
+      "data_type",
+      "value",
+      "judge_run_ref",
+      "score_date",
+      "trace_id",
+      "metadata",
+    ])
+  );
+}
+
+function isJudgeRunProgress(value: unknown): value is JudgeRunProgress {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "run_ref",
+      "dataset_name",
+      "dataset_version",
+      "status",
+      "budget_paise",
+      "cost_paise",
+      "started_at",
+      "completed_at",
+      "failure_reason",
+      "example_count",
+      "scored_count",
+      "synthetic_only",
+    ])
+  );
+}
+
+function isEvaluationAgreementRead(
+  value: unknown,
+): value is EvaluationAgreementRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "evaluator",
+      "count",
+      "mean_absolute_error",
+      "within_tolerance_share",
+      "kappa",
+      "tolerance",
+      "data_type",
+      "synthetic_only",
+      "empty",
+    ])
+  );
+}
+
+function isEvaluationDatasetVersion(
+  value: unknown,
+): value is EvaluationDatasetVersion {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "id",
+      "name",
+      "version",
+      "status",
+      "created_at",
+      "updated_at",
+      "example_count",
+      "is_active",
+    ])
+  );
+}
+
+function isEvaluationReadResponse(
+  value: unknown,
+): value is EvaluationReadResponse {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "active_dataset",
+      "judge_run",
+      "judge_scores",
+      "agreement",
+      "synthetic_only",
+    ]) &&
+    (value.active_dataset === null ||
+      isEvaluationDatasetVersion(value.active_dataset)) &&
+    (value.judge_run === null || isJudgeRunProgress(value.judge_run)) &&
+    isArrayOf(value.judge_scores, isEvaluationScoreRead) &&
+    isArrayOf(value.agreement, isEvaluationAgreementRead)
+  );
+}
+
+/**
+ * Read the complete evaluation state (#794).
+ */
+export async function fetchEvaluation(): Promise<EvaluationReadResponse> {
+  const data = await request<unknown>(`${OBSERVABILITY_BASE}/evaluation`);
+  const read = guardShape(
+    data,
+    isEvaluationReadResponse,
+    "The API returned an unexpected evaluation shape",
+  );
+  return {
+    ...read,
+    judge_scores: read.judge_scores.map((score) =>
+      withDecimals(score, EVALUATION_SCORE_DECIMALS),
+    ),
+    agreement: read.agreement.map((agree) =>
+      withDecimals(agree, EVALUATION_AGREEMENT_DECIMALS),
+    ),
+  };
+}
