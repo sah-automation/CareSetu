@@ -77,6 +77,7 @@ from modules.observability.domain.exceptions import (
 from modules.observability.facade import (
     BUSINESS_PERIOD_MONTH,
     DEFAULT_ACTIVITY_WINDOW_MINUTES,
+    DEFAULT_AGREEMENT_TOLERANCE,
     DEFAULT_ALERT_PAGE_SIZE,
     DEFAULT_ERROR_PAGE_SIZE,
     DEFAULT_ERROR_WINDOW_MINUTES,
@@ -96,6 +97,7 @@ from modules.observability.facade import (
     CostTrend,
     Deeplinks,
     ErrorFeedPage,
+    EvaluationAgreementRead,
     EvaluationDatasetActivateResponse,
     EvaluationDatasetCloneRequest,
     EvaluationDatasetCreateRequest,
@@ -104,7 +106,10 @@ from modules.observability.facade import (
     EvaluationDatasetSeedRequest,
     EvaluationDatasetVersion,
     EvaluationDatasetVersionDetail,
+    EvaluationReadResponse,
+    EvaluationScoreRead,
     FunnelRead,
+    JudgeRunProgress,
     LatencyReport,
     ObservabilityFacade,
     Overview,
@@ -1135,6 +1140,143 @@ async def retire_evaluation_dataset_version(
 
     namespace = f"eval-retire:{subject_id}" if subject_id is not None else "eval-retire"
     return await run_idempotent(request, _call, namespace=namespace)
+
+
+# ------------------------------------------------------------------ evaluation read API (#793)
+#
+# Operator-read endpoints for the active dataset, judge run progress,
+# judge scores, and agreement. All synthetic-only, no PHI.
+
+
+@router.get(
+    "/v1/operator/observability/evaluation",
+    response_model=EvaluationReadResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Read the complete evaluation state (operator only)",
+)
+async def read_evaluation(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> EvaluationReadResponse:
+    """Get the active dataset, latest judge run, judge scores, and agreement.
+
+    All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    return await _facade(request).get_evaluation_read()
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/dataset/active",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_200_OK,
+    summary="Read the active evaluation dataset (operator only)",
+)
+async def read_active_evaluation_dataset(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> EvaluationDatasetVersion:
+    """Get the active evaluation dataset version.
+
+    Returns the active version of the 'golden' dataset. Raises 404 if no
+    active version exists. All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    facade = _facade(request)
+    dataset = await facade.get_active_evaluation_dataset()
+    if dataset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "EVALUATION_DATASET_NOT_FOUND",
+                "message": "No active evaluation dataset version found",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    return dataset
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/runs/latest",
+    response_model=JudgeRunProgress,
+    status_code=status.HTTP_200_OK,
+    summary="Read the latest judge run progress (operator only)",
+)
+async def read_latest_judge_run(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> JudgeRunProgress:
+    """Get the latest judge run progress for the active dataset.
+
+    Returns the most recent judge run. Raises 404 if no runs exist.
+    All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    facade = _facade(request)
+    run = await facade.get_latest_judge_run()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "EVALUATION_JUDGE_RUN_NOT_FOUND",
+                "message": "No judge run found for the active dataset",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    return run
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/scores",
+    response_model=list[EvaluationScoreRead],
+    status_code=status.HTTP_200_OK,
+    summary="Read judge scores (operator only)",
+)
+async def read_judge_scores(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    run_ref: str | None = None,
+    page: Annotated[int, Query(ge=1, le=1000)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 100,
+) -> list[EvaluationScoreRead]:
+    """Get judge scores for the latest or specified run.
+
+    If run_ref is not provided, returns scores for the latest judge run.
+    Paginated with page and page_size. All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    scores, _ = await _facade(request).get_judge_scores(
+        run_ref=run_ref,
+        page=page,
+        page_size=page_size,
+    )
+    return scores
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/agreement",
+    response_model=list[EvaluationAgreementRead],
+    status_code=status.HTTP_200_OK,
+    summary="Read judge-vs-human agreement (operator only)",
+)
+async def read_evaluation_agreement(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    tolerance: float = DEFAULT_AGREEMENT_TOLERANCE,
+    evaluator: str | None = None,
+    page: Annotated[int, Query(ge=1, le=1000)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 100,
+) -> list[EvaluationAgreementRead]:
+    """Get judge-vs-human agreement for the active dataset.
+
+    Returns agreement metrics per evaluator. The synthetic_only marker
+    is always True. Paginated with page and page_size.
+    All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    return await _facade(request).get_evaluation_agreement_read(
+        tolerance=tolerance, evaluator=evaluator, page=page, page_size=page_size
+    )
 
 
 # ------------------------------------------------------------------ human labels on golden examples
