@@ -2513,6 +2513,60 @@ const en = {
       perThousandOutput: "Per 1k output",
     },
   },
+
+  // operatorSettings.* surface - #797: the admin-only Settings page shell and
+  // its read-only AI section (PHASE-14B Batch 2). The four sections ship as a
+  // shell now; notifications, feature flags and users fill in later (#799-#801).
+  operatorSettings: {
+    title: "Settings",
+    description:
+      "The effective configuration for the operator console, and where each value comes from.",
+    permissionDeniedTitle: "Permission denied",
+    permissionDeniedBody: "You do not have permission to access Settings.",
+    retry: "Retry",
+    sections: {
+      ai: "AI",
+      notifications: "Notifications",
+      featureFlags: "Feature flags",
+      users: "Users",
+    },
+    ai: {
+      description:
+        "The effective AI values, their source, and whether a restart is needed.",
+      emptyTitle: "No AI settings",
+      emptyBody: "The settings registry returned no AI settings.",
+      error: "Could not load the effective AI settings.",
+      errorExpected: "The API rejected the settings request.",
+      takeaway: (count: number) => `${count} effective settings`,
+      key: "Setting",
+      value: "Effective value",
+      source: "Source",
+      notReturned: "Not returned",
+      emptyList: "None",
+      yes: "Yes",
+      no: "No",
+      restartRequired: "Restart required",
+      traceLabel: "Trace",
+      noTrace: "No trace id: the request did not reach the API.",
+      sources: {
+        database: "Database override",
+        environment: "Environment",
+        default: "Default",
+      },
+    },
+    notifications: {
+      description: "Routing, recipients and delivery channels for alerts.",
+      body: "Notification routing arrives with a later release. Nothing is configurable here yet.",
+    },
+    featureFlags: {
+      description: "Runtime switches and boot-time gates.",
+      body: "Feature flags arrive with a later release. Nothing is configurable here yet.",
+    },
+    users: {
+      description: "Operator accounts, tiers and access state.",
+      body: "User management arrives with a later release. Nothing is configurable here yet.",
+    },
+  },
 };
 
 export type Dictionary = typeof en;
@@ -2529,6 +2583,7 @@ export type ActionsStrings = Dictionary["actions"];
 export type RecentStrings = Dictionary["recent"];
 export type HealthStrings = Dictionary["health"];
 export type OperatorBusinessStrings = Dictionary["operatorBusiness"];
+export type OperatorSettingsStrings = Dictionary["operatorSettings"];
 
 /**
  * Which `operatorBusiness.period` key each wire period is labelled with.
@@ -4707,6 +4762,57 @@ export const STRINGS: Record<Lang, Dictionary> = {
         outputTokens: "आउटपुट टोकन",
         perThousandInput: "प्रति 1k इनपुट",
         perThousandOutput: "प्रति 1k आउटपुट",
+      },
+    },
+
+    operatorSettings: {
+      title: "सेटिंग्स",
+      description:
+        "ऑपरेटर कंसोल की प्रभावी कॉन्फ़िगरेशन, और हर मान कहाँ से आया।",
+      permissionDeniedTitle: "अनुमति नहीं है",
+      permissionDeniedBody: "आपके पास सेटिंग्स देखने की अनुमति नहीं है।",
+      retry: "फिर कोशिश करें",
+      sections: {
+        ai: "AI",
+        notifications: "सूचनाएँ",
+        featureFlags: "फ़ीचर फ़्लैग",
+        users: "उपयोगकर्ता",
+      },
+      ai: {
+        description:
+          "AI के लिए लागू प्रभावी मान, उनका स्रोत और रीस्टार्ट की ज़रूरत।",
+        emptyTitle: "कोई AI सेटिंग नहीं",
+        emptyBody: "सेटिंग्स रजिस्ट्री ने कोई AI सेटिंग नहीं लौटाई।",
+        error: "प्रभावी AI सेटिंग्स लोड नहीं हो सकीं।",
+        errorExpected: "API ने सेटिंग्स अनुरोध अस्वीकार कर दिया।",
+        takeaway: (count: number) => `${count} प्रभावी सेटिंग्स`,
+        key: "सेटिंग",
+        value: "प्रभावी मान",
+        source: "स्रोत",
+        notReturned: "नहीं दिखाया गया",
+        emptyList: "कोई नहीं",
+        yes: "हाँ",
+        no: "नहीं",
+        restartRequired: "रीस्टार्ट ज़रूरी",
+        traceLabel: "ट्रेस",
+        noTrace: "कोई ट्रेस आईडी नहीं: अनुरोध API तक नहीं पहुँचा।",
+        sources: {
+          database: "डेटाबेस ओवरराइड",
+          environment: "एनवायरनमेंट",
+          default: "डिफ़ॉल्ट",
+        },
+      },
+      notifications: {
+        description: "अलर्ट के लिए रूटिंग, प्राप्तकर्ता और डिलीवरी चैनल।",
+        body: "सूचना रूटिंग किसी बाद के रिलीज़ में आएगी। अभी यहाँ कुछ सेट नहीं किया जा सकता।",
+      },
+      featureFlags: {
+        description: "रनटाइम स्विच और बूट-टाइम गेट।",
+        body: "फ़ीचर फ़्लैग किसी बाद के रिलीज़ में आएँगे। अभी यहाँ कुछ सेट नहीं किया जा सकता।",
+      },
+      users: {
+        description: "ऑपरेटर खाते, टियर और एक्सेस स्थिति।",
+        body: "उपयोगकर्ता प्रबंधन किसी बाद के रिलीज़ में आएगा। अभी यहाँ कुछ सेट नहीं किया जा सकता।",
       },
     },
   },
