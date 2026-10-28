@@ -1,8 +1,14 @@
-// #797: the admin Settings shell and its read-only AI section. These tests pin
-// the four-section shell, effective values with source and restart badges, the
-// admin-only guard, and the bilingual strings.
+// #797: the admin Settings shell and its AI section.
+// #798: the allowlisted AI knobs gain editable controls, save states,
+// validation copy, and the append-only setting history beneath the table.
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api-errors";
@@ -11,7 +17,10 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import {
   fetchEffectiveSettings,
+  fetchSettingHistory,
+  writeSetting,
   type EffectiveSetting,
+  type SettingHistoryEntry,
 } from "@/lib/operator/settings";
 
 import ObservabilitySettingsPage from "./page";
@@ -21,6 +30,8 @@ vi.mock("@/lib/operator/settings");
 
 const mockUseAuth = vi.mocked(useAuth);
 const mockFetchEffectiveSettings = vi.mocked(fetchEffectiveSettings);
+const mockFetchSettingHistory = vi.mocked(fetchSettingHistory);
+const mockWriteSetting = vi.mocked(writeSetting);
 
 const en = STRINGS.en.operatorSettings;
 const hi = STRINGS.hi.operatorSettings;
@@ -66,6 +77,49 @@ const settings: EffectiveSetting[] = [
   },
 ];
 
+const editableSettings: EffectiveSetting[] = [
+  {
+    key: "ai.timeout_seconds",
+    value: 30,
+    source: "database",
+    editable: true,
+    restart_required: false,
+  },
+  {
+    key: "ai.fallback_enabled",
+    value: false,
+    source: "default",
+    editable: true,
+    restart_required: false,
+  },
+];
+
+const historyEntries: SettingHistoryEntry[] = [
+  {
+    setting_key: "ai.timeout_seconds",
+    value: 20,
+    version: 2,
+    changed_by: 7,
+    changed_at: "2026-03-04T10:00:00Z",
+  },
+  {
+    setting_key: "notification.channels.email.enabled",
+    value: true,
+    version: 1,
+    changed_by: null,
+    changed_at: "2026-03-03T09:00:00Z",
+  },
+];
+
+async function renderReady() {
+  render(<ObservabilitySettingsPage />);
+  await waitFor(() => {
+    expect(
+      screen.getByTestId("settings-ai-row-ai.timeout_seconds"),
+    ).toBeInTheDocument();
+  });
+}
+
 describe("ObservabilitySettingsPage (#797)", () => {
   afterEach(() => {
     cleanup();
@@ -75,6 +129,7 @@ describe("ObservabilitySettingsPage (#797)", () => {
     vi.clearAllMocks();
     __resetLangForTests();
     mockUseAuth.mockReturnValue(adminAuth());
+    mockFetchSettingHistory.mockResolvedValue([]);
   });
 
   it("renders the four-section shell", async () => {
@@ -113,8 +168,8 @@ describe("ObservabilitySettingsPage (#797)", () => {
     });
 
     expect(
-      screen.getByTestId("settings-ai-value-ai.timeout_seconds"),
-    ).toHaveTextContent("30");
+      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
+    ).toHaveValue(30);
     expect(
       screen.getByTestId("settings-ai-source-ai.timeout_seconds"),
     ).toHaveTextContent(en.ai.sources.database);
@@ -247,5 +302,208 @@ describe("ObservabilitySettingsPage (#797)", () => {
     expect(
       screen.getByTestId("settings-ai-source-ai.timeout_seconds"),
     ).toHaveTextContent(hi.ai.sources.database);
+    expect(
+      screen.getByTestId("settings-ai-save-ai.timeout_seconds"),
+    ).toHaveTextContent(hi.ai.save);
+    expect(screen.getByTestId("settings-ai-history-title")).toHaveTextContent(
+      hi.ai.historyTitle,
+    );
+  });
+});
+
+describe("AiSettingsSection writes and history (#798)", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __resetLangForTests();
+    mockUseAuth.mockReturnValue(adminAuth());
+    mockFetchEffectiveSettings.mockResolvedValue(editableSettings);
+    mockFetchSettingHistory.mockResolvedValue([]);
+  });
+
+  it("only gives editable rows a control", async () => {
+    mockFetchEffectiveSettings.mockResolvedValue(settings);
+
+    await renderReady();
+
+    expect(
+      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-ai-input-ai.model")).toBeNull();
+    expect(
+      screen.getByTestId("settings-ai-readonly-ai.model"),
+    ).toHaveTextContent(en.ai.readOnly);
+  });
+
+  it("saves an edited value and refreshes effective values and history", async () => {
+    mockWriteSetting.mockResolvedValue({
+      setting_key: "ai.timeout_seconds",
+      value: 20,
+      version: 2,
+    });
+
+    await renderReady();
+
+    fireEvent.change(
+      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
+      {
+        target: { value: "20" },
+      },
+    );
+    screen.getByTestId("settings-ai-save-ai.timeout_seconds").click();
+
+    await waitFor(() => {
+      expect(mockWriteSetting).toHaveBeenCalledWith("ai.timeout_seconds", 20);
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-status-ai.timeout_seconds"),
+      ).toHaveTextContent(en.ai.saved);
+    });
+    expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(2);
+    expect(mockFetchSettingHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it("saves a boolean with the checkbox value", async () => {
+    mockWriteSetting.mockResolvedValue({
+      setting_key: "ai.fallback_enabled",
+      value: true,
+      version: 1,
+    });
+
+    await renderReady();
+
+    fireEvent.click(
+      screen.getByTestId("settings-ai-input-ai.fallback_enabled"),
+    );
+    screen.getByTestId("settings-ai-save-ai.fallback_enabled").click();
+
+    await waitFor(() => {
+      expect(mockWriteSetting).toHaveBeenCalledWith(
+        "ai.fallback_enabled",
+        true,
+      );
+    });
+  });
+
+  it("refuses an empty value before calling the API", async () => {
+    await renderReady();
+
+    fireEvent.change(
+      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
+      {
+        target: { value: "" },
+      },
+    );
+    screen.getByTestId("settings-ai-save-ai.timeout_seconds").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-error-ai.timeout_seconds"),
+      ).toHaveTextContent(en.ai.validationRequired);
+    });
+    expect(mockWriteSetting).not.toHaveBeenCalled();
+  });
+
+  it("shows the API's refusal message and keeps the row editable", async () => {
+    mockWriteSetting.mockRejectedValue(
+      new ApiError({
+        code: "INVALID_SETTING_WRITE",
+        message: "AI timeout must be a number of seconds in (0, 30]",
+        trace_id: "trace-798",
+        details: {},
+      }),
+    );
+
+    await renderReady();
+
+    fireEvent.change(
+      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
+      {
+        target: { value: "45" },
+      },
+    );
+    screen.getByTestId("settings-ai-save-ai.timeout_seconds").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-error-ai.timeout_seconds"),
+      ).toHaveTextContent("AI timeout must be a number of seconds in (0, 30]");
+    });
+    expect(
+      screen.getByTestId("settings-ai-save-ai.timeout_seconds"),
+    ).toBeEnabled();
+    expect(
+      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
+    ).toHaveValue(45);
+  });
+
+  it("shows the fallback copy for an unexpected write failure", async () => {
+    mockWriteSetting.mockRejectedValue(new Error("network down"));
+
+    await renderReady();
+
+    screen.getByTestId("settings-ai-save-ai.timeout_seconds").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-error-ai.timeout_seconds"),
+      ).toHaveTextContent(en.ai.saveError);
+    });
+  });
+
+  it("lists AI history newest first and hides non-AI rows", async () => {
+    mockFetchSettingHistory.mockResolvedValue(historyEntries);
+
+    await renderReady();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-history-row-ai.timeout_seconds-2"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByTestId(
+        "settings-ai-history-row-notification.channels.email.enabled-1",
+      ),
+    ).toBeNull();
+    expect(
+      screen.getByTestId("settings-ai-history-row-ai.timeout_seconds-2"),
+    ).toHaveTextContent("20");
+  });
+
+  it("says so when there is no history", async () => {
+    await renderReady();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-ai-history-empty")).toHaveTextContent(
+        en.ai.historyEmpty,
+      );
+    });
+  });
+
+  it("retries a failed history read", async () => {
+    mockFetchSettingHistory
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce([]);
+
+    await renderReady();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-ai-history-error")).toHaveTextContent(
+        en.ai.historyError,
+      );
+    });
+
+    screen.getByTestId("settings-ai-history-retry").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-history-empty"),
+      ).toBeInTheDocument();
+    });
   });
 });
