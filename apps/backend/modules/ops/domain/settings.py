@@ -59,6 +59,17 @@ class EffectiveSetting:
     restart_required: bool
 
 
+@dataclass(frozen=True)
+class SettingHistoryEntry:
+    """One append-only setting history row (#772/#798)."""
+
+    setting_key: str
+    value: object | None
+    version: int
+    changed_by: int | None
+    changed_at: str
+
+
 class FeatureFlagKind(StrEnum):
     """Type of feature flag."""
 
@@ -256,6 +267,16 @@ class OpsSettingsCache:
         self._cached = value
         self._cached_at = time.monotonic()
 
+    def invalidate(self) -> None:
+        """Drop the cached effective values so the next read resolves fresh.
+
+        A write must invalidate to *nothing*, not to an empty list: an empty
+        list is a valid cached payload and would make the next effective read
+        answer "no settings" for the whole TTL window.
+        """
+        self._cached = None
+        self._cached_at = None
+
 
 class EffectiveSettingsResolver:
     """Resolve effective settings with precedence: database override → environment → default."""
@@ -407,6 +428,31 @@ def validate_feature_flag_write(flag: FeatureFlag, enabled: bool) -> None:
             "flag is restart-required and cannot be edited at runtime; "
             "restart the service to change",
         )
+
+
+def validate_ai_setting(key: str, value: object) -> None:
+    """Validate an allowlisted operational AI knob write (#772).
+
+    The knobs mirror the boot-time config validation so a database override can
+    never carry a value the process would have refused from the environment.
+
+    Raises:
+        ValueError: If the value is invalid for the given key.
+    """
+    if key == "ai.monthly_budget_paise":
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("AI monthly budget must be a positive integer (paise)")
+    elif key == "ai.budget_alert_threshold_pct":
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 100:
+            raise ValueError("AI budget alert threshold must be an integer in (0, 100]")
+    elif key == "ai.timeout_seconds":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 30:
+            raise ValueError("AI timeout must be a number of seconds in (0, 30]")
+    elif key == "ai.fallback_enabled":
+        if not isinstance(value, bool):
+            raise ValueError("AI fallback enabled must be a boolean")
+    else:
+        raise ValueError(f"Unknown AI setting key: {key}")
 
 
 def validate_notification_routing_value(value: str) -> None:

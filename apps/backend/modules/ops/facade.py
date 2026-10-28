@@ -14,6 +14,7 @@ from bus.events import EVENT_AUDIT_EVENT
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.settings import (
     ALL_EDITABLE_KEYS,
+    EDITABLE_AI_KEYS,
     EDITABLE_NOTIFICATION_KEYS,
     EffectiveSetting,
     EffectiveSettingsResolver,
@@ -22,6 +23,8 @@ from modules.ops.domain.settings import (
     FeatureFlagRead,
     FeatureFlagWriteResponse,
     OpsSettingsCache,
+    SettingHistoryEntry,
+    validate_ai_setting,
     validate_feature_flag_write,
     validate_notification_setting,
 )
@@ -71,6 +74,40 @@ class OpsFacade:
         resolved = self._resolver.resolve_all(db_overrides)
         self._cache.set(resolved)
         return resolved
+
+    async def get_setting_history(
+        self,
+        setting_key: str | None = None,
+        limit: int = 50,
+    ) -> list[SettingHistoryEntry]:
+        """Read the append-only setting history, newest first (#798).
+
+        ``setting_key`` narrows the read to one key; the Settings AI section asks
+        for the whole list once and filters the AI keys itself.
+        """
+        statement = (
+            select(ops_setting_history)
+            .order_by(
+                ops_setting_history.c.changed_at.desc(),
+                ops_setting_history.c.id.desc(),
+            )
+            .limit(limit)
+        )
+        if setting_key is not None:
+            statement = statement.where(ops_setting_history.c.setting_key == setting_key)
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(statement)
+            return [
+                SettingHistoryEntry(
+                    setting_key=row["setting_key"],
+                    value=row["value"],
+                    version=row["version"],
+                    changed_by=row["changed_by"],
+                    changed_at=row["changed_at"].isoformat(),
+                )
+                for row in result.mappings()
+            ]
 
     async def get_feature_flags(self) -> list[FeatureFlagRead]:
         """Get all feature flags for operator view."""
@@ -248,9 +285,16 @@ class OpsFacade:
         if setting_key not in ALL_EDITABLE_KEYS:
             raise InvalidSettingWriteError(setting_key, "setting key is not editable")
 
-        # Validate value for notification settings
-        if setting_key in EDITABLE_NOTIFICATION_KEYS:
-            validate_notification_setting(setting_key, value)
+        # Validate value for the allowlisted knob family. A bad value is an
+        # expected write refusal, so it becomes the same domain error the route
+        # already maps to the shared 400 envelope.
+        try:
+            if setting_key in EDITABLE_AI_KEYS:
+                validate_ai_setting(setting_key, value)
+            elif setting_key in EDITABLE_NOTIFICATION_KEYS:
+                validate_notification_setting(setting_key, value)
+        except ValueError as exc:
+            raise InvalidSettingWriteError(setting_key, str(exc)) from exc
 
         async with self._engine.begin() as connection:
             # Read existing setting for update (lock row)
@@ -319,7 +363,7 @@ class OpsFacade:
                 )
             )
 
-        # Invalidate cache
-        self._cache.set([])
+        # Invalidate cache so the next effective read resolves the new value
+        self._cache.invalidate()
 
         return {"setting_key": setting_key, "value": value, "version": new_version}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
 from app.gateway.idempotency import run_idempotent
@@ -78,6 +78,22 @@ class SettingWriteResponse(BaseModel):
     version: int
 
 
+class SettingHistoryEntryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    setting_key: str
+    value: object | None
+    version: int
+    changed_by: int | None
+    changed_at: str
+
+
+class SettingsHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    history: list[SettingHistoryEntryResponse]
+
+
 router = APIRouter(tags=["ops"])
 
 
@@ -108,6 +124,35 @@ async def read_effective_settings(
                 restart_required=item.restart_required,
             )
             for item in settings_list
+        ]
+    )
+
+
+@router.get(
+    "/v1/operator/settings/history",
+    response_model=SettingsHistoryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Read the append-only setting history (admin only)",
+)
+async def read_setting_history(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    setting_key: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> SettingsHistoryResponse:
+    del principal
+    facade = _facade(request)
+    history = await facade.get_setting_history(setting_key=setting_key, limit=limit)
+    return SettingsHistoryResponse(
+        history=[
+            SettingHistoryEntryResponse(
+                setting_key=entry.setting_key,
+                value=entry.value,
+                version=entry.version,
+                changed_by=entry.changed_by,
+                changed_at=entry.changed_at,
+            )
+            for entry in history
         ]
     )
 
