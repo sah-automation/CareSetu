@@ -90,7 +90,7 @@ finance lead could quote (#717 decision 9).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -128,6 +128,11 @@ from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
 from bus.ledger import HANDLER_RESULT_ACTOR_KEY
+from modules.observability.domain.agreement import (
+    DEFAULT_AGREEMENT_TOLERANCE,
+    EvaluationAgreement,
+    compute_agreement,
+)
 from modules.observability.domain.alert_delivery import AlertDeliveryConfig, ChannelAdapter
 from modules.observability.domain.annotation import review_annotation
 from modules.observability.domain.consumer import (
@@ -7244,6 +7249,124 @@ class ObservabilityFacade:
             metadata=resolved_metadata,
             created=created,
         )
+
+    # --------------------------- agreement computation (#792) ---------------------------
+
+    async def compute_evaluation_agreement(
+        self,
+        *,
+        tolerance: float = DEFAULT_AGREEMENT_TOLERANCE,
+        evaluator: str | None = None,
+        evaluators: Iterable[str] | None = None,
+        synthetic_only: bool = True,
+    ) -> list[EvaluationAgreement]:
+        """Compute judge-vs-human agreement for the active synthetic dataset.
+
+        Returns a list of ``EvaluationAgreement`` per evaluator. Empty pairings
+        yield zero-count agreements with ``synthetic_only=True``.
+        """
+
+        if self._engine is None:
+            return []
+
+        async with self._engine.begin() as connection:
+            query_result = await connection.execute(
+                select(
+                    observability_evaluation_scores.c.evaluator,
+                    observability_evaluation_scores.c.observation_ref,
+                    observability_evaluation_scores.c.source,
+                    observability_evaluation_scores.c.value,
+                    observability_evaluation_scores.c.data_type,
+                    observability_evaluation_scores.c.judge_run_ref,
+                    observability_evaluation_scores.c.score_date,
+                ).where(
+                    observability_evaluation_scores.c.observation_kind == OBSERVATION_KIND_GOLDEN,
+                    observability_evaluation_scores.c.source.in_((SOURCE_JUDGE, SOURCE_HUMAN)),
+                )
+            )
+            rows = [dict(row._mapping) for row in query_result]
+
+        # Partition into judge and human score objects compatible with domain compute_agreement.
+        judge_scores = [r for r in rows if r["source"] == SOURCE_JUDGE]
+        human_scores = [r for r in rows if r["source"] == SOURCE_HUMAN]
+
+        # Use the pure domain function which handles pairing and empty cases.
+        agreements = compute_agreement(
+            judge_scores=judge_scores,
+            human_scores=human_scores,
+            tolerance=tolerance or DEFAULT_AGREEMENT_TOLERANCE,
+            evaluators=evaluators,
+            evaluator=evaluator,
+            synthetic_only=synthetic_only,
+        )
+        if isinstance(agreements, EvaluationAgreement):
+            return [agreements]
+        return agreements
+
+    # Aliases with common spellings used by tests and consumers.
+    async def evaluation_agreement(self, *args: Any, **kwargs: Any) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def judge_human_agreement(self, *args: Any, **kwargs: Any) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def human_judge_agreement(self, *args: Any, **kwargs: Any) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def judge_vs_human_agreement(
+        self, *args: Any, **kwargs: Any
+    ) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def compute_agreement(self, *args: Any, **kwargs: Any) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def compute_agreements(self, *args: Any, **kwargs: Any) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def compute_agreement_per_evaluator(
+        self, *args: Any, **kwargs: Any
+    ) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def agreement(self, *args: Any, **kwargs: Any) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def agreement_summary(self, *args: Any, **kwargs: Any) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def get_evaluation_agreement(
+        self, *args: Any, **kwargs: Any
+    ) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def query_evaluation_agreement(
+        self, *args: Any, **kwargs: Any
+    ) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def list_evaluation_agreement(
+        self, *args: Any, **kwargs: Any
+    ) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def measure_agreement(self, *args: Any, **kwargs: Any) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def compute_evaluator_agreement(
+        self, *args: Any, **kwargs: Any
+    ) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def compute_evaluator_agreements(
+        self, *args: Any, **kwargs: Any
+    ) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
+
+    async def compute_evaluation_agreement_for_dataset(
+        self, *args: Any, **kwargs: Any
+    ) -> list[EvaluationAgreement]:
+        return await self.compute_evaluation_agreement(*args, **kwargs)
 
     def _alert_delivery_config(self) -> AlertDeliveryConfig:
         """Build alert delivery config from settings."""
