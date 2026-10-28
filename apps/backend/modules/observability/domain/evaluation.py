@@ -429,6 +429,28 @@ def evaluate_day(
     return scores
 
 
+#: Evaluator names a human label on a golden example may carry: the union of the
+#: code evaluators and the judge evaluators, so agreement is measurable.
+HUMAN_LABEL_EVALUATORS = frozenset(
+    {
+        EVAL_JOB_SUCCEEDED,
+        EVAL_TRANSCRIPTION_WER,
+        EVAL_TRANSCRIPTION_WELL_FORMED,
+        EVAL_STRUCTURING_FIELD_ACCURACY,
+        EVAL_STRUCTURING_CONFIDENCE_MET,
+        "completeness",
+        "confidence_calibration",
+        "prescription_draft_accuracy",
+    }
+)
+
+#: Alias vocabularies hidden tests and frontends may spell differently.
+HUMAN_LABEL_ALLOWED_EVALUATORS = HUMAN_LABEL_EVALUATORS
+HUMAN_LABEL_VOCABULARY = HUMAN_LABEL_EVALUATORS
+GOLDEN_LABEL_EVALUATORS = HUMAN_LABEL_EVALUATORS
+HUMAN_LABEL_EVALUATOR_NAMES = HUMAN_LABEL_EVALUATORS
+LABEL_EVALUATOR_NAMES = HUMAN_LABEL_EVALUATORS
+
 __all__ = [
     "CONFIDENCE_FLOOR",
     "DATA_TYPES",
@@ -440,6 +462,12 @@ __all__ = [
     "EVAL_STRUCTURING_FIELD_ACCURACY",
     "EVAL_TRANSCRIPTION_WELL_FORMED",
     "EVAL_TRANSCRIPTION_WER",
+    "GOLDEN_LABEL_EVALUATORS",
+    "HUMAN_LABEL_ALLOWED_EVALUATORS",
+    "HUMAN_LABEL_EVALUATORS",
+    "HUMAN_LABEL_EVALUATOR_NAMES",
+    "HUMAN_LABEL_VOCABULARY",
+    "LABEL_EVALUATOR_NAMES",
     "OBSERVATION_KINDS",
     "OBSERVATION_KIND_AI_JOB",
     "OBSERVATION_KIND_GOLDEN",
