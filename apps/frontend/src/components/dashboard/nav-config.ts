@@ -349,6 +349,12 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
           href: "/operator/observability/settings",
           icon: Settings,
         },
+        {
+          key: "evals",
+          labelKey: "evals",
+          href: "/operator/observability/evals",
+          icon: ClipboardList,
+        },
       ],
     },
   ],
