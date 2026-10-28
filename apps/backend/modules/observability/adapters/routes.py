@@ -1141,7 +1141,7 @@ async def retire_evaluation_dataset_version(
 
 
 class HumanLabelRequest(BaseModel):
-    model_config = {"extra": "allow", "populate_by_name": True}
+    model_config = {"extra": "ignore", "populate_by_name": True}
 
     example_ref: str | None = None
     observation_ref: str | None = None
@@ -1192,7 +1192,6 @@ async def _human_label_request_handler(
     name: str | None = None,
     version: int | None = None,
 ) -> dict[str, object]:
-    del principal, name, version
 
     resolved_example = (
         example_ref
@@ -1244,81 +1243,101 @@ async def _human_label_request_handler(
 
     facade = _facade(request)
 
-    result: object | None = None
-    last_error: Exception | None = None
-    for method_name in _HUMAN_LABEL_METHOD_NAMES:
-        method = getattr(facade, method_name, None)
-        if not callable(method):
-            continue
-        try:
-            result = await method(
-                example_ref=str(resolved_example).strip(),
-                observation_ref=str(resolved_example).strip(),
-                evaluator=str(resolved_evaluator).strip(),
-                value=resolved_value,
-                data_type=resolved_data_type,
-                score_date=resolved_score_date,
-                trace_id=resolved_trace_id,
-                metadata=resolved_metadata,
-            )
-            break
-        except TypeError as exc:
-            last_error = exc
-            continue
+    async def _call() -> dict[str, object]:
+        result: object | None = None
+        last_error: Exception | None = None
+        for method_name in _HUMAN_LABEL_METHOD_NAMES:
+            method = getattr(facade, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                result = await method(
+                    example_ref=str(resolved_example).strip(),
+                    observation_ref=str(resolved_example).strip(),
+                    evaluator=str(resolved_evaluator).strip(),
+                    value=resolved_value,
+                    data_type=resolved_data_type,
+                    score_date=resolved_score_date,
+                    trace_id=resolved_trace_id,
+                    metadata=resolved_metadata,
+                )
+                break
+            except TypeError as exc:
+                last_error = exc
+                continue
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "HUMAN_LABEL_INVALID",
+                        "message": str(exc),
+                        "trace_id": request.state.trace_id
+                        if hasattr(request.state, "trace_id")
+                        else None,
+                    },
+                ) from exc
 
-    if result is None:
-        if last_error is not None:
+        if result is None:
+            if last_error is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": "HUMAN_LABEL_FAILED",
+                        "message": "human label application failed",
+                        "trace_id": request.state.trace_id
+                        if hasattr(request.state, "trace_id")
+                        else None,
+                    },
+                ) from last_error
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={
                     "code": "HUMAN_LABEL_FAILED",
-                    "message": str(last_error),
+                    "message": "no human label implementation available",
                     "trace_id": request.state.trace_id
                     if hasattr(request.state, "trace_id")
                     else None,
                 },
-            ) from last_error
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "code": "HUMAN_LABEL_FAILED",
-                "message": "no human label implementation available",
-                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
-            },
-        )
+            )
 
-    def _attr(obj: object, name: str, default: object = None) -> object:
-        if isinstance(obj, Mapping):
-            return obj.get(name, default)
-        return getattr(obj, name, default)
+        def _attr(obj: object, name: str, default: object = None) -> object:
+            if isinstance(obj, Mapping):
+                return obj.get(name, default)
+            return getattr(obj, name, default)
 
-    source = _attr(result, "source", "human") or "human"
-    observation_kind = _attr(result, "observation_kind", "golden") or "golden"
-    observation_ref = _attr(result, "observation_ref", resolved_example) or resolved_example
-    example_ref_out = _attr(result, "example_ref", observation_ref)
-    evaluator_out = _attr(result, "evaluator", resolved_evaluator)
-    data_type_out = _attr(result, "data_type", resolved_data_type or "NUMERIC")
-    value_out = _attr(result, "value", resolved_value)
-    score_date_out = _attr(result, "score_date", resolved_score_date)
-    trace_id_out = _attr(result, "trace_id", resolved_trace_id)
-    metadata_out = _attr(result, "metadata", resolved_metadata or {})
+        source = _attr(result, "source", "human") or "human"
+        observation_kind = _attr(result, "observation_kind", "golden") or "golden"
+        observation_ref = _attr(result, "observation_ref", resolved_example) or resolved_example
+        example_ref_out = _attr(result, "example_ref", observation_ref)
+        evaluator_out = _attr(result, "evaluator", resolved_evaluator)
+        data_type_out = _attr(result, "data_type", resolved_data_type or "NUMERIC")
+        value_out = _attr(result, "value", resolved_value)
+        score_date_out = _attr(result, "score_date", resolved_score_date)
+        trace_id_out = _attr(result, "trace_id", resolved_trace_id)
+        metadata_out = _attr(result, "metadata", resolved_metadata or {})
+        created = bool(_attr(result, "created", True))
 
-    payload: dict[str, object] = {
-        "source": source,
-        "observation_kind": observation_kind,
-        "observation_ref": observation_ref,
-        "example_ref": example_ref_out,
-        "evaluator": evaluator_out,
-        "data_type": data_type_out,
-        "value": value_out,
-        "score_date": str(score_date_out) if score_date_out is not None else None,
-        "trace_id": trace_id_out,
-        "metadata": metadata_out if metadata_out is not None else {},
-        "status": "ok",
-        "created": True,
-        "updated": False,
-    }
-    return payload
+        payload: dict[str, object] = {
+            "source": source,
+            "observation_kind": observation_kind,
+            "observation_ref": observation_ref,
+            "example_ref": example_ref_out,
+            "evaluator": evaluator_out,
+            "data_type": data_type_out,
+            "value": value_out,
+            "score_date": str(score_date_out) if score_date_out is not None else None,
+            "trace_id": trace_id_out,
+            "metadata": metadata_out if metadata_out is not None else {},
+            "status": "created" if created else "updated",
+            "created": created,
+            "updated": not created,
+        }
+        return payload
+
+    namespace = (
+        f"human-label:{principal.subject_id}" if principal.subject_id is not None else "human-label"
+    )
+    return await run_idempotent(request, _call, namespace=namespace)
 
 
 _HUMAN_LABEL_BASE_PATHS: tuple[str, ...] = (

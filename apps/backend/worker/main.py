@@ -82,7 +82,6 @@ from modules.observability.facade import (
     SecurityDetectorThresholds,
     drain_error_buffer,
     drain_http_counter,
-    run_judge_job,
     run_security_scan,
 )
 from modules.ops.adapters import register_handlers as ops_register_handlers

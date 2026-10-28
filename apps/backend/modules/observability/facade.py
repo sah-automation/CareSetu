@@ -6005,6 +6005,13 @@ def build_deeplinks(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class HumanLabelResult(EvaluationScore):
+    """An operator-applied human label on a golden example."""
+
+    created: bool = True
+
+
 class ObservabilityFacade:
     """Typed public facade for observability.
 
@@ -7073,16 +7080,16 @@ class ObservabilityFacade:
 
     async def _human_label(
         self,
-        *args: Any,
-        example_ref: str | None = None,
-        observation_ref: str | None = None,
-        evaluator: str | None = None,
-        value: Any = None,
-        data_type: str | None = None,
-        score_date: Any = None,
-        trace_id: str | None = None,
-        metadata: Mapping[str, object] | None = None,
-        **kwargs: Any,
+        *args: object,
+        example_ref: object | None = None,
+        observation_ref: object | None = None,
+        evaluator: object | None = None,
+        value: object | None = None,
+        data_type: object | None = None,
+        score_date: object | None = None,
+        trace_id: object | None = None,
+        metadata: object | None = None,
+        **kwargs: object,
     ) -> EvaluationScore:
         """Create or update a human label (source human, observation kind golden)."""
         from datetime import UTC as _UTC
@@ -7125,6 +7132,8 @@ class ObservabilityFacade:
             metadata = kwargs.get("metadata")
         if score_date is None:
             score_date = kwargs.get("score_date") or kwargs.get("date") or kwargs.get("metric_date")
+        if not isinstance(score_date, (str, _date, type(None))):
+            raise ValueError(f"invalid score_date: {score_date!r}")
 
         if not example_ref or not isinstance(example_ref, str) or not example_ref.strip():
             raise ValueError("example_ref must be a non-empty string")
@@ -7151,17 +7160,24 @@ class ObservabilityFacade:
         else:
             raise ValueError(f"invalid score_date: {score_date!r}")
 
-        try:
-            numeric_value = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"score value must be numeric, got {value!r}") from exc
+        if isinstance(value, (int, float, str, bytes, bytearray)) and not isinstance(value, bool):
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"score value must be numeric, got {value!r}") from exc
+        else:
+            raise ValueError(f"score value must be numeric, got {value!r}")
         import math as _math
 
         if not _math.isfinite(numeric_value):
             raise ValueError(f"score value must be finite, got {value!r}")
 
         if data_type is None:
-            if evaluator in {"transcription_well_formed", "structuring_confidence_met"}:
+            if evaluator in {
+                "transcription_well_formed",
+                "structuring_confidence_met",
+                "job_succeeded",
+            }:
                 data_type = DATA_TYPE_BOOLEAN
             else:
                 data_type = DATA_TYPE_NUMERIC
@@ -7173,16 +7189,20 @@ class ObservabilityFacade:
         resolved_evaluator = str(evaluator).strip()
         resolved_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
 
+        created = True
         async with self._engine.begin() as connection:
-            await connection.execute(
-                select(table.c.id).where(
-                    table.c.score_date == resolved_date,
-                    table.c.observation_kind == OBSERVATION_KIND_GOLDEN,
-                    table.c.observation_ref == resolved_example,
-                    table.c.evaluator == resolved_evaluator,
-                    table.c.source != SOURCE_JUDGE,
+            existing_row = (
+                await connection.execute(
+                    select(table.c.id).where(
+                        table.c.score_date == resolved_date,
+                        table.c.observation_kind == OBSERVATION_KIND_GOLDEN,
+                        table.c.observation_ref == resolved_example,
+                        table.c.evaluator == resolved_evaluator,
+                        table.c.source != SOURCE_JUDGE,
+                    )
                 )
-            )
+            ).first()
+            created = existing_row is None
 
             from sqlalchemy.dialects.postgresql import insert as _pg_insert
 
@@ -7212,7 +7232,7 @@ class ObservabilityFacade:
             )
             await connection.execute(stmt)
 
-        return EvaluationScore(
+        return HumanLabelResult(
             score_date=resolved_date,
             observation_kind=OBSERVATION_KIND_GOLDEN,
             observation_ref=resolved_example,
@@ -7220,8 +7240,9 @@ class ObservabilityFacade:
             data_type=data_type,
             value=numeric_value,
             source=SOURCE_HUMAN,
-            trace_id=trace_id,
+            trace_id=(str(trace_id) if trace_id is not None else None),
             metadata=resolved_metadata,
+            created=created,
         )
 
     def _alert_delivery_config(self) -> AlertDeliveryConfig:
