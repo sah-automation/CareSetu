@@ -160,6 +160,14 @@ class OperatorActiveUpdateRequest(BaseModel):
     is_active: bool = Field(description="New active state for the operator")
 
 
+class OperatorListResponse(BaseModel):
+    """Shape of ``GET /v1/auth/operator/users`` - operators wrapped, not a bare list."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operators: list[OperatorSummary]
+
+
 class OperatorLoginRequest(BaseModel):
     """Body of ``POST /v1/auth/operator/login`` (S9, #262)."""
 
@@ -509,14 +517,14 @@ async def refresh_session(
 
 @router.get(
     "/operator/users",
-    response_model=list[OperatorSummary],
+    response_model=OperatorListResponse,
     status_code=status.HTTP_200_OK,
     summary="List operators (admin only)",
 )
 async def list_operators(
     request: Request,
     admin: Annotated[Principal, Depends(require_admin)],
-) -> list[OperatorSummary]:
+) -> OperatorListResponse:
     """List the operator group for user management (spec #761, #768).
 
     Admin-only (``require_admin``): the operator role alone is not enough - a
@@ -527,7 +535,8 @@ async def list_operators(
     canonical number is never in the response.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await facade.list_operators()
+    operators = await facade.list_operators()
+    return OperatorListResponse(operators=operators)
 
 
 @router.post(
