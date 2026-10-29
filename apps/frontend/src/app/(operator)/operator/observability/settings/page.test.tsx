@@ -1,6 +1,7 @@
 // #797: the admin Settings shell and its AI section.
 // #798: the allowlisted AI knobs gain editable controls, save states,
 // validation copy, and the append-only setting history beneath the table.
+// #800: the Feature Flags section with runtime/restart-required flags and history.
 
 import {
   cleanup,
@@ -17,10 +18,15 @@ import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import {
   fetchEffectiveSettings,
+  fetchFeatureFlags,
+  fetchFeatureFlagHistory,
   fetchSettingHistory,
   fetchAlertDeliveries,
+  writeFeatureFlag,
   writeSetting,
   type EffectiveSetting,
+  type FeatureFlag,
+  type FeatureFlagHistoryEntry,
   type SettingHistoryEntry,
 } from "@/lib/operator/settings";
 
@@ -31,8 +37,11 @@ vi.mock("@/lib/operator/settings");
 
 const mockUseAuth = vi.mocked(useAuth);
 const mockFetchEffectiveSettings = vi.mocked(fetchEffectiveSettings);
+const mockFetchFeatureFlags = vi.mocked(fetchFeatureFlags);
+const mockFetchFeatureFlagHistory = vi.mocked(fetchFeatureFlagHistory);
 const mockFetchSettingHistory = vi.mocked(fetchSettingHistory);
 const mockFetchAlertDeliveries = vi.mocked(fetchAlertDeliveries);
+const mockWriteFeatureFlag = vi.mocked(writeFeatureFlag);
 const mockWriteSetting = vi.mocked(writeSetting);
 
 const en = STRINGS.en.operatorSettings;
@@ -141,11 +150,58 @@ const historyEntries: SettingHistoryEntry[] = [
   },
 ];
 
+const featureFlags: FeatureFlag[] = [
+  {
+    flag_key: "test.runtime_flag",
+    enabled: true,
+    flag_kind: "runtime",
+    description: "A runtime flag",
+    editable: true,
+    updated_at: "2026-03-04T10:00:00Z",
+  },
+  {
+    flag_key: "test.restart_flag",
+    enabled: false,
+    flag_kind: "restart_required",
+    description: "A restart-required flag",
+    editable: false,
+    updated_at: "2026-03-03T10:00:00Z",
+  },
+];
+
+const featureFlagHistory: FeatureFlagHistoryEntry[] = [
+  {
+    flag_key: "test.runtime_flag",
+    enabled: true,
+    flag_kind: "runtime",
+    version: 2,
+    changed_by: 7,
+    changed_at: "2026-03-04T10:00:00Z",
+  },
+  {
+    flag_key: "test.runtime_flag",
+    enabled: false,
+    flag_kind: "runtime",
+    version: 1,
+    changed_by: null,
+    changed_at: "2026-03-03T09:00:00Z",
+  },
+];
+
 async function renderReady() {
   render(<ObservabilitySettingsPage />);
   await waitFor(() => {
     expect(
       screen.getByTestId("settings-ai-row-ai.timeout_seconds"),
+    ).toBeInTheDocument();
+  });
+}
+
+async function renderFeatureFlagsReady() {
+  render(<ObservabilitySettingsPage />);
+  await waitFor(() => {
+    expect(
+      screen.getByTestId("settings-feature-flags-row-test.runtime_flag"),
     ).toBeInTheDocument();
   });
 }
@@ -160,6 +216,7 @@ describe("ObservabilitySettingsPage (#797)", () => {
     __resetLangForTests();
     mockUseAuth.mockReturnValue(adminAuth());
     mockFetchSettingHistory.mockResolvedValue([]);
+    mockFetchFeatureFlagHistory.mockResolvedValue([]);
     mockFetchAlertDeliveries.mockResolvedValue({
       deliveries: [],
       total_count: 0,
@@ -170,6 +227,7 @@ describe("ObservabilitySettingsPage (#797)", () => {
 
   it("renders the four-section shell", async () => {
     mockFetchEffectiveSettings.mockResolvedValue(settings);
+    mockFetchFeatureFlags.mockResolvedValue(featureFlags);
 
     render(<ObservabilitySettingsPage />);
 
@@ -543,5 +601,240 @@ describe("AiSettingsSection writes and history (#798)", () => {
         screen.getByTestId("settings-ai-history-empty"),
       ).toBeInTheDocument();
     });
+  });
+});
+
+describe("FeatureFlagsSettingsSection (#800)", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __resetLangForTests();
+    mockUseAuth.mockReturnValue(adminAuth());
+    mockFetchSettingHistory.mockResolvedValue([]);
+    mockFetchFeatureFlagHistory.mockResolvedValue([]);
+    mockFetchAlertDeliveries.mockResolvedValue({
+      deliveries: [],
+      total_count: 0,
+      page: 1,
+      page_size: 25,
+    });
+    mockFetchEffectiveSettings.mockResolvedValue(settings);
+    mockFetchFeatureFlags.mockResolvedValue(featureFlags);
+  });
+
+  it("renders all flags with their type and editability", async () => {
+    await renderFeatureFlagsReady();
+
+    expect(
+      screen.getByTestId("settings-feature-flags-row-test.runtime_flag"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("settings-feature-flags-row-test.restart_flag"),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByTestId("settings-feature-flags-type-test.runtime_flag"),
+    ).toHaveTextContent(en.featureFlags.runtime);
+    expect(
+      screen.getByTestId("settings-feature-flags-type-test.restart_flag"),
+    ).toHaveTextContent(en.featureFlags.restartRequired);
+
+    // Runtime flag has a toggle control
+    expect(
+      screen.getByTestId("settings-feature-flags-input-test.runtime_flag"),
+    ).toBeInTheDocument();
+    // Restart-required flag is read-only with explanation
+    expect(
+      screen.getByTestId("settings-feature-flags-readonly-test.restart_flag"),
+    ).toHaveTextContent(en.featureFlags.readOnly);
+    expect(
+      screen.getByTestId(
+        "settings-feature-flags-restart-explanation-test.restart_flag",
+      ),
+    ).toHaveTextContent(en.featureFlags.restartExplanation);
+  });
+
+  it("saves an edited runtime flag and refreshes flags and history", async () => {
+    mockWriteFeatureFlag.mockResolvedValue({
+      flag_key: "test.runtime_flag",
+      enabled: false,
+      flag_kind: "runtime",
+      version: 3,
+    });
+
+    await renderFeatureFlagsReady();
+
+    fireEvent.click(
+      screen.getByTestId("settings-feature-flags-input-test.runtime_flag"),
+    );
+    screen.getByTestId("settings-feature-flags-save-test.runtime_flag").click();
+
+    await waitFor(() => {
+      expect(mockWriteFeatureFlag).toHaveBeenCalledWith(
+        "test.runtime_flag",
+        false,
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(
+          "settings-feature-flags-save-status-test.runtime_flag",
+        ),
+      ).toHaveTextContent(en.featureFlags.saved);
+    });
+    expect(mockFetchFeatureFlags).toHaveBeenCalledTimes(2);
+    expect(mockFetchFeatureFlagHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the API's refusal message for a failed write", async () => {
+    mockWriteFeatureFlag.mockRejectedValue(
+      new ApiError({
+        code: "INVALID_FEATURE_FLAG_WRITE",
+        message: "flag is restart-required and cannot be edited at runtime",
+        trace_id: "trace-800",
+        details: {},
+      }),
+    );
+
+    await renderFeatureFlagsReady();
+
+    fireEvent.click(
+      screen.getByTestId("settings-feature-flags-input-test.runtime_flag"),
+    );
+    screen.getByTestId("settings-feature-flags-save-test.runtime_flag").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(
+          "settings-feature-flags-save-error-test.runtime_flag",
+        ),
+      ).toHaveTextContent(
+        "flag is restart-required and cannot be edited at runtime",
+      );
+    });
+    expect(
+      screen.getByTestId("settings-feature-flags-save-test.runtime_flag"),
+    ).toBeEnabled();
+  });
+
+  it("shows the fallback copy for an unexpected write failure", async () => {
+    mockWriteFeatureFlag.mockRejectedValue(new Error("network down"));
+
+    await renderFeatureFlagsReady();
+
+    fireEvent.click(
+      screen.getByTestId("settings-feature-flags-input-test.runtime_flag"),
+    );
+    screen.getByTestId("settings-feature-flags-save-test.runtime_flag").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(
+          "settings-feature-flags-save-error-test.runtime_flag",
+        ),
+      ).toHaveTextContent(en.featureFlags.editError);
+    });
+  });
+
+  it("lists flag history newest first", async () => {
+    mockFetchFeatureFlagHistory.mockResolvedValue(featureFlagHistory);
+
+    await renderFeatureFlagsReady();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(
+          "settings-feature-flags-history-row-test.runtime_flag-2",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId(
+        "settings-feature-flags-history-row-test.runtime_flag-2",
+      ),
+    ).toHaveTextContent(en.featureFlags.toggleOn);
+    expect(
+      screen.getByTestId(
+        "settings-feature-flags-history-row-test.runtime_flag-1",
+      ),
+    ).toHaveTextContent(en.featureFlags.toggleOff);
+  });
+
+  it("says so when there is no history", async () => {
+    await renderFeatureFlagsReady();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-feature-flags-history-empty"),
+      ).toHaveTextContent(en.featureFlags.historyEmpty);
+    });
+  });
+
+  it("retries a failed history read", async () => {
+    mockFetchFeatureFlagHistory
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce([]);
+
+    await renderFeatureFlagsReady();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-feature-flags-history-error"),
+      ).toHaveTextContent(en.featureFlags.historyError);
+    });
+
+    screen.getByTestId("settings-feature-flags-history-retry").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-feature-flags-history-empty"),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("renders in Hindi when the locale flips", async () => {
+    function LangFlipHost() {
+      const { lang, setLang } = useLang();
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() => setLang(lang === "en" ? "hi" : "en")}
+          >
+            flip-lang
+          </button>
+          <ObservabilitySettingsPage />
+        </>
+      );
+    }
+
+    render(<LangFlipHost />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-feature-flags-row-test.runtime_flag"),
+      ).toBeInTheDocument();
+    });
+
+    screen.getByText("flip-lang").click();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("page-header")).toHaveTextContent(hi.title);
+    });
+    expect(
+      screen.getByTestId("settings-feature-flags-title"),
+    ).toHaveTextContent(hi.sections.featureFlags);
+    expect(
+      screen.getByTestId("settings-feature-flags-type-test.runtime_flag"),
+    ).toHaveTextContent(hi.featureFlags.runtime);
+    expect(
+      screen.getByTestId("settings-feature-flags-save-test.runtime_flag"),
+    ).toHaveTextContent(hi.featureFlags.save);
+    expect(
+      screen.getByTestId("settings-feature-flags-history-title"),
+    ).toHaveTextContent(hi.featureFlags.historyTitle);
   });
 });
