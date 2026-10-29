@@ -66,6 +66,10 @@ EVENT_OPERATOR_INVITED = "operator.invited"
 # is ``failure``, or ``lockout`` on the trip with ``lockout_until`` naming the
 # lift time (PHASE-14B T17, #778).
 EVENT_OPERATOR_MFA_FAILED = "operator.mfa_failed"
+# MOD-001 (iam): emitted when an admin changes an operator's tier (promote/demote).
+EVENT_OPERATOR_TIER_CHANGED = "operator.tier_changed"
+# MOD-001 (iam): emitted when an admin changes an operator's active state (deactivate/reactivate).
+EVENT_OPERATOR_ACTIVE_CHANGED = "operator.active_changed"
 EVENT_PARTNER_REGISTERED = "partner.registered"
 # MOD-002 (partner): emitted when a verification round (first-time or
 # re-verification) opens, carrying the round/version in the payload so the

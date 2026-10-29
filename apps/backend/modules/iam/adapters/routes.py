@@ -34,8 +34,10 @@ from modules.iam.domain.exceptions import (
     IamError,
     InvalidOperatorCodeError,
     InvalidPhoneError,
+    OperatorLastAdminError,
     OperatorMfaError,
     OperatorMfaLockedError,
+    OperatorSelfChangeError,
     PatientProfileNotSetError,
     ProfilePhotoTransferError,
     ProfilePhotoValidationError,
@@ -140,6 +142,22 @@ class OperatorInviteRequest(BaseModel):
         default="operator",
         description="Authority to grant; defaults to the non-admin operator tier",
     )
+
+
+class OperatorTierUpdateRequest(BaseModel):
+    """Body of ``PATCH /v1/auth/operator/users/{identity_id}/tier`` (spec #761, #769)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tier: Literal["admin", "operator"] = Field(description="New authority tier for the operator")
+
+
+class OperatorActiveUpdateRequest(BaseModel):
+    """Body of ``PATCH /v1/auth/operator/users/{identity_id}/active`` (spec #761, #769)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool = Field(description="New active state for the operator")
 
 
 class OperatorLoginRequest(BaseModel):
@@ -544,6 +562,57 @@ async def invite_operator(
     )
 
 
+@router.patch(
+    "/operator/users/{identity_id}/tier",
+    response_model=OperatorSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Update an operator's tier (admin only)",
+)
+async def update_operator_tier(
+    request: Request,
+    identity_id: int,
+    admin: Annotated[Principal, Depends(require_admin)],
+    body: OperatorTierUpdateRequest,
+) -> OperatorSummary:
+    """Promote or demote an operator (spec #761, #769).
+
+    Admin-only (``require_admin``): only an admin-tier operator can change
+    another operator's tier. Self-demotion is refused. Demoting the last
+    active admin is refused. Every change revokes the operator's active
+    sessions and emits an ``operator.tier_changed`` audit event.
+    """
+    actor_id = int(admin.subject_id)
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.update_operator_tier(identity_id, body.tier, actor_identity_id=actor_id)
+
+
+@router.patch(
+    "/operator/users/{identity_id}/active",
+    response_model=OperatorSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Update an operator's active state (admin only)",
+)
+async def update_operator_active(
+    request: Request,
+    identity_id: int,
+    admin: Annotated[Principal, Depends(require_admin)],
+    body: OperatorActiveUpdateRequest,
+) -> OperatorSummary:
+    """Deactivate or reactivate an operator (spec #761, #769).
+
+    Admin-only (``require_admin``): only an admin-tier operator can change
+    another operator's active state. Self-deactivation is refused.
+    Deactivating the last active admin is refused. Deactivation revokes the
+    operator's active sessions and blocks login; reactivation restores
+    access. Every change emits an ``operator.active_changed`` audit event.
+    """
+    actor_id = int(admin.subject_id)
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.update_operator_active(
+        identity_id, body.is_active, actor_identity_id=actor_id
+    )
+
+
 @router.post(
     "/operator/login",
     response_model=SessionResult,
@@ -685,6 +754,24 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _operator_self_change(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "OPERATOR_SELF_CHANGE",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _operator_last_admin(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "OPERATOR_LAST_ADMIN",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
     async def _refresh_token_unknown(request: Request, exc: Exception) -> JSONResponse:
         return error_response(
             status.HTTP_401_UNAUTHORIZED,
@@ -774,6 +861,8 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(OperatorMfaError, _operator_mfa_failed)
     app.add_exception_handler(OperatorMfaLockedError, _operator_mfa_locked)
     app.add_exception_handler(InvalidOperatorCodeError, _invalid_operator_code)
+    app.add_exception_handler(OperatorSelfChangeError, _operator_self_change)
+    app.add_exception_handler(OperatorLastAdminError, _operator_last_admin)
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
     app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)

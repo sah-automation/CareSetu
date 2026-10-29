@@ -167,3 +167,19 @@ class ProfilePhotoTransferError(IamError):
     failing patient only - never the ciphertext or object state - so a 502 is
     safe for the envelope and logs.
     """
+
+
+class OperatorSelfChangeError(IamError):
+    """An operator attempted to change their own tier or active state.
+
+    Raised when an admin tries to demote or deactivate themselves. The message
+    is human-safe for the 409 envelope.
+    """
+
+
+class OperatorLastAdminError(IamError):
+    """An operator change would leave no active admin.
+
+    Raised when demoting or deactivating the last active admin operator. The
+    message is human-safe for the 409 envelope.
+    """
