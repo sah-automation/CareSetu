@@ -7799,7 +7799,14 @@ class ObservabilityFacade:
         """
         active_dataset = await self.get_active_evaluation_dataset()
         judge_run = await self.get_latest_judge_run()
-        judge_scores = await self.get_judge_scores(run_ref=judge_run.run_ref if judge_run else None)
+        judge_scores_result = await self.get_judge_scores(
+            run_ref=judge_run.run_ref if judge_run else None
+        )
+        judge_scores = (
+            judge_scores_result[0]
+            if isinstance(judge_scores_result, tuple)
+            else judge_scores_result
+        )
         agreement = await self.get_evaluation_agreement_read()
 
         return EvaluationReadResponse(
