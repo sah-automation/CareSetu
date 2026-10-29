@@ -17,7 +17,8 @@ import {
   startJudgeRun,
 } from "@/lib/operator/observability";
 import { useAuth } from "@/lib/auth/AuthContext";
-import { useI18n } from "@/lib/i18n/useI18n";
+import { useLang } from "@/lib/i18n/LangContext";
+import { STRINGS } from "@/lib/i18n/dictionaries";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
 function useAuthOrNull() {
@@ -35,7 +36,8 @@ function traceOf(error: unknown): string {
 }
 
 export default function ObservabilityEvalsPage() {
-  const { t } = useI18n();
+  const { lang } = useLang();
+  const t = STRINGS[lang];
   const auth = useAuthOrNull();
   const isAdmin =
     auth?.user?.roles.includes("operator") === true &&

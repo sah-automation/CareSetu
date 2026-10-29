@@ -20,7 +20,7 @@ import { usePanelRead } from "@/lib/operator/usePanelRead";
 const NO_SECURITY_BODY = "The security scan has not recorded any signals yet.";
 
 const DEFERRED_BADGE_CLASS =
-  "inline-flex items-center rounded-full bg-warning-soft px-2 py-0.5 text-xs font-medium text-warning";
+  "inline-flex items-center rounded-full bg-warning-soft px-2 py-0.5 text-xs font-medium text-txt";
 
 const ACTIVE_BADGE_CLASS =
   "inline-flex items-center rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success";

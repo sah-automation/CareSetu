@@ -33,7 +33,10 @@ vi.mock("@/lib/config", () => ({
 
 function mockSession(roles: string[] | null) {
   vi.mocked(useAuth).mockReturnValue({
-    user: roles === null ? null : { id: 7, phone: "+911234567890", roles },
+    user:
+      roles === null
+        ? null
+        : { id: 7, phone: "+911234567890", roles, tier: null },
     selectedRole: roles?.includes("partner") ? "partner" : null,
     switchRole: vi.fn(),
     logout: vi.fn(),

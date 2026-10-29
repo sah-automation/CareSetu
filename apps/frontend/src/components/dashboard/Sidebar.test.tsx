@@ -50,7 +50,10 @@ vi.mock("next/link", () => ({
 const mockLogout = vi.fn();
 
 vi.mock("@/lib/auth/AuthContext", () => ({
-  useAuth: () => ({ logout: mockLogout }),
+  useAuth: () => ({
+    logout: mockLogout,
+    user: { id: 1, phone: "+911234567890", roles: ["operator"], tier: "admin" },
+  }),
 }));
 
 // ---------------------------------------------------------------------------

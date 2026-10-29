@@ -467,7 +467,7 @@ class Settings:
     alert_delivery_max_attempts: int = 5
     alert_delivery_base_backoff_seconds: int = 30
     alert_delivery_max_backoff_seconds: int = 3600
-    alert_delivery_console_base_url: str = "https://console.example.com"
+    alert_delivery_console_base_url: str = ""
     # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
     # knob (mock is the fail-closed default); the real provider key/base URL/
     # model. ``__post_init__`` refuses a real provider in dev/test unless demo
@@ -1351,7 +1351,5 @@ def get_settings() -> Settings:
         alert_delivery_max_attempts=_env_int("ALERT_DELIVERY_MAX_ATTEMPTS", 5),
         alert_delivery_base_backoff_seconds=_env_int("ALERT_DELIVERY_BASE_BACKOFF_SECONDS", 30),
         alert_delivery_max_backoff_seconds=_env_int("ALERT_DELIVERY_MAX_BACKOFF_SECONDS", 3600),
-        alert_delivery_console_base_url=os.environ.get(
-            "ALERT_DELIVERY_CONSOLE_BASE_URL", "https://console.example.com"
-        ),
+        alert_delivery_console_base_url=os.environ.get("ALERT_DELIVERY_CONSOLE_BASE_URL", ""),
     )
