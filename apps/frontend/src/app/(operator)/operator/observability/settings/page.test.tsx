@@ -18,6 +18,7 @@ import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import {
   fetchEffectiveSettings,
   fetchSettingHistory,
+  fetchAlertDeliveries,
   writeSetting,
   type EffectiveSetting,
   type SettingHistoryEntry,
@@ -31,6 +32,7 @@ vi.mock("@/lib/operator/settings");
 const mockUseAuth = vi.mocked(useAuth);
 const mockFetchEffectiveSettings = vi.mocked(fetchEffectiveSettings);
 const mockFetchSettingHistory = vi.mocked(fetchSettingHistory);
+const mockFetchAlertDeliveries = vi.mocked(fetchAlertDeliveries);
 const mockWriteSetting = vi.mocked(writeSetting);
 
 const en = STRINGS.en.operatorSettings;
@@ -69,8 +71,36 @@ const settings: EffectiveSetting[] = [
     restart_required: false,
   },
   {
+    key: "notification.channels.slack.enabled",
+    value: false,
+    source: "default",
+    editable: true,
+    restart_required: false,
+  },
+  {
     key: "notification.channels.email.enabled",
     value: false,
+    source: "default",
+    editable: true,
+    restart_required: false,
+  },
+  {
+    key: "notification.email.recipients",
+    value: [],
+    source: "default",
+    editable: true,
+    restart_required: false,
+  },
+  {
+    key: "notification.routing.ai_budget",
+    value: "none",
+    source: "default",
+    editable: true,
+    restart_required: false,
+  },
+  {
+    key: "notification.routing.provider_health_drop",
+    value: "none",
     source: "default",
     editable: true,
     restart_required: false,
@@ -130,6 +160,12 @@ describe("ObservabilitySettingsPage (#797)", () => {
     __resetLangForTests();
     mockUseAuth.mockReturnValue(adminAuth());
     mockFetchSettingHistory.mockResolvedValue([]);
+    mockFetchAlertDeliveries.mockResolvedValue({
+      deliveries: [],
+      total_count: 0,
+      page: 1,
+      page_size: 25,
+    });
   });
 
   it("renders the four-section shell", async () => {
@@ -237,7 +273,8 @@ describe("ObservabilitySettingsPage (#797)", () => {
         screen.getByTestId("settings-ai-row-ai.timeout_seconds"),
       ).toBeInTheDocument();
     });
-    expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(2);
+    // Called 3 times: initial AI + Notifications, then retry for AI + Notifications
+    expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(3);
   });
 
   it("shows the API rejection copy for an expected error", async () => {
@@ -363,7 +400,8 @@ describe("AiSettingsSection writes and history (#798)", () => {
         screen.getByTestId("settings-ai-save-status-ai.timeout_seconds"),
       ).toHaveTextContent(en.ai.saved);
     });
-    expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(2);
+    // Called 3 times: initial AI + Notifications, then after save for AI + Notifications
+    expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(3);
     expect(mockFetchSettingHistory).toHaveBeenCalledTimes(2);
   });
 

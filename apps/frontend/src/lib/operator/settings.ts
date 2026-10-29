@@ -33,6 +33,37 @@ export interface SettingHistoryEntry {
   changed_at: string;
 }
 
+export interface AlertDeliveryRow {
+  id: number;
+  alert_id: string;
+  channel: string;
+  status: string;
+  attempts: number;
+  next_retry_at: string | null;
+  last_attempt_at: string | null;
+  delivered_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AlertDeliveryPage {
+  deliveries: AlertDeliveryRow[];
+  total_count: number;
+  page: number;
+  page_size: number;
+}
+
+export interface AlertDeliveryTestResult {
+  success: boolean;
+  error: string | null;
+  response: Record<string, unknown> | null;
+}
+
+export interface AlertDeliveryRedeliverResult {
+  success: boolean;
+  delivery_id: number;
+}
+
 function isSettingSource(value: unknown): value is SettingSource {
   return value === "database" || value === "environment" || value === "default";
 }
@@ -96,6 +127,128 @@ function isSettingsHistoryResponse(
   const history = (value as { history?: unknown }).history;
   return (
     Array.isArray(history) && history.every((row) => isSettingHistoryEntry(row))
+  );
+}
+
+function isAlertDeliveryRow(value: unknown): value is AlertDeliveryRow {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.id === "number" &&
+    typeof row.alert_id === "string" &&
+    typeof row.channel === "string" &&
+    typeof row.status === "string" &&
+    typeof row.attempts === "number" &&
+    (row.next_retry_at === null || typeof row.next_retry_at === "string") &&
+    (row.last_attempt_at === null || typeof row.last_attempt_at === "string") &&
+    (row.delivered_at === null || typeof row.delivered_at === "string") &&
+    typeof row.created_at === "string" &&
+    typeof row.updated_at === "string"
+  );
+}
+
+interface AlertDeliveryPageResponse {
+  deliveries: AlertDeliveryRow[];
+  total_count: number;
+  page: number;
+  page_size: number;
+}
+
+function isAlertDeliveryPageResponse(
+  value: unknown,
+): value is AlertDeliveryPageResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    Array.isArray(row.deliveries) &&
+    row.deliveries.every((d) => isAlertDeliveryRow(d)) &&
+    typeof row.total_count === "number" &&
+    typeof row.page === "number" &&
+    typeof row.page_size === "number"
+  );
+}
+
+function isAlertDeliveryTestResult(
+  value: unknown,
+): value is AlertDeliveryTestResult {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.success === "boolean" &&
+    (row.error === null || typeof row.error === "string") &&
+    (row.response === null || typeof row.response === "object")
+  );
+}
+
+function isAlertDeliveryRedeliverResult(
+  value: unknown,
+): value is AlertDeliveryRedeliverResult {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.success === "boolean" && typeof row.delivery_id === "number"
+  );
+}
+
+/**
+ * Read alert delivery attempts, newest first.
+ */
+export async function fetchAlertDeliveries(
+  page = 1,
+  pageSize = 25,
+  status?: string,
+): Promise<AlertDeliveryPage> {
+  const query = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  if (status) query.set("status", status);
+  const data = await request<unknown>(
+    `/v1/operator/observability/alert-delivery?${query.toString()}`,
+  );
+  const read = guardShape(
+    data,
+    isAlertDeliveryPageResponse,
+    "The API returned an unexpected alert delivery shape",
+  );
+  return read;
+}
+
+/**
+ * Send a test notification via a delivery channel.
+ */
+export async function testAlertDelivery(
+  channel: "slack" | "email",
+): Promise<AlertDeliveryTestResult> {
+  const data = await request<unknown>(
+    "/v1/operator/observability/alert-delivery/test",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel }),
+    },
+  );
+  return guardShape(
+    data,
+    isAlertDeliveryTestResult,
+    "The API returned an unexpected test delivery shape",
+  );
+}
+
+/**
+ * Redeliver a failed or dead-letter alert delivery.
+ */
+export async function redeliverAlertDelivery(
+  deliveryId: number,
+): Promise<AlertDeliveryRedeliverResult> {
+  const data = await request<unknown>(
+    `/v1/operator/observability/alert-delivery/${deliveryId}/redeliver`,
+    { method: "POST" },
+  );
+  return guardShape(
+    data,
+    isAlertDeliveryRedeliverResult,
+    "The API returned an unexpected redelivery shape",
   );
 }
 
