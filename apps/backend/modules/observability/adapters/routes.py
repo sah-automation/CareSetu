@@ -91,6 +91,9 @@ from modules.observability.facade import (
     RETENTION_DEFAULT_COHORT_DAYS,
     ActiveUsersRead,
     AlertAcknowledgement,
+    AlertDeliveryPage,
+    AlertDeliveryRedeliverResult,
+    AlertDeliveryTestResult,
     AlertPage,
     BusinessRead,
     CostSummary,
@@ -616,6 +619,86 @@ async def acknowledge_alert(
         ),
         namespace=f"identity:{principal.subject_id}",
     )
+
+
+# --------------------------------------------------------- alert delivery API (#799)
+#
+# Admin-only endpoints for testing alert delivery channels, viewing recent
+# delivery attempts, and redelivering failed deliveries.
+
+_DeliveryStatus = Annotated[
+    Literal["pending", "in_progress", "delivered", "failed", "dead_letter"] | None,
+    Query(alias="status"),
+]
+
+_DeliveryPage = Annotated[int, Query(ge=1)]
+_DeliveryPageSize = Annotated[int, Query(ge=1, le=100)]
+
+_DeliveryChannel = Annotated[Literal["slack", "email"], Query()]
+
+
+@router.get(
+    "/v1/operator/observability/alert-delivery",
+    response_model=AlertDeliveryPage,
+    status_code=status.HTTP_200_OK,
+    summary="Read recent alert delivery attempts (admin only)",
+)
+async def read_alert_deliveries(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    page: _DeliveryPage = 1,
+    page_size: _DeliveryPageSize = 25,
+    delivery_status: _DeliveryStatus = None,
+) -> AlertDeliveryPage:
+    """One page of alert delivery attempts, newest first.
+
+    Paged with ``page``/``page_size`` (default 25, max 100) and ``total_count``
+    over the whole filter. Optional ``status`` filter narrows to a specific
+    delivery state. Admin-only because delivery rows can contain channel details.
+    """
+    del principal
+    return await _facade(request).get_alert_deliveries(
+        page=page, page_size=page_size, status=delivery_status
+    )
+
+
+@router.post(
+    "/v1/operator/observability/alert-delivery/test",
+    response_model=AlertDeliveryTestResult,
+    status_code=status.HTTP_200_OK,
+    summary="Send a test notification via a delivery channel (admin only)",
+)
+async def test_alert_delivery(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    channel: _DeliveryChannel,
+) -> AlertDeliveryTestResult:
+    """Send a test notification via the specified channel.
+
+    The test alert uses a fixed UUID and a ``test_delivery`` kind so it is
+    distinguishable from real alerts. The channel must be one of ``slack`` or
+    ``email``. The result reports whether the send succeeded and any error.
+    """
+    return await _facade(request).test_alert_delivery(channel=channel)
+
+
+@router.post(
+    "/v1/operator/observability/alert-delivery/{delivery_id}/redeliver",
+    response_model=AlertDeliveryRedeliverResult,
+    status_code=status.HTTP_200_OK,
+    summary="Redeliver a failed or dead-letter alert delivery (admin only)",
+)
+async def redeliver_alert_delivery(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    delivery_id: int,
+) -> AlertDeliveryRedeliverResult:
+    """Reset a failed or dead-letter delivery to ``pending`` for retry.
+
+    Only deliveries with status ``failed`` or ``dead_letter`` can be redelivered.
+    The delivery's attempt count is reset to 0 and it is re-queued for the drainer.
+    """
+    return await _facade(request).redeliver_alert_delivery(delivery_id=delivery_id)
 
 
 @router.get(

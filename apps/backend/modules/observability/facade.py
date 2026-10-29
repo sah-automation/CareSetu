@@ -95,9 +95,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from time import perf_counter
-from typing import Any, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 from typing import cast as narrowing_cast
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from modules.ops.facade import OpsFacade
 
 import httpx
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -133,7 +136,13 @@ from modules.observability.domain.agreement import (
     EvaluationAgreement,
     compute_agreement,
 )
-from modules.observability.domain.alert_delivery import AlertDeliveryConfig, ChannelAdapter
+from modules.observability.domain.alert_delivery import (
+    AlertDeliveryConfig,
+    ChannelAdapter,
+)
+from modules.observability.domain.alert_delivery import (
+    AlertRow as DeliveryAlertRow,
+)
 from modules.observability.domain.annotation import review_annotation
 from modules.observability.domain.consumer import (
     AI_JOB_SPEND_STATUS_COMPLETED,
@@ -142,9 +151,11 @@ from modules.observability.domain.consumer import (
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
     AiJobQueuedTelemetryPayload,
-    AlertRow,
     IntakeDoctorAssignedTelemetryPayload,
     sanitize_failure_reason,
+)
+from modules.observability.domain.consumer import (
+    AlertRow as ConsumerAlertRow,
 )
 from modules.observability.domain.dataset_validation import (
     validate_examples,
@@ -1114,7 +1125,7 @@ async def accumulate_security_signal(
     await connection.execute(statement)
 
 
-async def record_alert_event(connection: AsyncConnection, alert: AlertRow) -> None:
+async def record_alert_event(connection: AsyncConnection, alert: ConsumerAlertRow) -> None:
     """Insert one PHI-free alert row into ``observability_alert_events``.
 
     B4b (#703): the consumer's alert handlers (``audit.tamper_detected``, the
@@ -3209,6 +3220,53 @@ class EvaluationReadResponse(BaseModel):
     synthetic_only: bool = True
 
 
+class AlertDeliveryRow(BaseModel):
+    """One alert delivery row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    alert_id: str
+    channel: str
+    status: str
+    attempts: int
+    next_retry_at: str | None
+    last_attempt_at: str | None
+    delivered_at: str | None
+    created_at: str
+    updated_at: str
+
+
+class AlertDeliveryPage(BaseModel):
+    """Paged alert deliveries response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deliveries: list[AlertDeliveryRow]
+    total_count: int
+    page: int
+    page_size: int
+
+
+class AlertDeliveryTestResult(BaseModel):
+    """Test delivery result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    response: dict[str, object] | None = None
+
+
+class AlertDeliveryRedeliverResult(BaseModel):
+    """Redelivery result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    delivery_id: int
+
+
 # ------------------------------------------------------- operator read API (C1b)
 #
 # The five reads C1b adds. Same rules as C1a above: this module's own tables,
@@ -3923,6 +3981,72 @@ async def query_alerts(
         .limit(page_size)
     )
     return AlertPage(alerts=[_alert_entry(row) for row in rows.mappings()], total_count=total)
+
+
+async def query_alert_deliveries(
+    connection: AsyncConnection,
+    *,
+    page: int,
+    page_size: int,
+    status: str | None = None,
+) -> AlertDeliveryPage:
+    """Read one page of alert deliveries, newest first.
+
+    Args:
+        connection: Database connection.
+        page: Page number (1-indexed).
+        page_size: Number of items per page.
+        status: Optional status filter.
+
+    Returns:
+        Paged alert deliveries with total count.
+    """
+    from sqlalchemy import true
+
+    from modules.observability.schema.models import observability_alert_delivery
+
+    filter_clause: ColumnElement[bool] = true()
+    if status is not None:
+        filter_clause = observability_alert_delivery.c.status == status
+
+    counted = await connection.execute(
+        select(func.count()).select_from(observability_alert_delivery).where(filter_clause)
+    )
+    total = int(counted.scalar_one())
+
+    rows = await connection.execute(
+        select(observability_alert_delivery)
+        .where(filter_clause)
+        .order_by(
+            observability_alert_delivery.c.created_at.desc(),
+            observability_alert_delivery.c.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+
+    deliveries = [
+        AlertDeliveryRow(
+            id=row.id,
+            alert_id=str(row.alert_id),
+            channel=row.channel,
+            status=row.status,
+            attempts=row.attempts,
+            next_retry_at=row.next_retry_at.isoformat() if row.next_retry_at else None,
+            last_attempt_at=row.last_attempt_at.isoformat() if row.last_attempt_at else None,
+            delivered_at=row.delivered_at.isoformat() if row.delivered_at else None,
+            created_at=row.created_at.isoformat(),
+            updated_at=row.updated_at.isoformat(),
+        )
+        for row in rows.mappings()
+    ]
+
+    return AlertDeliveryPage(
+        deliveries=deliveries,
+        total_count=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 async def acknowledge_alert(
@@ -6113,9 +6237,22 @@ class ObservabilityFacade:
         facade reads the current UTC day or instant.
     """
 
-    def __init__(self, engine: AsyncEngine, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        settings: Settings | None = None,
+        ops_facade: OpsFacade | None = None,
+    ) -> None:
         self._engine = engine
         self._settings = settings
+        self._ops_facade = ops_facade
+
+    def set_ops_facade(self, ops_facade: OpsFacade) -> None:
+        """Set the OpsFacade for alert delivery operations.
+
+        Called by the composition root after both facades are instantiated.
+        """
+        self._ops_facade = ops_facade
 
     async def get_cost_summary(self) -> CostSummary:
         """Read this billing period's spend against the budget (no window)."""
@@ -7737,6 +7874,120 @@ class ObservabilityFacade:
             agreement=agreement,
             synthetic_only=True,
         )
+
+    async def get_alert_deliveries(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 25,
+        status: str | None = None,
+    ) -> AlertDeliveryPage:
+        """Read one page of alert deliveries, newest first.
+
+        Args:
+            page: Page number (1-indexed).
+            page_size: Number of items per page.
+            status: Optional status filter (pending, in_progress, delivered, failed, dead_letter).
+        """
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size must be between 1 and 100")
+
+        from modules.observability.domain.alert_delivery import DeliveryStatus
+
+        if status is not None:
+            try:
+                DeliveryStatus(status)
+            except ValueError:
+                valid = ", ".join([s.value for s in DeliveryStatus])
+                raise ValueError(f"Invalid status '{status}'. Must be one of: {valid}") from None
+
+        async with self._engine.begin() as connection:
+            return await query_alert_deliveries(
+                connection, page=page, page_size=page_size, status=status
+            )
+
+    async def test_alert_delivery(
+        self,
+        *,
+        channel: str,
+        now: datetime | None = None,
+    ) -> AlertDeliveryTestResult:
+        """Send a test notification via the specified channel.
+
+        Args:
+            channel: The channel to test ("slack" or "email").
+            now: Optional pinned time for the console URL.
+
+        Returns:
+            The delivery attempt result.
+        """
+        from modules.observability.domain.alert_delivery import Channel
+
+        try:
+            Channel(channel)
+        except ValueError:
+            valid = ", ".join([c.value for c in Channel])
+            raise ValueError(f"Invalid channel '{channel}'. Must be one of: {valid}") from None
+
+        if self._ops_facade is None:
+            raise RuntimeError("OpsFacade not available for alert delivery test")
+
+        effective_settings = await self._ops_facade.get_effective_settings()
+        # Cast to protocol expected by alert_delivery_adapters
+        from typing import cast
+
+        from modules.observability.facade import _EffectiveSettingProto
+
+        proto_settings = cast(list[_EffectiveSettingProto], effective_settings)
+        adapters = self.alert_delivery_adapters(self._settings or Settings(), proto_settings)
+        config = self._alert_delivery_config()
+
+        test_alert = DeliveryAlertRow(
+            id=UUID("00000000-0000-0000-0000-000000000000"),
+            severity="warning",
+            kind="test_delivery",
+            title="Test Alert Delivery",
+            payload={"message": "This is a test notification from CareSetu alert delivery"},
+            status="open",
+            created_at=now if now is not None else datetime.now(UTC),
+        )
+
+        from modules.observability.domain.alert_delivery import test_delivery
+
+        result = await test_delivery(
+            engine=self._engine,
+            channel=channel,
+            adapters=adapters,
+            test_alert=test_alert,
+            config=config,
+        )
+
+        return AlertDeliveryTestResult(
+            success=result.success,
+            error=result.error,
+            response=result.response,
+        )
+
+    async def redeliver_alert_delivery(
+        self,
+        *,
+        delivery_id: int,
+    ) -> AlertDeliveryRedeliverResult:
+        """Redeliver a failed or dead-letter alert delivery.
+
+        Args:
+            delivery_id: The ID of the delivery to redeliver.
+
+        Returns:
+            Whether the redelivery was queued successfully.
+        """
+        from modules.observability.domain.alert_delivery import redeliver_alert
+
+        success = await redeliver_alert(engine=self._engine, delivery_id=delivery_id)
+
+        return AlertDeliveryRedeliverResult(success=success, delivery_id=delivery_id)
 
     def _alert_delivery_config(self) -> AlertDeliveryConfig:
         """Build alert delivery config from settings."""

@@ -10,6 +10,7 @@
 import { EmptyState } from "@/components/layout/EmptyState";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { AiSettingsSection } from "@/components/settings/AiSettingsSection";
+import { NotificationsSettingsSection } from "@/components/settings/NotificationsSettingsSection";
 import { SettingsSection } from "@/components/settings/SettingsSection";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
@@ -69,12 +70,7 @@ export default function ObservabilitySettingsPage() {
       <div className="flex flex-col gap-4" data-testid="settings-shell">
         <AiSettingsSection t={t} />
 
-        <SettingsPlaceholder
-          testId="settings-notifications"
-          title={t.sections.notifications}
-          description={t.notifications.description}
-          body={t.notifications.body}
-        />
+        <NotificationsSettingsSection t={t} />
 
         <SettingsPlaceholder
           testId="settings-feature-flags"

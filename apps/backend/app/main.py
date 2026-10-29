@@ -524,6 +524,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # falls back to the settled Settings (environment then default). Its 30s
     # in-process cache keeps an operator read from re-querying on every poll.
     app.state.ops_facade = OpsFacade(engine=engine, settings=resolved_settings)
+    # Provide OpsFacade to ObservabilityFacade for alert delivery operations
+    app.state.observability_facade.set_ops_facade(app.state.ops_facade)
     # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
     # and, for open registration (ADR-0010), the settled iam facade - the sync
     # ``create_credential_account`` seam is called in-sequence at registration
