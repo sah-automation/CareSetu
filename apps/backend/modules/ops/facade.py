@@ -19,6 +19,7 @@ from modules.ops.domain.settings import (
     EffectiveSetting,
     EffectiveSettingsResolver,
     FeatureFlag,
+    FeatureFlagHistoryEntry,
     FeatureFlagKind,
     FeatureFlagRead,
     FeatureFlagWriteResponse,
@@ -162,6 +163,40 @@ class OpsFacade:
                 editable=flag.editable,
                 updated_at=flag.updated_at,
             )
+
+    async def get_feature_flag_history(
+        self,
+        flag_key: str | None = None,
+        limit: int = 50,
+    ) -> list[FeatureFlagHistoryEntry]:
+        """Read the append-only feature flag history, newest first.
+
+        ``flag_key`` narrows the read to one flag.
+        """
+        statement = (
+            select(ops_feature_flag_history)
+            .order_by(
+                ops_feature_flag_history.c.changed_at.desc(),
+                ops_feature_flag_history.c.id.desc(),
+            )
+            .limit(limit)
+        )
+        if flag_key is not None:
+            statement = statement.where(ops_feature_flag_history.c.flag_key == flag_key)
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(statement)
+            return [
+                FeatureFlagHistoryEntry(
+                    flag_key=row["flag_key"],
+                    enabled=row["enabled"],
+                    flag_kind=row["flag_kind"],
+                    version=row["version"],
+                    changed_by=row["changed_by"],
+                    changed_at=row["changed_at"].isoformat(),
+                )
+                for row in result.mappings()
+            ]
 
     async def write_feature_flag(
         self,

@@ -10,6 +10,7 @@
 import { EmptyState } from "@/components/layout/EmptyState";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { AiSettingsSection } from "@/components/settings/AiSettingsSection";
+import { FeatureFlagsSettingsSection } from "@/components/settings/FeatureFlagsSettingsSection";
 import { NotificationsSettingsSection } from "@/components/settings/NotificationsSettingsSection";
 import { SettingsSection } from "@/components/settings/SettingsSection";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -72,12 +73,7 @@ export default function ObservabilitySettingsPage() {
 
         <NotificationsSettingsSection t={t} />
 
-        <SettingsPlaceholder
-          testId="settings-feature-flags"
-          title={t.sections.featureFlags}
-          description={t.featureFlags.description}
-          body={t.featureFlags.body}
-        />
+        <FeatureFlagsSettingsSection t={t} />
 
         <SettingsPlaceholder
           testId="settings-users"

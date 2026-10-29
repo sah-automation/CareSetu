@@ -1,6 +1,8 @@
 // Operator settings HTTP client (#797/#798). Reads the effective settings with
 // their source and allowlist metadata, writes an allowlisted AI knob, and reads
 // the append-only setting history the AI section shows after a save.
+// Feature flags client (#800). Reads feature flags with their type and history,
+// writes runtime flags.
 
 import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
 import { guardShape, request } from "@/lib/request";
@@ -31,6 +33,46 @@ export interface SettingHistoryEntry {
   version: number;
   changed_by: number | null;
   changed_at: string;
+}
+
+export type FeatureFlagKind = "runtime" | "restart_required";
+
+export interface FeatureFlag {
+  flag_key: string;
+  enabled: boolean;
+  flag_kind: FeatureFlagKind;
+  description: string | null;
+  editable: boolean;
+  updated_at: string;
+}
+
+export interface FeatureFlagsReadResponse {
+  flags: FeatureFlag[];
+}
+
+export interface FeatureFlagWriteRequest {
+  flag_key: string;
+  enabled: boolean;
+}
+
+export interface FeatureFlagWriteResponse {
+  flag_key: string;
+  enabled: boolean;
+  flag_kind: FeatureFlagKind;
+  version: number;
+}
+
+export interface FeatureFlagHistoryEntry {
+  flag_key: string;
+  enabled: boolean;
+  flag_kind: FeatureFlagKind;
+  version: number;
+  changed_by: number | null;
+  changed_at: string;
+}
+
+export interface FeatureFlagHistoryResponse {
+  history: FeatureFlagHistoryEntry[];
 }
 
 export interface AlertDeliveryRow {
@@ -127,6 +169,78 @@ function isSettingsHistoryResponse(
   const history = (value as { history?: unknown }).history;
   return (
     Array.isArray(history) && history.every((row) => isSettingHistoryEntry(row))
+  );
+}
+
+function isFeatureFlagKind(value: unknown): value is FeatureFlagKind {
+  return value === "runtime" || value === "restart_required";
+}
+
+function isFeatureFlag(value: unknown): value is FeatureFlag {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.flag_key === "string" &&
+    typeof row.enabled === "boolean" &&
+    isFeatureFlagKind(row.flag_kind) &&
+    (row.description === null || typeof row.description === "string") &&
+    typeof row.editable === "boolean" &&
+    typeof row.updated_at === "string"
+  );
+}
+
+interface FeatureFlagsReadResponseShape {
+  flags: FeatureFlag[];
+}
+
+function isFeatureFlagsReadResponse(
+  value: unknown,
+): value is FeatureFlagsReadResponseShape {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return Array.isArray(row.flags) && row.flags.every((f) => isFeatureFlag(f));
+}
+
+function isFeatureFlagWriteResponse(
+  value: unknown,
+): value is FeatureFlagWriteResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.flag_key === "string" &&
+    typeof row.enabled === "boolean" &&
+    isFeatureFlagKind(row.flag_kind) &&
+    typeof row.version === "number"
+  );
+}
+
+function isFeatureFlagHistoryEntry(
+  value: unknown,
+): value is FeatureFlagHistoryEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.flag_key === "string" &&
+    typeof row.enabled === "boolean" &&
+    isFeatureFlagKind(row.flag_kind) &&
+    typeof row.version === "number" &&
+    (row.changed_by === null || typeof row.changed_by === "number") &&
+    typeof row.changed_at === "string"
+  );
+}
+
+interface FeatureFlagHistoryResponseShape {
+  history: FeatureFlagHistoryEntry[];
+}
+
+function isFeatureFlagHistoryResponse(
+  value: unknown,
+): value is FeatureFlagHistoryResponseShape {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    Array.isArray(row.history) &&
+    row.history.every((e) => isFeatureFlagHistoryEntry(e))
   );
 }
 
@@ -310,4 +424,64 @@ export async function writeSetting(
     isSettingWriteResult,
     "The API returned an unexpected setting write shape",
   );
+}
+
+/**
+ * Read all feature flags with their type, description, editability and
+ * update timestamp. The endpoint is operator-visible.
+ */
+export async function fetchFeatureFlags(): Promise<FeatureFlag[]> {
+  const data = await request<unknown>("/v1/operator/feature-flags");
+  const read = guardShape(
+    data,
+    isFeatureFlagsReadResponse,
+    "The API returned an unexpected feature flags shape",
+  );
+  return read.flags;
+}
+
+/**
+ * Write a runtime feature flag. The endpoint is admin-only and idempotent.
+ * Restart-required flags are rejected by the API with a 400 error.
+ */
+export async function writeFeatureFlag(
+  flagKey: string,
+  enabled: boolean,
+  retryKey?: string,
+): Promise<FeatureFlagWriteResponse> {
+  const data = await request<unknown>(
+    `/v1/operator/feature-flags/${encodeURIComponent(flagKey)}`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+      },
+      body: JSON.stringify({ flag_key: flagKey, enabled }),
+    },
+  );
+  return guardShape(
+    data,
+    isFeatureFlagWriteResponse,
+    "The API returned an unexpected feature flag write shape",
+  );
+}
+
+/**
+ * Read the append-only feature flag history, newest first.
+ */
+export async function fetchFeatureFlagHistory(
+  flagKey?: string,
+): Promise<FeatureFlagHistoryEntry[]> {
+  const query =
+    flagKey === undefined ? "" : `?flag_key=${encodeURIComponent(flagKey)}`;
+  const data = await request<unknown>(
+    `/v1/operator/feature-flags/history${query}`,
+  );
+  const read = guardShape(
+    data,
+    isFeatureFlagHistoryResponse,
+    "The API returned an unexpected feature flag history shape",
+  );
+  return read.history;
 }

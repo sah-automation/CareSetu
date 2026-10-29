@@ -63,6 +63,23 @@ class FeatureFlagWriteResponse(BaseModel):
     version: int
 
 
+class FeatureFlagHistoryEntryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    flag_key: str
+    enabled: bool
+    flag_kind: str
+    version: int
+    changed_by: int | None
+    changed_at: str
+
+
+class FeatureFlagHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    history: list[FeatureFlagHistoryEntryResponse]
+
+
 class SettingWriteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -203,6 +220,35 @@ async def read_feature_flag(
         description=flag.description,
         editable=flag.editable,
         updated_at=flag.updated_at,
+    )
+
+
+@router.get(
+    "/v1/operator/feature-flags/history",
+    response_model=FeatureFlagHistoryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Read the append-only feature flag history (operator visible)",
+)
+async def read_feature_flag_history(
+    request: Request,
+    _principal: Annotated[Principal, Depends(require_operator)],
+    flag_key: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> FeatureFlagHistoryResponse:
+    facade = _facade(request)
+    history = await facade.get_feature_flag_history(flag_key=flag_key, limit=limit)
+    return FeatureFlagHistoryResponse(
+        history=[
+            FeatureFlagHistoryEntryResponse(
+                flag_key=entry.flag_key,
+                enabled=entry.enabled,
+                flag_kind=entry.flag_kind,
+                version=entry.version,
+                changed_by=entry.changed_by,
+                changed_at=entry.changed_at,
+            )
+            for entry in history
+        ]
     )
 
 

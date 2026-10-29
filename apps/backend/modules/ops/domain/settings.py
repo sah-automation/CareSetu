@@ -125,6 +125,18 @@ class FeatureFlagWriteResponse:
     version: int
 
 
+@dataclass(frozen=True)
+class FeatureFlagHistoryEntry:
+    """One append-only feature flag history row (#800)."""
+
+    flag_key: str
+    enabled: bool
+    flag_kind: str
+    version: int
+    changed_by: int | None
+    changed_at: str
+
+
 # Alert kinds from observability (rollup + consumer)
 ALERT_KINDS: frozenset[str] = frozenset(
     {
