@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -642,10 +641,6 @@ async def run_judge_job(
 
             if example_had_success:
                 examples_scored += 1
-
-            # Small delay between examples to avoid rate limiting
-            if len(examples) > 1:
-                time.sleep(0.1)
 
         # Determine final status
         if final_status != "budget_exceeded":

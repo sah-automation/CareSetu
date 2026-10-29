@@ -373,6 +373,7 @@ async function completePartnerLoginOnPage() {
     subject_id: "7",
     roles: ["partner"],
     phone: PHONE,
+    tier: null,
   });
   // The one landing the handoff exists for: an active doctor bound for the
   // doctor console. Any other resolved target routes straight on, with no
@@ -1075,6 +1076,7 @@ describe("StaffLoginForm - partner code step", () => {
       subject_id: "7",
       roles: ["partner"],
       phone: PHONE,
+      tier: null,
     });
     mockFetchPartnerMe.mockResolvedValue({
       partner_id: 7,
@@ -1154,6 +1156,7 @@ describe("StaffLoginForm - partner code step", () => {
       subject_id: "7",
       roles: ["partner"],
       phone: PHONE,
+      tier: null,
     });
     if (status !== undefined) {
       mockFetchPartnerMe.mockResolvedValue({
@@ -1322,6 +1325,7 @@ describe("StaffLoginForm - partner code step", () => {
       subject_id: "7",
       roles: ["partner"],
       phone: PHONE,
+      tier: null,
     });
     mockFetchPartnerMe.mockRejectedValue(
       new ApiError({
@@ -1364,6 +1368,7 @@ describe("StaffLoginForm - partner code step", () => {
       subject_id: "7",
       roles: ["operator"],
       phone: PHONE,
+      tier: null,
     });
 
     render(<StaffLoginForm />);
@@ -1952,6 +1957,7 @@ describe("Operator login flow", () => {
       subject_id: "5",
       phone: "+919876543210",
       roles: ["operator"],
+      tier: "admin",
     });
 
     render(<StaffLoginForm role="operator" />);
@@ -1980,6 +1986,7 @@ describe("Operator login flow", () => {
       subject_id: "5",
       phone: "+919876543210",
       roles: ["operator"],
+      tier: "admin",
     });
 
     render(<StaffLoginForm role="operator" />);
@@ -2074,6 +2081,7 @@ describe("Operator login flow", () => {
       subject_id: "5",
       phone: "+919876543210",
       roles: ["operator"],
+      tier: "admin",
     });
 
     render(<StaffLoginForm role="operator" />);

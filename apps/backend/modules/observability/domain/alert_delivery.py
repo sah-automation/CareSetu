@@ -83,7 +83,7 @@ class AlertDeliveryConfig:
     max_attempts: int = 5
     base_backoff_seconds: int = 30
     max_backoff_seconds: int = 3600
-    console_base_url: str = "https://console.example.com"
+    console_base_url: str = ""
 
 
 class ChannelAdapter(Protocol):

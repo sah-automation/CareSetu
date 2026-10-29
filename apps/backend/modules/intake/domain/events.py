@@ -48,7 +48,7 @@ from modules.intake.domain.prompt_injection import MAX_SCORE, PromptInjectionCat
 
 PRODUCER_MODULE = "intake"
 
-AiTaskType = Literal["transcribe", "structure", "draft", "summarize", "evaluate"]
+AiTaskType = Literal["transcribe", "structure", "draft", "summarize"]
 
 IntakeMode = Literal["voice", "text"]
 IntakeLanguage = Literal["hi", "en"]

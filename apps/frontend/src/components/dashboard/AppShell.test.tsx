@@ -87,7 +87,12 @@ const authState = vi.hoisted(() => ({
 
 vi.mock("@/lib/auth/AuthContext", () => ({
   useAuth: () => ({
-    user: { id: 1, phone: "+911234567890", roles: authState.roles },
+    user: {
+      id: 1,
+      phone: "+911234567890",
+      roles: authState.roles,
+      tier: "admin",
+    },
     selectedRole: authState.selectedRole,
     switchRole,
     logout,

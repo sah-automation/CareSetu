@@ -247,6 +247,7 @@ describe("operator Observability group (#744)", () => {
       "health",
       "security",
       "settings",
+      "evals",
     ]);
     // #747: no sub-destination is a coming-soon stub any more. Settings is the
     // placeholder shell behind a live page, so the whole sub-menu is clickable.
