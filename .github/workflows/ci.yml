@@ -90,7 +90,7 @@ jobs:
           node-version: 24
           cache: npm
       - name: install frontend
-        run: npm ci
+        run: npm install
       - name: tsc
         run: npm run typecheck:frontend
 
@@ -121,7 +121,7 @@ jobs:
           node-version: 24
           cache: npm
       - name: install frontend
-        run: npm ci
+        run: npm install
       - name: vitest
         run: npm run test:unit:frontend
 
@@ -138,7 +138,7 @@ jobs:
           node-version: 24
           cache: npm
       - name: install frontend
-        run: npm ci
+        run: npm install
       - name: build, serve, and measure channel payloads
         run: npm run check:pages
 
@@ -155,7 +155,7 @@ jobs:
           node-version: 24
           cache: npm
       - name: install frontend
-        run: npm ci
+        run: npm install
       - uses: ./.github/actions/setup-playwright
       - name: install lighthouse cli
         # Kept out of the dependency graph (like k6/ZAP) so npm audit and npm
@@ -472,7 +472,7 @@ jobs:
           node-version: 24
           cache: npm
       - name: install frontend
-        run: npm ci
+        run: npm install
       - uses: ./.github/actions/setup-playwright
       - name: run e2e
         run: npm run test:e2e
@@ -705,7 +705,7 @@ jobs:
           node-version: 24
           cache: npm
       - name: install frontend
-        run: npm ci
+        run: npm install
       - name: npm audit
         # Runtime deps only. Build-time-only devDeps are excluded: their
         # advisories are unactionable when no patch exists (braces
@@ -746,7 +746,7 @@ jobs:
           node-version: 24
           cache: npm
       - name: install frontend
-        run: npm ci
+        run: npm install
       - name: generate frontend sbom
         # Run from the workspace root: @cyclonedx/cyclonedx-npm needs the root
         # package-lock.json and hoisted node_modules (npm workspaces leave no
