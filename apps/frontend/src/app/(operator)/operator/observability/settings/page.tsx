@@ -12,7 +12,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { AiSettingsSection } from "@/components/settings/AiSettingsSection";
 import { FeatureFlagsSettingsSection } from "@/components/settings/FeatureFlagsSettingsSection";
 import { NotificationsSettingsSection } from "@/components/settings/NotificationsSettingsSection";
-import { SettingsSection } from "@/components/settings/SettingsSection";
+import { UsersSettingsSection } from "@/components/settings/UsersSettingsSection";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
@@ -23,24 +23,6 @@ function useAuthOrNull() {
   } catch {
     return null;
   }
-}
-
-function SettingsPlaceholder({
-  testId,
-  title,
-  description,
-  body,
-}: {
-  testId: string;
-  title: string;
-  description: string;
-  body: string;
-}) {
-  return (
-    <SettingsSection testId={testId} title={title} description={description}>
-      <p className="text-sm text-txt-muted">{body}</p>
-    </SettingsSection>
-  );
 }
 
 export default function ObservabilitySettingsPage() {
@@ -75,12 +57,7 @@ export default function ObservabilitySettingsPage() {
 
         <FeatureFlagsSettingsSection t={t} />
 
-        <SettingsPlaceholder
-          testId="settings-users"
-          title={t.sections.users}
-          description={t.users.description}
-          body={t.users.body}
-        />
+        <UsersSettingsSection t={t} />
       </div>
     </>
   );

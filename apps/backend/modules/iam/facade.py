@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -227,6 +228,45 @@ class IamFacade:
         its identity and MFA row and masks the phone before returning.
         """
         return await self._identity.list_operators(connection=connection)
+
+    async def update_operator_tier(
+        self,
+        identity_id: int,
+        tier: Literal["admin", "operator"],
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's tier (promote or demote).
+
+        Delegated to ``IdentityFacade``. Demotion and self-demotion are guarded:
+        - An operator cannot change their own tier.
+        - The last active admin cannot be demoted.
+        - Every change revokes the operator's active sessions and emits an
+          ``operator.tier_changed`` audit event.
+        """
+        return await self._identity.update_operator_tier(
+            identity_id, tier, actor_identity_id, connection=connection
+        )
+
+    async def update_operator_active(
+        self,
+        identity_id: int,
+        is_active: bool,
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's active state (deactivate or reactivate).
+
+        Delegated to ``IdentityFacade``. Deactivation and self-deactivation are guarded:
+        - An operator cannot change their own active state.
+        - The last active admin cannot be deactivated.
+        - Deactivation revokes the operator's active sessions and blocks login;
+          reactivation restores access.
+        - Every change emits an ``operator.active_changed`` audit event.
+        """
+        return await self._identity.update_operator_active(
+            identity_id, is_active, actor_identity_id, connection=connection
+        )
 
     async def save_patient_profile(
         self,

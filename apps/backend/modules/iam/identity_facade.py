@@ -27,6 +27,8 @@ from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
     IamError,
+    OperatorLastAdminError,
+    OperatorSelfChangeError,
     PatientProfileNotSetError,
     ProfilePhotoTransferError,
     ProfilePhotoValidationError,
@@ -51,6 +53,7 @@ from modules.iam.schema.models import (
     iam_operator_mfa,
     iam_operator_profiles,
     iam_patient_profiles,
+    iam_sessions,
 )
 from modules.iam.session_facade import grant_operator_role
 from modules.profile_media.facade import PATIENT_PREFIX, ProfileMediaStore
@@ -568,6 +571,212 @@ class IdentityFacade:
         if connection is not None:
             return await _run(connection)
         async with self._engine.connect() as connection:
+            return await _run(connection)
+
+    async def update_operator_tier(
+        self,
+        identity_id: int,
+        tier: Literal["admin", "operator"],
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's tier (promote or demote).
+
+        Admin-only action. Demotion and self-demotion are guarded:
+        - An operator cannot change their own tier.
+        - The last active admin cannot be demoted.
+        - Every change revokes the operator's active sessions and emits an
+          ``operator.tier_changed`` audit event.
+        """
+        if identity_id == actor_identity_id:
+            raise OperatorSelfChangeError("an operator cannot change their own tier")
+
+        async def _run(connection: AsyncConnection) -> OperatorSummary:
+            # Check if target is the last active admin
+            if tier == "operator":
+                active_admin_count = await connection.execute(
+                    select(func.count(iam_operator_profiles.c.identity_id)).where(
+                        (iam_operator_profiles.c.tier == "admin")
+                        & (iam_operator_profiles.c.is_active.is_(True))
+                    )
+                )
+                count = active_admin_count.scalar_one()
+                target_is_admin = await connection.execute(
+                    select(iam_operator_profiles.c.tier).where(
+                        iam_operator_profiles.c.identity_id == identity_id
+                    )
+                )
+                target_tier = target_is_admin.scalar_one_or_none()
+                if target_tier == "admin" and count <= 1:
+                    raise OperatorLastAdminError("cannot demote the last active admin operator")
+
+            # Update tier
+            await connection.execute(
+                update(iam_operator_profiles)
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(tier=tier, updated_by=actor_identity_id)
+            )
+
+            # Revoke sessions by deleting their refresh tokens
+            await connection.execute(
+                iam_sessions.delete().where(
+                    (iam_sessions.c.identity_id == identity_id)
+                    & (iam_sessions.c.scope == "operator")
+                )
+            )
+
+            # Emit audit event
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.operator_tier_changed_envelope(
+                    identity_id=identity_id,
+                    new_tier=tier,
+                    changed_by_identity_id=actor_identity_id,
+                ),
+            )
+
+            # Return updated operator summary
+            rows = await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.phone_e164,
+                    iam_identities.c.created_at,
+                    iam_operator_profiles.c.tier,
+                    iam_operator_profiles.c.is_active,
+                    func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                )
+                .select_from(
+                    iam_operator_profiles.join(
+                        iam_identities,
+                        iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                    ).outerjoin(
+                        iam_operator_mfa,
+                        iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                    )
+                )
+                .where(iam_identities.c.id == identity_id)
+            )
+            row = rows.first()
+            if row is None:
+                raise IamError(f"operator {identity_id} not found after tier update")
+            return OperatorSummary(
+                identity_id=int(row[0]),
+                phone_masked=mask_phone(str(row[1])),
+                tier=str(row[3]),
+                is_active=bool(row[4]),
+                mfa_enabled=bool(row[5]),
+                created_at=row[2],
+            )
+
+        if connection is not None:
+            return await _run(connection)
+        async with self._engine.begin() as connection:
+            return await _run(connection)
+
+    async def update_operator_active(
+        self,
+        identity_id: int,
+        is_active: bool,
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's active state (deactivate or reactivate).
+
+        Admin-only action. Deactivation and self-deactivation are guarded:
+        - An operator cannot change their own active state.
+        - The last active admin cannot be deactivated.
+        - Deactivation revokes the operator's active sessions and blocks login;
+          reactivation restores access.
+        - Every change emits an ``operator.active_changed`` audit event.
+        """
+        if identity_id == actor_identity_id:
+            raise OperatorSelfChangeError("an operator cannot change their own active state")
+
+        async def _run(connection: AsyncConnection) -> OperatorSummary:
+            # Check if target is the last active admin
+            if not is_active:
+                active_admin_count = await connection.execute(
+                    select(func.count(iam_operator_profiles.c.identity_id)).where(
+                        (iam_operator_profiles.c.tier == "admin")
+                        & (iam_operator_profiles.c.is_active.is_(True))
+                    )
+                )
+                count = active_admin_count.scalar_one()
+                target_is_active_admin = await connection.execute(
+                    select(iam_operator_profiles.c.tier, iam_operator_profiles.c.is_active).where(
+                        iam_operator_profiles.c.identity_id == identity_id
+                    )
+                )
+                target = target_is_active_admin.first()
+                if target and target.tier == "admin" and target.is_active and count <= 1:
+                    raise OperatorLastAdminError("cannot deactivate the last active admin operator")
+
+            # Update active state
+            await connection.execute(
+                update(iam_operator_profiles)
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(is_active=is_active, updated_by=actor_identity_id)
+            )
+
+            # Revoke sessions if deactivating
+            if not is_active:
+                await connection.execute(
+                    iam_sessions.delete().where(
+                        (iam_sessions.c.identity_id == identity_id)
+                        & (iam_sessions.c.scope == "operator")
+                    )
+                )
+
+            # Emit audit event
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.operator_active_changed_envelope(
+                    identity_id=identity_id,
+                    is_active=is_active,
+                    changed_by_identity_id=actor_identity_id,
+                ),
+            )
+
+            # Return updated operator summary
+            rows = await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.phone_e164,
+                    iam_identities.c.created_at,
+                    iam_operator_profiles.c.tier,
+                    iam_operator_profiles.c.is_active,
+                    func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                )
+                .select_from(
+                    iam_operator_profiles.join(
+                        iam_identities,
+                        iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                    ).outerjoin(
+                        iam_operator_mfa,
+                        iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                    )
+                )
+                .where(iam_identities.c.id == identity_id)
+            )
+            row = rows.first()
+            if row is None:
+                raise IamError(f"operator {identity_id} not found after active update")
+            return OperatorSummary(
+                identity_id=int(row[0]),
+                phone_masked=mask_phone(str(row[1])),
+                tier=str(row[3]),
+                is_active=bool(row[4]),
+                mfa_enabled=bool(row[5]),
+                created_at=row[2],
+            )
+
+        if connection is not None:
+            return await _run(connection)
+        async with self._engine.begin() as connection:
             return await _run(connection)
 
     async def save_patient_profile(
