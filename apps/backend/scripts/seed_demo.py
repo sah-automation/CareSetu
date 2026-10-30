@@ -97,6 +97,7 @@ async def _seed(settings: Settings) -> tuple[str, str, str, str]:
         operator = await facade.create_operator_account(
             BOOTSTRAP_OPERATOR_PHONE_E164,
             invited_by_identity_id=BOOTSTRAP_OPERATOR_INVITED_BY_ID,
+            tier="admin",
         )
         # Persist a real encrypted TOTP secret for the bootstrap operator (P1, #272),
         # so they can actually complete MFA login - never the empty placeholder.
