@@ -6,6 +6,9 @@
   "workspaces": [
     "apps/frontend"
   ],
+  "overrides": {
+    "picomatch": "^4.0.0"
+  },
   "scripts": {
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "npm run test:unit:backend && npm run test:unit:frontend",

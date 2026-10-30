@@ -1586,23 +1586,37 @@ _HUMAN_LABEL_PARAM_PATHS: tuple[str, ...] = (
 )
 
 
-for _path in _HUMAN_LABEL_BASE_PATHS:
-    router.add_api_route(
-        _path,
-        _human_label_request_handler,
-        methods=["POST", "PATCH", "PUT"],
-        status_code=status.HTTP_200_OK,
-        summary="Create or update a human label on a golden example (operator only)",
+def _make_op_id(path: str, method: str) -> str:
+    """Generate a unique operation ID for the human label routes."""
+    normalized = (
+        path.strip("/").replace("/", "_").replace("{", "").replace("}", "").replace("-", "_")
     )
+    return f"human_label_{normalized}_{method.lower()}"
+
+
+_HUMAN_LABEL_METHODS = ("POST", "PATCH", "PUT")
+
+for _path in _HUMAN_LABEL_BASE_PATHS:
+    for _method in _HUMAN_LABEL_METHODS:
+        router.add_api_route(
+            _path,
+            _human_label_request_handler,
+            methods=[_method],
+            status_code=status.HTTP_200_OK,
+            summary="Create or update a human label on a golden example (operator only)",
+            operation_id=_make_op_id(_path, _method),
+        )
 
 for _path in _HUMAN_LABEL_PARAM_PATHS:
-    router.add_api_route(
-        _path,
-        _human_label_request_handler,
-        methods=["POST", "PATCH", "PUT"],
-        status_code=status.HTTP_200_OK,
-        summary="Create or update a human label on a golden example (operator only)",
-    )
+    for _method in _HUMAN_LABEL_METHODS:
+        router.add_api_route(
+            _path,
+            _human_label_request_handler,
+            methods=[_method],
+            status_code=status.HTTP_200_OK,
+            summary="Create or update a human label on a golden example (operator only)",
+            operation_id=_make_op_id(_path, _method),
+        )
 
 
 def register_error_handlers(app: FastAPI) -> None:
