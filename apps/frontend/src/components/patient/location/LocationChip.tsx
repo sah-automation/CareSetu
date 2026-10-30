@@ -78,7 +78,7 @@ export function LocationChip({ placement, className }: LocationChipProps) {
         <button
           type="button"
           data-testid={`location-chip-${placement}`}
-          aria-label={t.aria}
+          aria-label={`${area} - ${t.aria}`}
           aria-haspopup="dialog"
           onClick={openSheet}
           className="inline-flex min-h-[34px] items-center gap-1.5 rounded-full border border-hairline bg-surface px-3 py-1.5 text-sm font-medium text-txt-sub shadow-sm transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
