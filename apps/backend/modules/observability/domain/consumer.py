@@ -428,6 +428,18 @@ class AiEgressRecordedTelemetryPayload(BaseModel):
     reason: str
 
 
+class PromptInjectionDetectedTelemetryPayload(BaseModel):
+    """MOD-013's mirror of MOD-005's ``ai_egress.prompt_injection_detected``.
+
+    The producer's advisory finding already excludes the transcript and any
+    matched text. This mirror re-declares the narrow shape so the handler cannot
+    read more if the producer's payload grows later.
+    """
+
+    categories: list[str]
+    score: int
+
+
 class IntakeComposerOpenedTelemetryPayload(ProductStepPayload):
     """MOD-013's mirror of MOD-005's ``intake.composer_opened`` payload (B4e #739).
 
@@ -529,6 +541,89 @@ class PrescriptionRejectedTelemetryPayload(BaseModel):
     prescription_id: int
     patient_id: int
     doctor_id: int
+
+
+class PatientAuthFailedEventPayload(BaseModel):
+    """The registry reconstruction shape for ``patient.auth_failed`` (#777).
+
+    No module claimed this event's payload model before the security-signal
+    consumers, so MOD-013 registers this mirror and the dispatcher rebuilds a
+    claimed outbox row into it before fan-out. It mirrors the producer's field
+    contract byte-for-byte (``identity_id``, ``phone_e164``, ``reason``,
+    ``attempts_left``) because a narrow registry model would drop fields for
+    every future consumer. The security handler re-validates it into
+    :class:`PatientAuthFailedTelemetryPayload`, which is where the phone number
+    and the attempt budget are shed before anything is written.
+    """
+
+    identity_id: int | None
+    phone_e164: str
+    reason: str
+    attempts_left: int | None = None
+
+
+class OtpFailedEventPayload(BaseModel):
+    """The registry reconstruction shape for ``otp.failed`` (#777).
+
+    Same reasoning as :class:`PatientAuthFailedEventPayload`: it mirrors the
+    producer contract so the dispatcher can rebuild the row for any consumer.
+    The security handler re-validates it into :class:`OtpFailedTelemetryPayload`,
+    which keeps only the identity and reason.
+    """
+
+    identity_id: int
+    phone_e164: str
+    reason: str
+    lockout_until: datetime | None = None
+
+
+class PatientAuthFailedTelemetryPayload(BaseModel):
+    """MOD-013's security-signal view of ``patient.auth_failed``.
+
+    Carries only the identity reference and failure reason - no phone number,
+    OTP value, or free text. The identity is hashed to a pseudonymous key
+    before storage (security-phii-standards).
+    """
+
+    identity_id: int | None
+    reason: str
+
+
+class OtpFailedTelemetryPayload(BaseModel):
+    """MOD-013's security-signal view of ``otp.failed``.
+
+    Carries the identity reference and lockout reason - no phone number or OTP
+    value. The identity is hashed to a pseudonymous key before storage.
+    """
+
+    identity_id: int
+    reason: str
+
+
+class OperatorMfaFailedTelemetryPayload(BaseModel):
+    """MOD-013's security-signal view of ``operator.mfa_failed``.
+
+    Keeps the identity reference and reason only - the lockout lift time, the
+    TOTP code and the phone number are all shed before storage. The identity is
+    hashed to a pseudonymous key.
+    """
+
+    identity_id: int
+    reason: str
+
+
+class RecordDeniedTelemetryPayload(BaseModel):
+    """MOD-013's mirror of MOD-003's ``record.denied`` payload for security signals.
+
+    Carries only the actor reference and kind - the producer's ``scope``,
+    ``accessed_at`` and free-text ``metadata.denial_reason`` are dropped before
+    the consumer runs, so none of them can reach ``observability_security_signals``.
+    The actor is hashed to a pseudonymous subject key before storage.
+    """
+
+    record_id: int
+    actor_id: int
+    actor_type: str
 
 
 #: Registry: the consumed event types that roll into ``obs_business_daily`` and

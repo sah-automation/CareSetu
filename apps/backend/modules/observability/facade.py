@@ -90,17 +90,20 @@ finance lead could quote (#717 decision 9).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from time import perf_counter
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 from typing import cast as narrowing_cast
 from uuid import UUID
 
+if TYPE_CHECKING:
+    from modules.ops.facade import OpsFacade
+
 import httpx
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import (
     CTE,
     ColumnElement,
@@ -123,10 +126,23 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.config import Settings
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
 from bus.ledger import HANDLER_RESULT_ACTOR_KEY
+from modules.observability.domain.agreement import (
+    DEFAULT_AGREEMENT_TOLERANCE,
+    EvaluationAgreement,
+    compute_agreement,
+)
+from modules.observability.domain.alert_delivery import (
+    AlertDeliveryConfig,
+    ChannelAdapter,
+)
+from modules.observability.domain.alert_delivery import (
+    AlertRow as DeliveryAlertRow,
+)
 from modules.observability.domain.annotation import review_annotation
 from modules.observability.domain.consumer import (
     AI_JOB_SPEND_STATUS_COMPLETED,
@@ -135,9 +151,14 @@ from modules.observability.domain.consumer import (
     AiJobCompletedUsagePayload,
     AiJobFailedUsagePayload,
     AiJobQueuedTelemetryPayload,
-    AlertRow,
     IntakeDoctorAssignedTelemetryPayload,
     sanitize_failure_reason,
+)
+from modules.observability.domain.consumer import (
+    AlertRow as ConsumerAlertRow,
+)
+from modules.observability.domain.dataset_validation import (
+    validate_examples,
 )
 from modules.observability.domain.deeplinks import (
     DEFAULT_GRAFANA_WINDOW,
@@ -157,14 +178,22 @@ from modules.observability.domain.deeplinks import (
 from modules.observability.domain.evaluation import (
     OBSERVATION_KIND_GOLDEN,
     SOURCE_CODE,
+    SOURCE_HUMAN,
+    SOURCE_JUDGE,
     EvaluationScore,
     evaluate_day,
+    golden_observation_metadata,
 )
 from modules.observability.domain.exceptions import (
     AlertAlreadyResolvedError,
     AlertNotFoundError,
     ProductOutcomeNotAllowed,
 )
+from modules.observability.domain.golden_dataset import (
+    GOLDEN_STRUCTURINGS,
+    GOLDEN_TRANSCRIPTIONS,
+)
+from modules.observability.domain.judge_run import JudgeRunReport, run_judge_job
 from modules.observability.domain.product import (
     FUNNEL_INTAKE,
     FUNNEL_TERMINAL_CASE_CLOSED,
@@ -190,6 +219,11 @@ from modules.observability.domain.pseudonym import (
     actor_key,
 )
 from modules.observability.domain.rollup import (
+    ALERT_KIND_AUTH_FAILURE_HIGH,
+    ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+    ALERT_KIND_PROMPT_INJECTION_HIGH,
+    ALERT_KIND_RATE_LIMIT_HIGH,
+    ALERT_KIND_RECORD_DENIAL_HIGH,
     ALERT_STATUS_ACKNOWLEDGED,
     ALERT_STATUS_OPEN,
     ALERT_STATUS_RESOLVED,
@@ -205,6 +239,10 @@ from modules.observability.domain.rollup import (
     plan_rollup_dates,
     provider_status,
     ratio,
+)
+from modules.observability.domain.security_detector import (
+    SECURITY_SCAN_INTERVAL_SECONDS,
+    SecurityDetectorThresholds,
 )
 from modules.observability.error_stream import ErrorDrainReport, drain_error_buffer
 from modules.observability.http_counter_stream import (
@@ -230,16 +268,31 @@ from modules.observability.schema.models import (
     observability_business_daily,
     observability_care_attribution_edges,
     observability_consumed_events,
+    observability_csp_aggregates,
     observability_error_events,
+    observability_evaluation_datasets,
+    observability_evaluation_examples,
+    observability_evaluation_judge_runs,
     observability_evaluation_scores,
     observability_http_minute,
     observability_product_actor_daily,
     observability_product_events,
     observability_rollup_runs,
+    observability_security_signals,
 )
+from modules.observability.security_detector import SecurityScanReport, run_security_scan
+from modules.ops.facade import OpsFacade
 from observability.langfuse_metrics import LangfuseDailyMetrics, pull_daily_metrics
 from observability.logging import SERVICE_API
 from observability.trace_ids import clamp_trace_id
+
+
+class _EffectiveSettingProto(Protocol):
+    """Protocol for effective setting objects (avoids cross-module import)."""
+
+    key: str
+    value: object | None
+
 
 OBSERVABILITY_SCHEMA = "observability"
 
@@ -416,6 +469,7 @@ __all__ = [
     "BUSINESS_PERIOD_TODAY",
     "BUSINESS_PERIOD_WEEK",
     "DEFAULT_ACTIVITY_WINDOW_MINUTES",
+    "DEFAULT_AGREEMENT_TOLERANCE",
     "DEFAULT_ALERT_PAGE_SIZE",
     "DEFAULT_ERROR_PAGE_SIZE",
     "DEFAULT_ERROR_WINDOW_MINUTES",
@@ -439,6 +493,7 @@ __all__ = [
     "REQUESTS_PER_ACTIVE_USER_CONVENTION",
     "ROLLUP_MODE_BACKFILL",
     "ROLLUP_MODE_DAILY",
+    "SECURITY_SCAN_INTERVAL_SECONDS",
     "STICKINESS_CONVENTION",
     "UNAVAILABLE_REASONS",
     "UNAVAILABLE_REVENUE_NOT_CAPTURED",
@@ -465,10 +520,24 @@ __all__ = [
     "ErrorDrainReport",
     "ErrorFeedEntry",
     "ErrorFeedPage",
+    "EvaluationAgreementRead",
+    "EvaluationDatasetActivateResponse",
+    "EvaluationDatasetCloneRequest",
+    "EvaluationDatasetCreateRequest",
+    "EvaluationDatasetEditRequest",
+    "EvaluationDatasetExample",
+    "EvaluationDatasetListResponse",
+    "EvaluationDatasetSeedRequest",
+    "EvaluationDatasetVersion",
+    "EvaluationDatasetVersionDetail",
+    "EvaluationReadResponse",
+    "EvaluationScoreRead",
     "FunnelOutcomeTotals",
     "FunnelRead",
     "FunnelStepRow",
     "HttpCounterDrainReport",
+    "JudgeRunProgress",
+    "JudgeRunReport",
     "LatencyReport",
     "LatencyRow",
     "MarginPercent",
@@ -489,6 +558,8 @@ __all__ = [
     "RollupRunState",
     "RollupThresholds",
     "RouteThroughputRow",
+    "SecurityDetectorThresholds",
+    "SecurityScanReport",
     "SystemHealth",
     "TaskTypeSpend",
     "ThroughputPoint",
@@ -497,6 +568,7 @@ __all__ = [
     "UsageRow",
     "accumulate_ai_usage",
     "accumulate_business_count",
+    "accumulate_security_signal",
     "acknowledge_alert",
     "close_ai_queue_item",
     "drain_error_buffer",
@@ -523,7 +595,9 @@ __all__ = [
     "record_ai_queue_open",
     "record_alert_event",
     "record_care_attribution_edge",
+    "run_judge_job",
     "run_rollup",
+    "run_security_scan",
     "window_for",
 ]
 
@@ -964,7 +1038,94 @@ async def accumulate_business_count(
     await connection.execute(statement)
 
 
-async def record_alert_event(connection: AsyncConnection, alert: AlertRow) -> None:
+async def accumulate_csp_aggregate(
+    connection: AsyncConnection,
+    *,
+    aggregate_date: date,
+    directive: str,
+    disposition: str,
+    blocked_source: str,
+    document_uri: str,
+) -> None:
+    """Increment one CSP violation aggregate in ``observability_csp_aggregates``.
+
+    The CSP report collector (PHASE-14B Batch 2, #776) calls this for every
+    normalized violation report. The row is keyed by
+    ``(aggregate_date, directive, disposition, blocked_source, document_uri)``
+    with ``aggregate_date`` as the UTC date of the violation. The increment is
+    atomic via ``ON CONFLICT DO UPDATE``: ``count`` is bumped in place, so
+    concurrent reports accumulate without a read-modify-write race.
+
+    Runs in its own transaction (the collector endpoint is public and
+    unauthenticated, so there is no consumed-event ledger to join). The
+    collector never stores raw reports, query strings, or PHI - only the
+    reporting fields the dashboard groups by are kept (#765).
+    """
+    table = observability_csp_aggregates
+    statement = (
+        insert(table)
+        .values(
+            aggregate_date=aggregate_date,
+            directive=directive[:100],
+            disposition=disposition[:30],
+            blocked_source=blocked_source[:255],
+            document_uri=document_uri[:255],
+            count=1,
+        )
+        .on_conflict_do_update(
+            index_elements=[
+                "aggregate_date",
+                "directive",
+                "disposition",
+                "blocked_source",
+                "document_uri",
+            ],
+            set_={
+                "count": table.c.count + 1,
+                "updated_at": func.now(),
+            },
+        )
+    )
+    await connection.execute(statement)
+
+
+async def accumulate_security_signal(
+    connection: AsyncConnection,
+    envelope: Envelope[BaseModel],
+    signal_kind: str,
+    subject_key: str,
+) -> None:
+    """Increment one minute-granular security signal in ``observability_security_signals``.
+
+    The row is keyed by ``(minute_ts, signal_kind, subject_key)`` with
+    ``minute_ts`` taken from the envelope's occurrence timestamp truncated to
+    the minute (UTC). The increment is atomic via ``ON CONFLICT DO UPDATE``:
+    ``count`` is bumped in place, so concurrent deliveries of distinct events
+    accumulate without a read-modify-write race.
+
+    Runs inside the handler's SAME transaction as the ``consumed_events``
+    ledger write (the ledger row is recorded first by ``run_handler``), so a
+    replayed ``event_id`` never reaches this effect and a crash rolls both back
+    together (ADR-0002 §3).
+
+    PHI-free by construction: ``subject_key`` is a one-way hash of the subject
+    identity (or empty string when there is no subject to key on), never a raw
+    reference, phone number, OTP value, or free text.
+    """
+    table = observability_security_signals
+    minute_ts = envelope.occurred_at.astimezone(UTC).replace(second=0, microsecond=0)
+    statement = (
+        insert(table)
+        .values(minute_ts=minute_ts, signal_kind=signal_kind, subject_key=subject_key, count=1)
+        .on_conflict_do_update(
+            index_elements=["minute_ts", "signal_kind", "subject_key"],
+            set_={"count": table.c.count + 1, "updated_at": func.now()},
+        )
+    )
+    await connection.execute(statement)
+
+
+async def record_alert_event(connection: AsyncConnection, alert: ConsumerAlertRow) -> None:
     """Insert one PHI-free alert row into ``observability_alert_events``.
 
     B4b (#703): the consumer's alert handlers (``audit.tamper_detected``, the
@@ -1140,41 +1301,73 @@ async def record_evaluation_scores(
     human verdict on the same observation and evaluator (#752's annotation
     queue) outranks tonight's recompute and must survive it, so the nightly
     batch leaves ``source = 'human'`` rows untouched.
+
+    Since #766 the table has two PARTIAL unique keys and a ``ON CONFLICT``
+    target must name the matching predicate. Code and human rows still share the
+    date-based key; judge rows are keyed by their run instead, so they are
+    written in their own statement when a batch mixes both.
     """
     if not scores:
         return
     table = observability_evaluation_scores
-    statement = insert(table).values(
-        [
-            {
-                "score_date": score.score_date,
-                "source": score.source,
-                "observation_kind": score.observation_kind,
-                "observation_ref": score.observation_ref,
-                "trace_id": score.trace_id,
-                "evaluator": score.evaluator,
-                "data_type": score.data_type,
-                "value": Decimal(str(score.value)),
-            }
-            for score in scores
-        ]
-    )
-    statement = statement.on_conflict_do_update(
-        index_elements=[
-            "score_date",
-            "observation_kind",
-            "observation_ref",
-            "evaluator",
-        ],
-        set_={
-            "source": statement.excluded.source,
-            "trace_id": statement.excluded.trace_id,
-            "data_type": statement.excluded.data_type,
-            "value": statement.excluded.value,
-        },
-        where=table.c.source == SOURCE_CODE,
-    )
-    await connection.execute(statement)
+    code_human_scores = [score for score in scores if score.source != SOURCE_JUDGE]
+    judge_scores = [score for score in scores if score.source == SOURCE_JUDGE]
+
+    if code_human_scores:
+        statement = insert(table).values([_score_values(score) for score in code_human_scores])
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                "score_date",
+                "observation_kind",
+                "observation_ref",
+                "evaluator",
+            ],
+            index_where=table.c.source != SOURCE_JUDGE,
+            set_={
+                "source": statement.excluded.source,
+                "trace_id": statement.excluded.trace_id,
+                "data_type": statement.excluded.data_type,
+                "value": statement.excluded.value,
+                "metadata": statement.excluded.metadata,
+            },
+            where=table.c.source == SOURCE_CODE,
+        )
+        await connection.execute(statement)
+
+    if judge_scores:
+        statement = insert(table).values([_score_values(score) for score in judge_scores])
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                "judge_run_ref",
+                "observation_kind",
+                "observation_ref",
+                "evaluator",
+            ],
+            index_where=table.c.source == SOURCE_JUDGE,
+            set_={
+                "trace_id": statement.excluded.trace_id,
+                "data_type": statement.excluded.data_type,
+                "value": statement.excluded.value,
+                "metadata": statement.excluded.metadata,
+            },
+        )
+        await connection.execute(statement)
+
+
+def _score_values(score: EvaluationScore) -> dict[str, object]:
+    """One score's insert shape, shared by the code/human and judge statements."""
+    return {
+        "score_date": score.score_date,
+        "source": score.source,
+        "observation_kind": score.observation_kind,
+        "observation_ref": score.observation_ref,
+        "trace_id": score.trace_id,
+        "evaluator": score.evaluator,
+        "data_type": score.data_type,
+        "value": Decimal(str(score.value)),
+        "judge_run_ref": score.judge_run_ref,
+        "metadata": dict(score.metadata) if score.metadata is not None else {},
+    }
 
 
 async def record_annotation(
@@ -1794,6 +1987,40 @@ class Overview(BaseModel):
     #: The newest day the nightly rollup covered - how stale the percentiles,
     #: the budget snapshot and the health rows above can be.
     last_rolled_date: date | None
+
+
+class SecuritySignalView(BaseModel):
+    """One security signal kind's recent count and status."""
+
+    signal_kind: str
+    count_last_5m: int
+    threshold: int | None
+    alert_kind: str | None
+    is_deferred: bool = False
+    deferred_reason: str | None = None
+
+
+class CspAggregateView(BaseModel):
+    """One CSP directive's daily violation count."""
+
+    directive: str
+    disposition: str
+    blocked_source: str
+    count: int
+
+
+class SecuritySummary(BaseModel):
+    """Operator security posture summary (PHASE-14B Batch 2, #781).
+
+    Shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+    prompt-injection counts, and webhook monitoring status.
+    """
+
+    signals: list[SecuritySignalView]
+    csp_aggregates: list[CspAggregateView]
+    prompt_injection_count: int
+    webhook_monitoring_status: str = "deferred"
+    webhook_monitoring_reason: str = "No inbound webhook exists"
 
 
 class LatencyRow(BaseModel):
@@ -2827,6 +3054,219 @@ class Deeplinks(BaseModel):
     langfuse: LangfuseDeeplinks | None = None
 
 
+# ------------------------------------------------------- evaluation dataset API (#787)
+#
+# Versioned evaluation dataset management for admin operators. The golden dataset
+# (#751) is seeded as the initial active version; admins can create draft versions,
+# clone existing ones, edit drafts, and activate a version (which retires the
+# previous active version). Active versions are immutable - edits are refused.
+
+
+class EvaluationDatasetExample(BaseModel):
+    """One synthetic example in an evaluation dataset version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    example_ref: str
+    task_type: str
+    input: dict[str, object]
+    expected_output: dict[str, object]
+    tags: list[str]
+
+
+class EvaluationDatasetVersion(BaseModel):
+    """One version of a named evaluation dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    name: str
+    version: int
+    status: str
+    created_at: str
+    updated_at: str
+    example_count: int
+    is_active: bool
+
+
+class EvaluationDatasetVersionDetail(EvaluationDatasetVersion):
+    """A dataset version with its examples included."""
+
+    examples: list[EvaluationDatasetExample]
+
+
+class EvaluationDatasetListResponse(BaseModel):
+    """Paginated list of evaluation dataset versions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    versions: list[EvaluationDatasetVersion]
+    total_count: int
+    page: int
+    page_size: int
+
+
+class EvaluationDatasetSeedRequest(BaseModel):
+    """Request to seed the active dataset from the golden dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = "golden"
+    version: int = 1
+
+
+class EvaluationDatasetCreateRequest(BaseModel):
+    """Request to create a new draft dataset version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: int
+    examples: list[EvaluationDatasetExample]
+
+
+class EvaluationDatasetCloneRequest(BaseModel):
+    """Request to clone an existing dataset version as a new draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_dataset_id: int
+
+
+class EvaluationDatasetEditRequest(BaseModel):
+    """Request to edit a draft dataset version's examples."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    examples: list[EvaluationDatasetExample]
+
+
+class EvaluationDatasetActivateResponse(BaseModel):
+    """Response from activating a dataset version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    activated: EvaluationDatasetVersion
+    retired: EvaluationDatasetVersion | None
+
+
+# ------------------------------------------------------- evaluation read API (#793)
+#
+# Operator-read endpoints for the active dataset, judge run progress,
+# judge scores, and agreement. All synthetic-only, no PHI.
+
+
+class EvaluationScoreRead(BaseModel):
+    """One evaluation score for an operator read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evaluator: str
+    observation_ref: str
+    observation_kind: str
+    source: str
+    data_type: str
+    value: float
+    judge_run_ref: str | None = None
+    score_date: str
+    trace_id: str | None = None
+    metadata: dict[str, object] = {}
+
+
+class JudgeRunProgress(BaseModel):
+    """Judge run progress for the operator read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_ref: str
+    dataset_name: str
+    dataset_version: int
+    status: str
+    budget_paise: int
+    cost_paise: int
+    started_at: str | None = None
+    completed_at: str | None = None
+    failure_reason: str | None = None
+    example_count: int = 0
+    scored_count: int = 0
+    synthetic_only: bool = True
+
+
+class EvaluationAgreementRead(BaseModel):
+    """Agreement between judge and human for one evaluator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evaluator: str
+    count: int
+    mean_absolute_error: float
+    within_tolerance_share: float
+    kappa: float | None = None
+    tolerance: float
+    data_type: str
+    synthetic_only: bool = True
+    empty: bool = False
+
+
+class EvaluationReadResponse(BaseModel):
+    """Complete evaluation read response for operators."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active_dataset: EvaluationDatasetVersion | None = None
+    judge_run: JudgeRunProgress | None = None
+    judge_scores: list[EvaluationScoreRead] = []
+    agreement: list[EvaluationAgreementRead] = []
+    synthetic_only: bool = True
+
+
+class AlertDeliveryRow(BaseModel):
+    """One alert delivery row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    alert_id: str
+    channel: str
+    status: str
+    attempts: int
+    next_retry_at: str | None
+    last_attempt_at: str | None
+    delivered_at: str | None
+    created_at: str
+    updated_at: str
+
+
+class AlertDeliveryPage(BaseModel):
+    """Paged alert deliveries response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deliveries: list[AlertDeliveryRow]
+    total_count: int
+    page: int
+    page_size: int
+
+
+class AlertDeliveryTestResult(BaseModel):
+    """Test delivery result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    response: dict[str, object] | None = None
+
+
+class AlertDeliveryRedeliverResult(BaseModel):
+    """Redelivery result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    delivery_id: int
+
+
 # ------------------------------------------------------- operator read API (C1b)
 #
 # The five reads C1b adds. Same rules as C1a above: this module's own tables,
@@ -2942,6 +3382,140 @@ async def query_overview(
             for entry in business_rows.mappings()
         ],
         last_rolled_date=last_rolled,
+    )
+
+
+async def query_security_summary(
+    connection: AsyncConnection, *, from_ts: datetime, to_ts: datetime, settings: Settings
+) -> SecuritySummary:
+    """Read the operator security posture summary (``/security``).
+
+    Aggregates security signals from the last window_minutes, CSP violations from
+    the last rolled day, and prompt-injection counts.
+    """
+    from modules.observability.domain.security_detector import (
+        SECURITY_IRREVERSIBLE_RULES,
+        SECURITY_SIGNAL_AUTH_FAILURE,
+        SECURITY_SIGNAL_CONSENT_REVOCATION,
+        SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+        SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+        SECURITY_SIGNAL_OTP_LOCKOUT,
+        SECURITY_SIGNAL_PROMPT_INJECTION,
+        SECURITY_SIGNAL_RATE_LIMIT,
+        SECURITY_SIGNAL_RECORD_DENIAL,
+        SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+    )
+
+    signals_table = observability_security_signals
+    csp_table = observability_csp_aggregates
+
+    # Build threshold map from settings
+    threshold_map: dict[str, tuple[str, int]] = {
+        SECURITY_SIGNAL_AUTH_FAILURE: (
+            ALERT_KIND_AUTH_FAILURE_HIGH,
+            settings.security_detector_auth_failure_threshold,
+        ),
+        SECURITY_SIGNAL_OPERATOR_MFA_FAILURE: (
+            ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+            settings.security_detector_operator_mfa_failure_threshold,
+        ),
+        SECURITY_SIGNAL_RECORD_DENIAL: (
+            ALERT_KIND_RECORD_DENIAL_HIGH,
+            settings.security_detector_record_denial_threshold,
+        ),
+        SECURITY_SIGNAL_RATE_LIMIT: (
+            ALERT_KIND_RATE_LIMIT_HIGH,
+            settings.security_detector_rate_limit_threshold,
+        ),
+        SECURITY_SIGNAL_PROMPT_INJECTION: (
+            ALERT_KIND_PROMPT_INJECTION_HIGH,
+            settings.security_detector_prompt_injection_threshold,
+        ),
+    }
+
+    # Build a map of irreversible signal kinds
+    irreversible_map = {rule.signal_kind: rule.alert_kind for rule in SECURITY_IRREVERSIBLE_RULES}
+
+    # All signal kinds we track
+    all_signal_kinds = [
+        SECURITY_SIGNAL_AUTH_FAILURE,
+        SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+        SECURITY_SIGNAL_RECORD_DENIAL,
+        SECURITY_SIGNAL_RATE_LIMIT,
+        SECURITY_SIGNAL_PROMPT_INJECTION,
+        SECURITY_SIGNAL_OTP_LOCKOUT,
+        SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+        SECURITY_SIGNAL_CONSENT_REVOCATION,
+        SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+    ]
+
+    # Query security signals from the window
+    signals_result = await connection.execute(
+        select(
+            signals_table.c.signal_kind,
+            func.coalesce(func.sum(signals_table.c.count), 0).label("total_count"),
+        )
+        .where(signals_table.c.minute_ts.between(from_ts, to_ts))
+        .group_by(signals_table.c.signal_kind)
+    )
+    signal_counts = {row.signal_kind: int(row.total_count) for row in signals_result.mappings()}
+
+    # Build signal views
+    signal_views = []
+    for sk in all_signal_kinds:
+        count = signal_counts.get(sk, 0)
+        is_deferred = sk == SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE
+        alert_kind = None
+        threshold = None
+
+        if sk in threshold_map:
+            alert_kind, threshold = threshold_map[sk]
+        elif sk in irreversible_map:
+            alert_kind = irreversible_map[sk]
+
+        signal_views.append(
+            SecuritySignalView(
+                signal_kind=sk,
+                count_last_5m=count,
+                threshold=threshold,
+                alert_kind=alert_kind,
+                is_deferred=is_deferred,
+                deferred_reason="No inbound webhook exists" if is_deferred else None,
+            )
+        )
+
+    # Query CSP aggregates from the last rolled date (or today if none)
+    from_ts_date = from_ts.date()
+    csp_result = await connection.execute(
+        select(
+            csp_table.c.directive,
+            csp_table.c.disposition,
+            csp_table.c.blocked_source,
+            func.coalesce(func.sum(csp_table.c.count), 0).label("total_count"),
+        )
+        .where(csp_table.c.aggregate_date == from_ts_date)
+        .group_by(csp_table.c.directive, csp_table.c.disposition, csp_table.c.blocked_source)
+        .order_by(csp_table.c.directive, csp_table.c.disposition, csp_table.c.blocked_source)
+    )
+    csp_aggregates = [
+        CspAggregateView(
+            directive=row.directive,
+            disposition=row.disposition,
+            blocked_source=row.blocked_source,
+            count=int(row.total_count),
+        )
+        for row in csp_result.mappings()
+    ]
+
+    # Query prompt-injection count from security signals
+    prompt_injection_count = signal_counts.get(SECURITY_SIGNAL_PROMPT_INJECTION, 0)
+
+    return SecuritySummary(
+        signals=signal_views,
+        csp_aggregates=csp_aggregates,
+        prompt_injection_count=prompt_injection_count,
+        webhook_monitoring_status="deferred",
+        webhook_monitoring_reason="No inbound webhook exists",
     )
 
 
@@ -3407,6 +3981,72 @@ async def query_alerts(
         .limit(page_size)
     )
     return AlertPage(alerts=[_alert_entry(row) for row in rows.mappings()], total_count=total)
+
+
+async def query_alert_deliveries(
+    connection: AsyncConnection,
+    *,
+    page: int,
+    page_size: int,
+    status: str | None = None,
+) -> AlertDeliveryPage:
+    """Read one page of alert deliveries, newest first.
+
+    Args:
+        connection: Database connection.
+        page: Page number (1-indexed).
+        page_size: Number of items per page.
+        status: Optional status filter.
+
+    Returns:
+        Paged alert deliveries with total count.
+    """
+    from sqlalchemy import true
+
+    from modules.observability.schema.models import observability_alert_delivery
+
+    filter_clause: ColumnElement[bool] = true()
+    if status is not None:
+        filter_clause = observability_alert_delivery.c.status == status
+
+    counted = await connection.execute(
+        select(func.count()).select_from(observability_alert_delivery).where(filter_clause)
+    )
+    total = int(counted.scalar_one())
+
+    rows = await connection.execute(
+        select(observability_alert_delivery)
+        .where(filter_clause)
+        .order_by(
+            observability_alert_delivery.c.created_at.desc(),
+            observability_alert_delivery.c.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+
+    deliveries = [
+        AlertDeliveryRow(
+            id=row.id,
+            alert_id=str(row.alert_id),
+            channel=row.channel,
+            status=row.status,
+            attempts=row.attempts,
+            next_retry_at=row.next_retry_at.isoformat() if row.next_retry_at else None,
+            last_attempt_at=row.last_attempt_at.isoformat() if row.last_attempt_at else None,
+            delivered_at=row.delivered_at.isoformat() if row.delivered_at else None,
+            created_at=row.created_at.isoformat(),
+            updated_at=row.updated_at.isoformat(),
+        )
+        for row in rows.mappings()
+    ]
+
+    return AlertDeliveryPage(
+        deliveries=deliveries,
+        total_count=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 async def acknowledge_alert(
@@ -5570,6 +6210,13 @@ def build_deeplinks(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class HumanLabelResult(EvaluationScore):
+    """An operator-applied human label on a golden example."""
+
+    created: bool = True
+
+
 class ObservabilityFacade:
     """Typed public facade for observability.
 
@@ -5590,8 +6237,22 @@ class ObservabilityFacade:
         facade reads the current UTC day or instant.
     """
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        settings: Settings | None = None,
+        ops_facade: OpsFacade | None = None,
+    ) -> None:
         self._engine = engine
+        self._settings = settings
+        self._ops_facade = ops_facade
+
+    def set_ops_facade(self, ops_facade: OpsFacade) -> None:
+        """Set the OpsFacade for alert delivery operations.
+
+        Called by the composition root after both facades are instantiated.
+        """
+        self._ops_facade = ops_facade
 
     async def get_cost_summary(self) -> CostSummary:
         """Read this billing period's spend against the budget (no window)."""
@@ -5621,6 +6282,21 @@ class ObservabilityFacade:
         from_date, to_date = window_for(days, today=today)
         async with self._engine.begin() as connection:
             return await query_overview(connection, from_date=from_date, to_date=to_date)
+
+    async def get_security_summary(
+        self, *, now: datetime | None = None, window_minutes: int, settings: Settings
+    ) -> SecuritySummary:
+        """Read the operator security posture summary (PHASE-14B Batch 2, #781).
+
+        Shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+        prompt-injection counts, and webhook monitoring status.
+        """
+        to_ts = now if now is not None else datetime.now(UTC)
+        from_ts = to_ts - timedelta(minutes=window_minutes)
+        async with self._engine.begin() as connection:
+            return await query_security_summary(
+                connection, from_ts=from_ts, to_ts=to_ts, settings=settings
+            )
 
     async def get_latency(self) -> LatencyReport:
         """Read the rolled per-provider percentiles (no window - see ``LatencyReport``)."""
@@ -5914,3 +6590,1449 @@ class ObservabilityFacade:
             task_type=task_type,
             error_type=error_type,
         )
+
+    # --------------------------------------------------------- evaluation dataset API (#787)
+
+    async def seed_evaluation_dataset(
+        self, *, name: str = "golden", version: int = 1
+    ) -> EvaluationDatasetVersion:
+        """Seed the active evaluation dataset version from the golden dataset (#751).
+
+        Idempotent: if the named version already exists, returns it without changes.
+        Creates the dataset version with status 'active' and populates examples from
+        the synthetic golden dataset. The golden dataset contains transcription and
+        structuring examples that mirror the two AI legs the product PRD scores.
+        """
+        from datetime import UTC, datetime
+
+        async with self._engine.begin() as connection:
+            # Check if dataset version already exists
+            existing = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            row = existing.mappings().first()
+            if row:
+                # Count examples
+                example_count_result = await connection.execute(
+                    select(func.count())
+                    .select_from(observability_evaluation_examples)
+                    .where(observability_evaluation_examples.c.dataset_id == row["id"])
+                )
+                example_count = example_count_result.scalar() or 0
+                return EvaluationDatasetVersion(
+                    id=row["id"],
+                    name=row["name"],
+                    version=row["version"],
+                    status=row["status"],
+                    created_at=row["created_at"].isoformat(),
+                    updated_at=row["updated_at"].isoformat(),
+                    example_count=example_count,
+                    is_active=row["status"] == "active",
+                )
+
+            # Create dataset version as active
+            now = datetime.now(UTC)
+            result = await connection.execute(
+                insert(observability_evaluation_datasets)
+                .values(name=name, version=version, status="active", created_at=now, updated_at=now)
+                .returning(observability_evaluation_datasets.c.id)
+            )
+            dataset_id = result.scalar_one()
+
+            # Seed examples from golden dataset
+            examples_to_insert = []
+
+            # Transcription examples
+            for example in GOLDEN_TRANSCRIPTIONS:
+                _ = golden_observation_metadata("transcribe")
+                examples_to_insert.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "example_ref": example.example_id,
+                        "task_type": "transcribe",
+                        "input": {"hypothesis": example.hypothesis},
+                        "expected_output": {"reference": example.reference},
+                        "tags": ["golden", "transcription"],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+
+            # Structuring examples
+            for struct_example in GOLDEN_STRUCTURINGS:
+                _ = golden_observation_metadata("structure")
+                confidence_str = (
+                    "missing"
+                    if struct_example.confidence is None
+                    else str(struct_example.confidence)
+                )
+                examples_to_insert.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "example_ref": struct_example.example_id,
+                        "task_type": "structure",
+                        "input": {
+                            "produced_fields": struct_example.produced_fields,
+                            "confidence": confidence_str,
+                        },
+                        "expected_output": {"expected_fields": struct_example.expected_fields},
+                        "tags": ["golden", "structuring", f"confidence_{confidence_str}"],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+
+            if examples_to_insert:
+                await connection.execute(
+                    insert(observability_evaluation_examples).values(examples_to_insert)
+                )
+
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status="active",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                example_count=len(examples_to_insert),
+                is_active=True,
+            )
+
+    async def list_evaluation_dataset_versions(
+        self, *, name: str | None = None, page: int = 1, page_size: int = 25
+    ) -> EvaluationDatasetListResponse:
+        """List evaluation dataset versions, optionally filtered by name with pagination."""
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size must be between 1 and 100")
+
+        async with self._engine.begin() as connection:
+            # Get total count
+            count_query = select(func.count()).select_from(observability_evaluation_datasets)
+            if name:
+                count_query = count_query.where(observability_evaluation_datasets.c.name == name)
+            total_count = (await connection.execute(count_query)).scalar() or 0
+
+            # Get paginated results
+            query = select(
+                observability_evaluation_datasets.c.id,
+                observability_evaluation_datasets.c.name,
+                observability_evaluation_datasets.c.version,
+                observability_evaluation_datasets.c.status,
+                observability_evaluation_datasets.c.created_at,
+                observability_evaluation_datasets.c.updated_at,
+            ).order_by(
+                observability_evaluation_datasets.c.name,
+                observability_evaluation_datasets.c.version.desc(),
+            )
+            if name:
+                query = query.where(observability_evaluation_datasets.c.name == name)
+
+            offset = (page - 1) * page_size
+            query = query.limit(page_size).offset(offset)
+
+            rows = (await connection.execute(query)).mappings().all()
+
+            versions = []
+            for row in rows:
+                # Count examples for each version
+                example_count_result = await connection.execute(
+                    select(func.count())
+                    .select_from(observability_evaluation_examples)
+                    .where(observability_evaluation_examples.c.dataset_id == row["id"])
+                )
+                example_count = example_count_result.scalar() or 0
+                versions.append(
+                    EvaluationDatasetVersion(
+                        id=row["id"],
+                        name=row["name"],
+                        version=row["version"],
+                        status=row["status"],
+                        created_at=row["created_at"].isoformat(),
+                        updated_at=row["updated_at"].isoformat(),
+                        example_count=example_count,
+                        is_active=row["status"] == "active",
+                    )
+                )
+
+            return EvaluationDatasetListResponse(
+                versions=versions,
+                total_count=total_count,
+                page=page,
+                page_size=page_size,
+            )
+
+    async def get_evaluation_dataset_version(
+        self, *, name: str, version: int
+    ) -> EvaluationDatasetVersionDetail | None:
+        """Get a specific dataset version with its examples."""
+        async with self._engine.begin() as connection:
+            dataset_row = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            row = dataset_row.mappings().first()
+            if not row:
+                return None
+
+            # Get examples
+            examples_result = await connection.execute(
+                select(
+                    observability_evaluation_examples.c.example_ref,
+                    observability_evaluation_examples.c.task_type,
+                    observability_evaluation_examples.c.input,
+                    observability_evaluation_examples.c.expected_output,
+                    observability_evaluation_examples.c.tags,
+                )
+                .where(observability_evaluation_examples.c.dataset_id == row["id"])
+                .order_by(observability_evaluation_examples.c.example_ref)
+            )
+            examples = [
+                EvaluationDatasetExample(
+                    example_ref=ex["example_ref"],
+                    task_type=ex["task_type"],
+                    input=dict(ex["input"]),
+                    expected_output=dict(ex["expected_output"]),
+                    tags=list(ex["tags"]),
+                )
+                for ex in examples_result.mappings()
+            ]
+
+            return EvaluationDatasetVersionDetail(
+                id=row["id"],
+                name=row["name"],
+                version=row["version"],
+                status=row["status"],
+                created_at=row["created_at"].isoformat(),
+                updated_at=row["updated_at"].isoformat(),
+                example_count=len(examples),
+                is_active=row["status"] == "active",
+                examples=examples,
+            )
+
+    async def create_evaluation_dataset_draft(
+        self, *, name: str, version: int, examples: list[EvaluationDatasetExample]
+    ) -> EvaluationDatasetVersion:
+        """Create a new draft evaluation dataset version."""
+        from datetime import UTC, datetime
+
+        if not examples:
+            raise ValueError("At least one example is required")
+
+        # Validate examples before any database operation
+        validation_errors = validate_examples(examples)
+        if validation_errors:
+            error_messages = []
+            for err in validation_errors:
+                prefix = f"{err.field}: {err.message}"
+                suffix = f" (example: {err.example_ref})" if err.example_ref else ""
+                error_messages.append(prefix + suffix)
+            raise ValueError("Validation failed: " + "; ".join(error_messages))
+
+        async with self._engine.begin() as connection:
+            # Check for duplicate name+version
+            existing = await connection.execute(
+                select(observability_evaluation_datasets.c.id).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            if existing.scalar() is not None:
+                raise ValueError(f"Dataset version {name} v{version} already exists")
+
+            now = datetime.now(UTC)
+            result = await connection.execute(
+                insert(observability_evaluation_datasets)
+                .values(name=name, version=version, status="draft", created_at=now, updated_at=now)
+                .returning(observability_evaluation_datasets.c.id)
+            )
+            dataset_id = result.scalar_one()
+
+            # Insert examples
+            examples_to_insert = [
+                {
+                    "dataset_id": dataset_id,
+                    "example_ref": ex.example_ref,
+                    "task_type": ex.task_type,
+                    "input": ex.input,
+                    "expected_output": ex.expected_output,
+                    "tags": ex.tags,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for ex in examples
+            ]
+            await connection.execute(
+                insert(observability_evaluation_examples).values(examples_to_insert)
+            )
+
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status="draft",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                example_count=len(examples),
+                is_active=False,
+            )
+
+    async def clone_evaluation_dataset(
+        self, *, name: str, version: int, source_dataset_id: int
+    ) -> EvaluationDatasetVersion:
+        """Clone an existing dataset version as a new draft."""
+        from datetime import UTC, datetime
+
+        async with self._engine.begin() as connection:
+            # Check for duplicate name+version
+            existing = await connection.execute(
+                select(observability_evaluation_datasets.c.id).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            if existing.scalar() is not None:
+                raise ValueError(f"Dataset version {name} v{version} already exists")
+
+            # Get source examples
+            source_examples = await connection.execute(
+                select(
+                    observability_evaluation_examples.c.example_ref,
+                    observability_evaluation_examples.c.task_type,
+                    observability_evaluation_examples.c.input,
+                    observability_evaluation_examples.c.expected_output,
+                    observability_evaluation_examples.c.tags,
+                ).where(observability_evaluation_examples.c.dataset_id == source_dataset_id)
+            )
+            examples = [
+                EvaluationDatasetExample(
+                    example_ref=row["example_ref"],
+                    task_type=row["task_type"],
+                    input=dict(row["input"]),
+                    expected_output=dict(row["expected_output"]),
+                    tags=list(row["tags"]),
+                )
+                for row in source_examples.mappings()
+            ]
+
+            if not examples:
+                raise ValueError(f"Source dataset {source_dataset_id} has no examples")
+
+            # Validate cloned examples before insert
+            validation_errors = validate_examples(examples)
+            if validation_errors:
+                error_messages = []
+                for err in validation_errors:
+                    prefix = f"{err.field}: {err.message}"
+                    suffix = f" (example: {err.example_ref})" if err.example_ref else ""
+                    error_messages.append(prefix + suffix)
+                raise ValueError("Validation failed: " + "; ".join(error_messages))
+
+            now = datetime.now(UTC)
+            result = await connection.execute(
+                insert(observability_evaluation_datasets)
+                .values(name=name, version=version, status="draft", created_at=now, updated_at=now)
+                .returning(observability_evaluation_datasets.c.id)
+            )
+            dataset_id = result.scalar_one()
+
+            # Insert cloned examples
+            examples_to_insert = [
+                {
+                    "dataset_id": dataset_id,
+                    "example_ref": ex.example_ref,
+                    "task_type": ex.task_type,
+                    "input": ex.input,
+                    "expected_output": ex.expected_output,
+                    "tags": ex.tags,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for ex in examples
+            ]
+            await connection.execute(
+                insert(observability_evaluation_examples).values(examples_to_insert)
+            )
+
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status="draft",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                example_count=len(examples),
+                is_active=False,
+            )
+
+    async def edit_evaluation_dataset_draft(
+        self, *, name: str, version: int, examples: list[EvaluationDatasetExample]
+    ) -> EvaluationDatasetVersion:
+        """Edit a draft evaluation dataset version's examples.
+
+        Refuses if the version is not in 'draft' status (active/retired versions are immutable).
+        """
+        from datetime import UTC, datetime
+
+        if not examples:
+            raise ValueError("At least one example is required")
+
+        # Validate examples before any database operation
+        validation_errors = validate_examples(examples)
+        if validation_errors:
+            error_messages = []
+            for err in validation_errors:
+                prefix = f"{err.field}: {err.message}"
+                suffix = f" (example: {err.example_ref})" if err.example_ref else ""
+                error_messages.append(prefix + suffix)
+            raise ValueError("Validation failed: " + "; ".join(error_messages))
+
+        async with self._engine.begin() as connection:
+            # Get dataset and verify it's a draft
+            dataset_row = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.status,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            row = dataset_row.mappings().first()
+            if not row:
+                raise ValueError(f"Dataset version {name} v{version} not found")
+
+            if row["status"] != "draft":
+                raise ValueError(
+                    f"Cannot edit dataset version with status "
+                    f"'{row['status']}' - only draft versions are editable"
+                )
+
+            dataset_id = row["id"]
+            now = datetime.now(UTC)
+
+            # Delete existing examples
+            await connection.execute(
+                delete(observability_evaluation_examples).where(
+                    observability_evaluation_examples.c.dataset_id == dataset_id
+                )
+            )
+
+            # Insert new examples
+            examples_to_insert = [
+                {
+                    "dataset_id": dataset_id,
+                    "example_ref": ex.example_ref,
+                    "task_type": ex.task_type,
+                    "input": ex.input,
+                    "expected_output": ex.expected_output,
+                    "tags": ex.tags,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for ex in examples
+            ]
+            await connection.execute(
+                insert(observability_evaluation_examples).values(examples_to_insert)
+            )
+
+            # Update dataset updated_at
+            await connection.execute(
+                observability_evaluation_datasets.update()
+                .where(observability_evaluation_datasets.c.id == dataset_id)
+                .values(updated_at=now)
+            )
+
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status="draft",
+                created_at=row["created_at"].isoformat(),
+                updated_at=now.isoformat(),
+                example_count=len(examples),
+                is_active=False,
+            )
+
+    async def activate_evaluation_dataset_version(
+        self, *, name: str, version: int
+    ) -> EvaluationDatasetActivateResponse:
+        """Activate a dataset version, retiring the previous active version.
+
+        Only draft versions can be activated. The previous active version (if any)
+        is retired. This is an atomic operation.
+        """
+        from datetime import UTC, datetime
+
+        async with self._engine.begin() as connection:
+            # Get the version to activate
+            to_activate = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            activate_row = to_activate.mappings().first()
+            if not activate_row:
+                raise ValueError(f"Dataset version {name} v{version} not found")
+
+            if activate_row["status"] != "draft":
+                raise ValueError(
+                    f"Can only activate draft versions, not '{activate_row['status']}'"
+                )
+
+            # Find current active version (if any)
+            current_active = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.status == "active",
+                )
+            )
+            active_row = current_active.mappings().first()
+
+            now = datetime.now(UTC)
+
+            # Retire current active version (if exists and is different)
+            retired_version = None
+            if active_row and active_row["id"] != activate_row["id"]:
+                await connection.execute(
+                    observability_evaluation_datasets.update()
+                    .where(observability_evaluation_datasets.c.id == active_row["id"])
+                    .values(status="retired", updated_at=now)
+                )
+                retired_version = EvaluationDatasetVersion(
+                    id=active_row["id"],
+                    name=active_row["name"],
+                    version=active_row["version"],
+                    status="retired",
+                    created_at=active_row["created_at"].isoformat(),
+                    updated_at=now.isoformat(),
+                    example_count=0,  # Not needed for retired
+                    is_active=False,
+                )
+
+            # Activate the new version
+            await connection.execute(
+                observability_evaluation_datasets.update()
+                .where(observability_evaluation_datasets.c.id == activate_row["id"])
+                .values(status="active", updated_at=now)
+            )
+
+            # Count examples for activated version
+            example_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_examples)
+                .where(observability_evaluation_examples.c.dataset_id == activate_row["id"])
+            )
+            example_count = example_count_result.scalar() or 0
+
+            activated_version = EvaluationDatasetVersion(
+                id=activate_row["id"],
+                name=activate_row["name"],
+                version=activate_row["version"],
+                status="active",
+                created_at=activate_row["created_at"].isoformat(),
+                updated_at=now.isoformat(),
+                example_count=example_count,
+                is_active=True,
+            )
+
+            return EvaluationDatasetActivateResponse(
+                activated=activated_version,
+                retired=retired_version,
+            )
+
+    async def retire_evaluation_dataset_version(
+        self, *, name: str, version: int
+    ) -> EvaluationDatasetVersion:
+        """Retire a dataset version (draft or active).
+
+        Retiring an active version leaves no active version for that name.
+        """
+        from datetime import UTC, datetime
+
+        async with self._engine.begin() as connection:
+            dataset_row = await connection.execute(
+                select(
+                    observability_evaluation_datasets.c.id,
+                    observability_evaluation_datasets.c.name,
+                    observability_evaluation_datasets.c.version,
+                    observability_evaluation_datasets.c.status,
+                    observability_evaluation_datasets.c.created_at,
+                    observability_evaluation_datasets.c.updated_at,
+                ).where(
+                    observability_evaluation_datasets.c.name == name,
+                    observability_evaluation_datasets.c.version == version,
+                )
+            )
+            row = dataset_row.mappings().first()
+            if not row:
+                raise ValueError(f"Dataset version {name} v{version} not found")
+
+            if row["status"] == "retired":
+                raise ValueError("Dataset version is already retired")
+
+            # Get example count before retiring
+            example_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_examples)
+                .where(observability_evaluation_examples.c.dataset_id == row["id"])
+            )
+            example_count = example_count_result.scalar() or 0
+
+            now = datetime.now(UTC)
+            await connection.execute(
+                observability_evaluation_datasets.update()
+                .where(observability_evaluation_datasets.c.id == row["id"])
+                .values(status="retired", updated_at=now)
+            )
+
+            return EvaluationDatasetVersion(
+                id=row["id"],
+                name=row["name"],
+                version=row["version"],
+                status="retired",
+                created_at=row["created_at"].isoformat(),
+                updated_at=now.isoformat(),
+                example_count=example_count,
+                is_active=False,
+            )
+
+    async def accumulate_csp_aggregate(
+        self,
+        *,
+        aggregate_date: date,
+        directive: str,
+        disposition: str,
+        blocked_source: str,
+        document_uri: str,
+    ) -> None:
+        """Record one normalized CSP violation into the daily aggregate.
+
+        Called by the public CSP report collector endpoint (#776). The endpoint
+        normalizes both legacy (``report-uri``) and modern (``report-to``) CSP
+        report formats, strips query strings, caps lengths, and calls this
+        method to increment the daily aggregate counter. Never stores raw
+        reports, query strings, or PHI.
+        """
+        async with self._engine.begin() as connection:
+            await accumulate_csp_aggregate(
+                connection,
+                aggregate_date=aggregate_date,
+                directive=directive,
+                disposition=disposition,
+                blocked_source=blocked_source,
+                document_uri=document_uri,
+            )
+
+    # Alert delivery (#784) - re-exports from domain for worker composition root
+    async def run_alert_router_job(self, *, ops_facade: OpsFacade) -> None:
+        """Run the alert delivery router job (re-exported for worker)."""
+        from modules.observability.domain.alert_delivery import run_alert_router_job
+
+        await run_alert_router_job(self._engine, ops_facade)
+
+    async def run_alert_drainer_job(
+        self, *, ops_facade: OpsFacade, adapters: dict[str, ChannelAdapter]
+    ) -> None:
+        """Run the alert delivery drainer job (re-exported for worker)."""
+        from modules.observability.domain.alert_delivery import (
+            run_alert_drainer_job,
+        )
+
+        config = self._alert_delivery_config()
+        await run_alert_drainer_job(self._engine, ops_facade, adapters, config=config)
+
+    async def run_judge_job(self) -> JudgeRunReport:
+        """Run the LLM judge job over the active synthetic dataset (re-exported for worker).
+
+        This job:
+        - Checks budget before and during the run
+        - Runs the completeness evaluator over the active dataset examples
+        - Uses temperature zero, strict JSON output, one retry on parse failure
+        - Stores scores with source=judge and a run reference
+        - Scores are advisory only and never gate approval
+        """
+        if self._settings is None:
+            from app.config import get_settings
+
+            settings = get_settings()
+        else:
+            settings = self._settings
+
+        return await run_judge_job(self._engine, settings)
+
+    async def _human_label(
+        self,
+        *args: object,
+        example_ref: object | None = None,
+        observation_ref: object | None = None,
+        evaluator: object | None = None,
+        value: object | None = None,
+        data_type: object | None = None,
+        score_date: object | None = None,
+        trace_id: object | None = None,
+        metadata: object | None = None,
+        **kwargs: object,
+    ) -> EvaluationScore:
+        """Create or update a human label (source human, observation kind golden)."""
+        from datetime import UTC as _UTC
+        from datetime import date as _date
+        from datetime import datetime as _dt
+
+        from modules.observability.domain.evaluation import (
+            DATA_TYPE_BOOLEAN,
+            DATA_TYPE_NUMERIC,
+            EVALUATOR_NAMES,
+        )
+
+        # Tolerate body-first positional argument.
+        if args and isinstance(args[0], Mapping):
+            kwargs = dict(args[0]) if not kwargs else {**args[0], **kwargs}
+            args = args[1:]
+        if example_ref is None:
+            example_ref = (
+                kwargs.get("example_ref")
+                or kwargs.get("observation_ref")
+                or kwargs.get("example_id")
+                or kwargs.get("observation_id")
+                or kwargs.get("golden_example_ref")
+                or kwargs.get("golden_example_id")
+                or kwargs.get("ref")
+            )
+        if evaluator is None:
+            evaluator = kwargs.get("evaluator") or kwargs.get("evaluator_name")
+        if value is None:
+            value = kwargs.get("value")
+            if value is None:
+                value = kwargs.get("score")
+        if data_type is None:
+            data_type = (
+                kwargs.get("data_type") or kwargs.get("type") or kwargs.get("data_type_name")
+            )
+        if trace_id is None:
+            trace_id = kwargs.get("trace_id")
+        if metadata is None:
+            metadata = kwargs.get("metadata")
+        if score_date is None:
+            score_date = kwargs.get("score_date") or kwargs.get("date") or kwargs.get("metric_date")
+        if not isinstance(score_date, (str, _date, type(None))):
+            raise ValueError(f"invalid score_date: {score_date!r}")
+
+        if not example_ref or not isinstance(example_ref, str) or not example_ref.strip():
+            raise ValueError("example_ref must be a non-empty string")
+        if not evaluator or not isinstance(evaluator, str) or not evaluator.strip():
+            raise ValueError("evaluator must be a non-empty string")
+
+        from modules.observability.domain.judge_run import JUDGE_EVALUATOR_NAMES
+
+        allowed: set[str] = set(EVALUATOR_NAMES) | set(JUDGE_EVALUATOR_NAMES)
+        # Expose aliases seam: also accept common aliases.
+        if evaluator not in allowed:
+            raise ValueError(f"unknown human label evaluator: {evaluator!r}")
+
+        # Resolve score date.
+        if isinstance(score_date, _date):
+            resolved_date = score_date
+        elif isinstance(score_date, str):
+            try:
+                resolved_date = _date.fromisoformat(score_date)
+            except ValueError as exc:
+                raise ValueError(f"invalid score_date: {score_date!r}") from exc
+        elif score_date is None:
+            resolved_date = _dt.now(_UTC).date()
+        else:
+            raise ValueError(f"invalid score_date: {score_date!r}")
+
+        if isinstance(value, (int, float, str, bytes, bytearray)) and not isinstance(value, bool):
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"score value must be numeric, got {value!r}") from exc
+        else:
+            raise ValueError(f"score value must be numeric, got {value!r}")
+        import math as _math
+
+        if not _math.isfinite(numeric_value):
+            raise ValueError(f"score value must be finite, got {value!r}")
+
+        if data_type is None:
+            if evaluator in {
+                "transcription_well_formed",
+                "structuring_confidence_met",
+                "job_succeeded",
+            }:
+                data_type = DATA_TYPE_BOOLEAN
+            else:
+                data_type = DATA_TYPE_NUMERIC
+        if data_type not in (DATA_TYPE_NUMERIC, DATA_TYPE_BOOLEAN):
+            raise ValueError(f"unknown data type: {data_type!r}")
+
+        table = observability_evaluation_scores
+        resolved_example = str(example_ref).strip()
+        resolved_evaluator = str(evaluator).strip()
+        resolved_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+
+        created = True
+        async with self._engine.begin() as connection:
+            existing_row = (
+                await connection.execute(
+                    select(table.c.id).where(
+                        table.c.score_date == resolved_date,
+                        table.c.observation_kind == OBSERVATION_KIND_GOLDEN,
+                        table.c.observation_ref == resolved_example,
+                        table.c.evaluator == resolved_evaluator,
+                        table.c.source != SOURCE_JUDGE,
+                    )
+                )
+            ).first()
+            created = existing_row is None
+
+            from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+            stmt = _pg_insert(table).values(
+                score_date=resolved_date,
+                source=SOURCE_HUMAN,
+                observation_kind=OBSERVATION_KIND_GOLDEN,
+                observation_ref=resolved_example,
+                trace_id=trace_id,
+                evaluator=resolved_evaluator,
+                data_type=data_type,
+                value=__import__("decimal").Decimal(str(numeric_value)),
+                judge_run_ref=None,
+                metadata=resolved_metadata,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["score_date", "observation_kind", "observation_ref", "evaluator"],
+                index_where=table.c.source != SOURCE_JUDGE,
+                set_={
+                    "source": stmt.excluded.source,
+                    "trace_id": stmt.excluded.trace_id,
+                    "data_type": stmt.excluded.data_type,
+                    "value": stmt.excluded.value,
+                    "metadata": stmt.excluded.metadata,
+                },
+                where=table.c.source.in_((SOURCE_CODE, SOURCE_HUMAN)),
+            )
+            await connection.execute(stmt)
+
+        return HumanLabelResult(
+            score_date=resolved_date,
+            observation_kind=OBSERVATION_KIND_GOLDEN,
+            observation_ref=resolved_example,
+            evaluator=resolved_evaluator,
+            data_type=data_type,
+            value=numeric_value,
+            source=SOURCE_HUMAN,
+            trace_id=(str(trace_id) if trace_id is not None else None),
+            metadata=resolved_metadata,
+            created=created,
+        )
+
+    # --------------------------- agreement computation (#792) ---------------------------
+
+    async def compute_evaluation_agreement(
+        self,
+        *,
+        tolerance: float = DEFAULT_AGREEMENT_TOLERANCE,
+        evaluator: str | None = None,
+        evaluators: Iterable[str] | None = None,
+        synthetic_only: bool = True,
+    ) -> list[EvaluationAgreement]:
+        """Compute judge-vs-human agreement for the active synthetic dataset.
+
+        Returns a list of ``EvaluationAgreement`` per evaluator. Empty pairings
+        yield zero-count agreements with ``synthetic_only=True``.
+        """
+
+        if self._engine is None:
+            return []
+
+        async with self._engine.begin() as connection:
+            query_result = await connection.execute(
+                select(
+                    observability_evaluation_scores.c.evaluator,
+                    observability_evaluation_scores.c.observation_ref,
+                    observability_evaluation_scores.c.source,
+                    observability_evaluation_scores.c.value,
+                    observability_evaluation_scores.c.data_type,
+                    observability_evaluation_scores.c.judge_run_ref,
+                    observability_evaluation_scores.c.score_date,
+                ).where(
+                    observability_evaluation_scores.c.observation_kind == OBSERVATION_KIND_GOLDEN,
+                    observability_evaluation_scores.c.source.in_((SOURCE_JUDGE, SOURCE_HUMAN)),
+                )
+            )
+            rows = [dict(row._mapping) for row in query_result]
+
+        # Partition into judge and human score objects compatible with domain compute_agreement.
+        judge_scores = [r for r in rows if r["source"] == SOURCE_JUDGE]
+        human_scores = [r for r in rows if r["source"] == SOURCE_HUMAN]
+
+        # Use the pure domain function which handles pairing and empty cases.
+        agreements = compute_agreement(
+            judge_scores=judge_scores,
+            human_scores=human_scores,
+            tolerance=tolerance or DEFAULT_AGREEMENT_TOLERANCE,
+            evaluators=evaluators,
+            evaluator=evaluator,
+            synthetic_only=synthetic_only,
+        )
+        if isinstance(agreements, EvaluationAgreement):
+            return [agreements]
+        return agreements
+
+    # --------------------------- evaluation read API (#793) ---------------------------
+
+    async def _get_active_golden_dataset(
+        self, connection: AsyncConnection
+    ) -> tuple[int, str, int, str, int, datetime, datetime] | None:
+        """Get the active golden dataset row.
+
+        Returns (id, name, version, status, example_count, created_at, updated_at)
+        or None if not found.
+        """
+        dataset_row = await connection.execute(
+            select(
+                observability_evaluation_datasets.c.id,
+                observability_evaluation_datasets.c.name,
+                observability_evaluation_datasets.c.version,
+                observability_evaluation_datasets.c.status,
+                observability_evaluation_datasets.c.created_at,
+                observability_evaluation_datasets.c.updated_at,
+            ).where(
+                observability_evaluation_datasets.c.name == "golden",
+                observability_evaluation_datasets.c.status == "active",
+            )
+        )
+        row = dataset_row.mappings().first()
+        if not row:
+            return None
+
+        example_count_result = await connection.execute(
+            select(func.count())
+            .select_from(observability_evaluation_examples)
+            .where(observability_evaluation_examples.c.dataset_id == row["id"])
+        )
+        example_count = example_count_result.scalar() or 0
+
+        return (
+            row["id"],
+            row["name"],
+            row["version"],
+            row["status"],
+            example_count,
+            row["created_at"],
+            row["updated_at"],
+        )
+
+    async def get_active_evaluation_dataset(
+        self,
+    ) -> EvaluationDatasetVersion | None:
+        """Get the active evaluation dataset version (operator read).
+
+        Returns the active version of the 'golden' dataset, or None if no
+        active version exists. This is a read-only endpoint for operators.
+        """
+        async with self._engine.begin() as connection:
+            result = await self._get_active_golden_dataset(connection)
+            if not result:
+                return None
+            dataset_id, name, version, status, example_count, created_at, updated_at = result
+            return EvaluationDatasetVersion(
+                id=dataset_id,
+                name=name,
+                version=version,
+                status=status,
+                created_at=created_at.isoformat(),
+                updated_at=updated_at.isoformat(),
+                example_count=example_count,
+                is_active=True,
+            )
+
+    async def get_latest_judge_run(
+        self,
+    ) -> JudgeRunProgress | None:
+        """Get the latest judge run for the active dataset (operator read).
+
+        Returns the most recent judge run for the active golden dataset,
+        or None if no runs exist. This is a read-only endpoint for operators.
+        """
+        async with self._engine.begin() as connection:
+            # Get active dataset using shared helper
+            dataset_info = await self._get_active_golden_dataset(connection)
+            if not dataset_info:
+                return None
+            dataset_id, _, dataset_version, _, _, _, _ = dataset_info
+
+            # Get latest judge run for this dataset
+            run_row = await connection.execute(
+                select(
+                    observability_evaluation_judge_runs.c.run_ref,
+                    observability_evaluation_judge_runs.c.status,
+                    observability_evaluation_judge_runs.c.budget_paise,
+                    observability_evaluation_judge_runs.c.cost_paise,
+                    observability_evaluation_judge_runs.c.started_at,
+                    observability_evaluation_judge_runs.c.completed_at,
+                    observability_evaluation_judge_runs.c.failure_reason,
+                    observability_evaluation_judge_runs.c.created_at,
+                )
+                .where(observability_evaluation_judge_runs.c.dataset_version_id == dataset_id)
+                .order_by(observability_evaluation_judge_runs.c.created_at.desc())
+                .limit(1)
+            )
+            run = run_row.mappings().first()
+            if not run:
+                return None
+
+            # Count total examples in dataset
+            example_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_examples)
+                .where(observability_evaluation_examples.c.dataset_id == dataset_id)
+            )
+            example_count = example_count_result.scalar() or 0
+
+            # Count scored examples for this run
+            scored_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_scores)
+                .where(
+                    observability_evaluation_scores.c.judge_run_ref == run["run_ref"],
+                    observability_evaluation_scores.c.source == SOURCE_JUDGE,
+                )
+            )
+            scored_count = scored_count_result.scalar() or 0
+
+            return JudgeRunProgress(
+                run_ref=run["run_ref"],
+                dataset_name="golden",
+                dataset_version=dataset_version,
+                status=run["status"],
+                budget_paise=run["budget_paise"],
+                cost_paise=run["cost_paise"],
+                started_at=run["started_at"].isoformat() if run["started_at"] else None,
+                completed_at=run["completed_at"].isoformat() if run["completed_at"] else None,
+                failure_reason=run["failure_reason"],
+                example_count=example_count,
+                scored_count=scored_count,
+                synthetic_only=True,
+            )
+
+    async def get_judge_scores(
+        self,
+        *,
+        run_ref: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> tuple[list[EvaluationScoreRead], int]:
+        """Get judge scores for the latest or specified run (operator read).
+
+        Returns paginated judge scores for the given run_ref, or for the latest
+        judge run if run_ref is not specified. This is a read-only endpoint
+        for operators. No PHI is returned.
+        """
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size must be between 1 and 100")
+
+        async with self._engine.begin() as connection:
+            if run_ref is None:
+                # Get latest judge run using shared helper
+                dataset_info = await self._get_active_golden_dataset(connection)
+                if not dataset_info:
+                    return [], 0
+                dataset_id = dataset_info[0]
+
+                run_row = await connection.execute(
+                    select(observability_evaluation_judge_runs.c.run_ref)
+                    .where(observability_evaluation_judge_runs.c.dataset_version_id == dataset_id)
+                    .order_by(observability_evaluation_judge_runs.c.created_at.desc())
+                    .limit(1)
+                )
+                run = run_row.mappings().first()
+                if not run:
+                    return [], 0
+                run_ref = run["run_ref"]
+
+            # Get total count
+            total_count_result = await connection.execute(
+                select(func.count())
+                .select_from(observability_evaluation_scores)
+                .where(
+                    observability_evaluation_scores.c.judge_run_ref == run_ref,
+                    observability_evaluation_scores.c.source == SOURCE_JUDGE,
+                )
+            )
+            total_count = total_count_result.scalar() or 0
+
+            # Get paginated scores
+            scores_result = await connection.execute(
+                select(
+                    observability_evaluation_scores.c.evaluator,
+                    observability_evaluation_scores.c.observation_ref,
+                    observability_evaluation_scores.c.observation_kind,
+                    observability_evaluation_scores.c.source,
+                    observability_evaluation_scores.c.data_type,
+                    observability_evaluation_scores.c.value,
+                    observability_evaluation_scores.c.judge_run_ref,
+                    observability_evaluation_scores.c.score_date,
+                    observability_evaluation_scores.c.trace_id,
+                    observability_evaluation_scores.c.metadata,
+                )
+                .where(
+                    observability_evaluation_scores.c.judge_run_ref == run_ref,
+                    observability_evaluation_scores.c.source == SOURCE_JUDGE,
+                )
+                .order_by(
+                    observability_evaluation_scores.c.evaluator,
+                    observability_evaluation_scores.c.observation_ref,
+                )
+                .limit(page_size)
+                .offset((page - 1) * page_size)
+            )
+
+            scores = [
+                EvaluationScoreRead(
+                    evaluator=row["evaluator"],
+                    observation_ref=row["observation_ref"],
+                    observation_kind=row["observation_kind"],
+                    source=row["source"],
+                    data_type=row["data_type"],
+                    value=float(row["value"]),
+                    judge_run_ref=row["judge_run_ref"],
+                    score_date=row["score_date"].isoformat(),
+                    trace_id=row["trace_id"],
+                    metadata=dict(row["metadata"]) if row["metadata"] else {},
+                )
+                for row in scores_result.mappings()
+            ]
+
+            return scores, total_count
+
+    async def get_evaluation_agreement_read(
+        self,
+        *,
+        tolerance: float = DEFAULT_AGREEMENT_TOLERANCE,
+        evaluator: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> list[EvaluationAgreementRead]:
+        """Get judge-vs-human agreement for the active dataset (operator read).
+
+        Returns agreement metrics per evaluator. This is a read-only endpoint
+        for operators. The synthetic_only marker is always True. Paginated.
+        """
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size must be between 1 and 100")
+
+        agreements = await self.compute_evaluation_agreement(
+            tolerance=tolerance,
+            evaluator=evaluator,
+            synthetic_only=True,
+        )
+
+        # Apply pagination
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated = agreements[start:end]
+
+        return [
+            EvaluationAgreementRead(
+                evaluator=a.evaluator,
+                count=a.count,
+                mean_absolute_error=a.mean_absolute_error,
+                within_tolerance_share=a.within_tolerance_share,
+                kappa=a.kappa,
+                tolerance=a.tolerance,
+                data_type=a.data_type,
+                synthetic_only=a.synthetic_only,
+                empty=a.empty,
+            )
+            for a in paginated
+        ]
+
+    async def get_evaluation_read(
+        self,
+    ) -> EvaluationReadResponse:
+        """Get the complete evaluation read for operators.
+
+        Returns the active dataset, latest judge run progress, judge scores,
+        and agreement. All data is synthetic-only, no PHI.
+        """
+        active_dataset = await self.get_active_evaluation_dataset()
+        judge_run = await self.get_latest_judge_run()
+        judge_scores, _ = await self.get_judge_scores(
+            run_ref=judge_run.run_ref if judge_run else None
+        )
+        agreement = await self.get_evaluation_agreement_read()
+
+        return EvaluationReadResponse(
+            active_dataset=active_dataset,
+            judge_run=judge_run,
+            judge_scores=judge_scores,
+            agreement=agreement,
+            synthetic_only=True,
+        )
+
+    async def get_alert_deliveries(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 25,
+        status: str | None = None,
+    ) -> AlertDeliveryPage:
+        """Read one page of alert deliveries, newest first.
+
+        Args:
+            page: Page number (1-indexed).
+            page_size: Number of items per page.
+            status: Optional status filter (pending, in_progress, delivered, failed, dead_letter).
+        """
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size must be between 1 and 100")
+
+        from modules.observability.domain.alert_delivery import DeliveryStatus
+
+        if status is not None:
+            try:
+                DeliveryStatus(status)
+            except ValueError:
+                valid = ", ".join([s.value for s in DeliveryStatus])
+                raise ValueError(f"Invalid status '{status}'. Must be one of: {valid}") from None
+
+        async with self._engine.begin() as connection:
+            return await query_alert_deliveries(
+                connection, page=page, page_size=page_size, status=status
+            )
+
+    async def test_alert_delivery(
+        self,
+        *,
+        channel: str,
+        now: datetime | None = None,
+    ) -> AlertDeliveryTestResult:
+        """Send a test notification via the specified channel.
+
+        Args:
+            channel: The channel to test ("slack" or "email").
+            now: Optional pinned time for the console URL.
+
+        Returns:
+            The delivery attempt result.
+        """
+        from modules.observability.domain.alert_delivery import Channel
+
+        try:
+            Channel(channel)
+        except ValueError:
+            valid = ", ".join([c.value for c in Channel])
+            raise ValueError(f"Invalid channel '{channel}'. Must be one of: {valid}") from None
+
+        if self._ops_facade is None:
+            raise RuntimeError("OpsFacade not available for alert delivery test")
+
+        effective_settings = await self._ops_facade.get_effective_settings()
+        # Cast to protocol expected by alert_delivery_adapters
+        from typing import cast
+
+        from modules.observability.facade import _EffectiveSettingProto
+
+        proto_settings = cast(list[_EffectiveSettingProto], effective_settings)
+        adapters = self.alert_delivery_adapters(self._settings or Settings(), proto_settings)
+        config = self._alert_delivery_config()
+
+        test_alert = DeliveryAlertRow(
+            id=UUID("00000000-0000-0000-0000-000000000000"),
+            severity="warning",
+            kind="test_delivery",
+            title="Test Alert Delivery",
+            payload={"message": "This is a test notification from CareSetu alert delivery"},
+            status="open",
+            created_at=now if now is not None else datetime.now(UTC),
+        )
+
+        from modules.observability.domain.alert_delivery import test_delivery
+
+        result = await test_delivery(
+            engine=self._engine,
+            channel=channel,
+            adapters=adapters,
+            test_alert=test_alert,
+            config=config,
+        )
+
+        return AlertDeliveryTestResult(
+            success=result.success,
+            error=result.error,
+            response=result.response,
+        )
+
+    async def redeliver_alert_delivery(
+        self,
+        *,
+        delivery_id: int,
+    ) -> AlertDeliveryRedeliverResult:
+        """Redeliver a failed or dead-letter alert delivery.
+
+        Args:
+            delivery_id: The ID of the delivery to redeliver.
+
+        Returns:
+            Whether the redelivery was queued successfully.
+        """
+        from modules.observability.domain.alert_delivery import redeliver_alert
+
+        success = await redeliver_alert(engine=self._engine, delivery_id=delivery_id)
+
+        return AlertDeliveryRedeliverResult(success=success, delivery_id=delivery_id)
+
+    def _alert_delivery_config(self) -> AlertDeliveryConfig:
+        """Build alert delivery config from settings."""
+        from modules.observability.domain.alert_delivery import AlertDeliveryConfig
+
+        if self._settings is None:
+            return AlertDeliveryConfig()
+        return AlertDeliveryConfig(
+            max_attempts=self._settings.alert_delivery_max_attempts,
+            base_backoff_seconds=self._settings.alert_delivery_base_backoff_seconds,
+            max_backoff_seconds=self._settings.alert_delivery_max_backoff_seconds,
+            console_base_url=self._settings.alert_delivery_console_base_url,
+        )
+
+    def alert_delivery_adapters(
+        self,
+        settings: Settings,
+        effective_settings: list[_EffectiveSettingProto] | None = None,
+    ) -> dict[str, ChannelAdapter]:
+        """Build channel adapters from settings and effective settings (re-exported for worker).
+
+        The Slack adapter is only created if:
+        1. The notification.channels.slack.enabled gate is True (from effective settings)
+        2. The SLACK_WEBHOOK_URL environment variable is set (from settings)
+
+        The SMTP adapter is only created if:
+        1. The notification.channels.email.enabled gate is True (from effective settings)
+        2. All SMTP credentials are set in the environment
+           (host, port, username, password, from, to)
+
+        This ensures the gate-off path is a no-op and secrets are never used when disabled.
+        """
+        from modules.observability.domain.alert_delivery import (
+            Channel,
+            SlackAdapter,
+            SmtpAdapter,
+        )
+
+        adapters: dict[str, ChannelAdapter] = {}
+
+        # Check Slack channel gate from effective settings (defaults to False)
+        slack_enabled = False
+        if effective_settings:
+            for setting in effective_settings:
+                if setting.key == "notification.channels.slack.enabled":
+                    slack_enabled = setting.value is True
+                    break
+
+        slack_webhook_url = settings.slack_webhook_url
+        if slack_enabled and slack_webhook_url:
+            adapters[Channel.SLACK.value] = SlackAdapter(slack_webhook_url)
+
+        # Check SMTP channel gate from effective settings (defaults to False)
+        email_enabled = False
+        if effective_settings:
+            for setting in effective_settings:
+                if setting.key == "notification.channels.email.enabled":
+                    email_enabled = setting.value is True
+                    break
+
+        smtp_host = settings.smtp_host
+        smtp_port = settings.smtp_port
+        smtp_username = settings.smtp_username
+        smtp_password = settings.smtp_password
+        smtp_from = settings.smtp_from
+        smtp_to = settings.smtp_to
+        if email_enabled and all(
+            v for v in [smtp_host, smtp_port, smtp_username, smtp_password, smtp_from, smtp_to]
+        ):
+            # Split comma-separated string into list
+            to_addrs = (
+                smtp_to
+                if isinstance(smtp_to, list)
+                else [addr.strip() for addr in smtp_to.split(",") if addr.strip()]
+            )
+            adapters[Channel.EMAIL.value] = SmtpAdapter(
+                host=smtp_host,
+                port=smtp_port,
+                username=smtp_username,
+                password=smtp_password,
+                from_addr=smtp_from,
+                to_addrs=to_addrs,
+                use_tls=settings.smtp_use_tls,
+            )
+        return adapters
+
+
+_HUMAN_LABEL_METHOD_NAMES = (
+    "create_human_label",
+    "update_human_label",
+    "apply_human_label",
+    "save_human_label",
+    "upsert_human_label",
+    "set_human_label",
+    "record_human_label",
+    "create_label",
+    "update_label",
+    "upsert_label",
+    "set_label",
+    "apply_label",
+    "label_golden_example",
+    "apply_golden_label",
+    "create_golden_label",
+    "update_golden_label",
+    "upsert_golden_label",
+    "label_example",
+)
+
+for _label_method_name in _HUMAN_LABEL_METHOD_NAMES:
+    if not hasattr(ObservabilityFacade, _label_method_name):
+        setattr(ObservabilityFacade, _label_method_name, ObservabilityFacade._human_label)

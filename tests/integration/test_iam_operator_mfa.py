@@ -40,7 +40,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from modules.iam.adapters.sms import MockSmsAdapter
-from modules.iam.domain.exceptions import SessionIssuanceError
+from modules.iam.domain.exceptions import (
+    InvalidOperatorCodeError,
+    OperatorMfaLockedError,
+    SessionIssuanceError,
+)
 from modules.iam.domain.jwt import verify_token
 from modules.iam.facade import IamFacade
 
@@ -62,6 +66,9 @@ class MutableClock:
 
     def __call__(self) -> datetime:
         return self._now
+
+    def advance(self, seconds: int) -> None:
+        self._now += timedelta(seconds=seconds)
 
 
 def _alembic_config(database_url: str) -> Config:
@@ -92,7 +99,7 @@ async def clean_iam(database_url: str, iam_schema: None) -> Iterator[None]:
                 text(
                     "TRUNCATE TABLE iam.iam_identities, iam.iam_otp_challenges, "
                     "iam.iam_role_grants, iam.iam_sessions, iam.iam_operator_mfa, "
-                    "iam.iam_outbox CASCADE"
+                    "iam.iam_operator_profiles, iam.iam_outbox CASCADE"
                 )
             )
     finally:
@@ -111,7 +118,13 @@ def _facade(database_url: str, clock: MutableClock) -> IamFacade:
     )
 
 
-async def _invited_operator(database_url: str, clock: MutableClock) -> IamFacade:
+async def _invited_operator(
+    database_url: str,
+    clock: MutableClock,
+    *,
+    lockout_threshold: int = 5,
+    lockout_seconds: int = 900,
+) -> IamFacade:
     """Invite an operator (the only growth path - no self-registration).
 
     The invited phone first completes phone-OTP (first factor, making the
@@ -127,6 +140,8 @@ async def _invited_operator(database_url: str, clock: MutableClock) -> IamFacade
         clock=clock,
         access_token_signing_key=_KEY,
         mfa_secret_key=_MFA_SECRET_KEY,
+        operator_mfa_lockout_threshold=lockout_threshold,
+        operator_mfa_lockout_seconds=lockout_seconds,
     )
     await facade.register_patient(_INVITED_PHONE)
     await facade.delivery_queue.flush()
@@ -142,6 +157,11 @@ async def _invited_operator(database_url: str, clock: MutableClock) -> IamFacade
 def _valid_code(secret: str, at: datetime) -> str:
     """A valid RFC-6238 TOTP code for ``secret`` at ``at``."""
     return pyotp.TOTP(secret).at(at)
+
+
+def _wrong_code(secret: str, at: datetime) -> str:
+    """A deterministic code that differs from every code in the drift window."""
+    return f"{(int(_valid_code(secret, at)) + 1) % 1_000_000:06d}"
 
 
 async def test_no_operator_session_before_the_mfa_second_factor(
@@ -212,7 +232,36 @@ async def test_operator_session_minted_only_after_mfa_is_verified(
     claims = verify_token(session.jwt, _KEY, _T0)
     assert claims.subject_id == session.identity_id
     assert claims.scope == "operator"
+    assert claims.tier == "operator"
     assert claims.expires_at == _T0 + timedelta(seconds=900)
+
+
+async def test_operator_refresh_re_derives_the_tier_from_the_profile(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    facade = await _invited_operator(database_url, clock)
+    identity_id = await _invited_identity_id(database_url)
+    enroll = await facade.enroll_mfa(identity_id)
+    session = await facade.issue_operator_session(_INVITED_PHONE, _valid_code(enroll.secret, _T0))
+
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE iam.iam_operator_profiles SET tier = 'admin' "
+                    "WHERE identity_id = :identity_id"
+                ),
+                {"identity_id": identity_id},
+            )
+    finally:
+        await engine.dispose()
+
+    refreshed = await facade.refresh_session(session.refresh_token)
+
+    assert refreshed.scope == "operator"
+    assert verify_token(refreshed.jwt, _KEY, _T0).tier == "admin"
 
 
 async def test_wrong_totp_code_rejected(database_url: str, clean_iam: Any) -> None:
@@ -303,6 +352,136 @@ async def test_invite_enroll_login_round_trip(database_url: str, clean_iam: Any)
     session = await facade.issue_operator_session(_INVITED_PHONE, _valid_code(enroll.secret, _T0))
 
     assert session.scope == "operator"
+
+
+async def test_wrong_totp_failures_persist_across_failed_logins(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    facade = await _invited_operator(database_url, clock)
+    identity_id = await _invited_identity_id(database_url)
+    enroll = await facade.enroll_mfa(identity_id)
+    wrong = _wrong_code(enroll.secret, _T0)
+
+    for _ in range(2):
+        with pytest.raises(InvalidOperatorCodeError):
+            await facade.issue_operator_session(_INVITED_PHONE, wrong)
+
+    state = await _profile_state(database_url, identity_id)
+    assert state["mfa_failed_attempts"] == 2
+    assert state["mfa_locked_until"] is None
+
+
+async def test_threshold_locks_login_until_the_window_expires(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    facade = await _invited_operator(database_url, clock, lockout_threshold=3, lockout_seconds=600)
+    identity_id = await _invited_identity_id(database_url)
+    enroll = await facade.enroll_mfa(identity_id)
+    wrong = _wrong_code(enroll.secret, _T0)
+
+    for _ in range(3):
+        with pytest.raises(InvalidOperatorCodeError):
+            await facade.issue_operator_session(_INVITED_PHONE, wrong)
+
+    state = await _profile_state(database_url, identity_id)
+    assert state["mfa_failed_attempts"] == 3
+    assert state["mfa_locked_until"] == _T0 + timedelta(seconds=600)
+
+    with pytest.raises(OperatorMfaLockedError) as locked:
+        await facade.issue_operator_session(_INVITED_PHONE, _valid_code(enroll.secret, _T0))
+    assert locked.value.remaining_seconds == 600
+
+    clock.advance(601)
+    session = await facade.issue_operator_session(
+        _INVITED_PHONE, _valid_code(enroll.secret, clock())
+    )
+
+    assert session.scope == "operator"
+    state = await _profile_state(database_url, identity_id)
+    assert state["mfa_failed_attempts"] == 0
+    assert state["mfa_locked_until"] is None
+
+
+async def test_successful_totp_resets_the_failure_counter(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    facade = await _invited_operator(database_url, clock)
+    identity_id = await _invited_identity_id(database_url)
+    enroll = await facade.enroll_mfa(identity_id)
+
+    for _ in range(2):
+        with pytest.raises(InvalidOperatorCodeError):
+            await facade.issue_operator_session(_INVITED_PHONE, _wrong_code(enroll.secret, _T0))
+
+    session = await facade.issue_operator_session(_INVITED_PHONE, _valid_code(enroll.secret, _T0))
+
+    assert session.scope == "operator"
+    state = await _profile_state(database_url, identity_id)
+    assert state["mfa_failed_attempts"] == 0
+    assert state["mfa_locked_until"] is None
+
+
+async def test_failure_and_lockout_events_commit_with_the_counter(
+    database_url: str, clean_iam: Any
+) -> None:
+    clock = MutableClock(_T0)
+    facade = await _invited_operator(database_url, clock, lockout_threshold=2, lockout_seconds=600)
+    identity_id = await _invited_identity_id(database_url)
+    enroll = await facade.enroll_mfa(identity_id)
+    wrong = _wrong_code(enroll.secret, _T0)
+
+    for _ in range(2):
+        with pytest.raises(InvalidOperatorCodeError):
+            await facade.issue_operator_session(_INVITED_PHONE, wrong)
+
+    events = await _operator_mfa_events(database_url)
+    assert [event["reason"] for event in events] == ["failure", "lockout"]
+    assert [int(event["identity_id"]) for event in events] == [identity_id, identity_id]
+    assert events[0]["lockout_until"] is None
+    assert events[1]["lockout_until"] is not None
+    assert all(_INVITED_PHONE.lstrip("+") not in event["payload_text"] for event in events)
+
+    with pytest.raises(OperatorMfaLockedError):
+        await facade.issue_operator_session(_INVITED_PHONE, _valid_code(enroll.secret, _T0))
+
+    assert len(await _operator_mfa_events(database_url)) == 2
+
+
+async def _profile_state(database_url: str, identity_id: int) -> dict[str, Any]:
+    rows = await _query(
+        database_url,
+        "SELECT mfa_failed_attempts, mfa_locked_until "
+        "FROM iam.iam_operator_profiles WHERE identity_id = :identity_id",
+        {"identity_id": identity_id},
+    )
+    return rows[0]
+
+
+async def _operator_mfa_events(database_url: str) -> list[dict[str, Any]]:
+    return await _query(
+        database_url,
+        "SELECT payload->>'reason' AS reason, "
+        "payload->>'identity_id' AS identity_id, "
+        "payload->>'lockout_until' AS lockout_until, "
+        "payload::text AS payload_text "
+        "FROM iam.iam_outbox WHERE event_type = 'operator.mfa_failed' "
+        "ORDER BY occurred_at",
+    )
+
+
+async def _query(
+    database_url: str, sql: str, params: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(text(sql), params or {})
+            return [dict(row) for row in result.mappings().all()]
+    finally:
+        await engine.dispose()
 
 
 async def _invited_identity_id(database_url: str) -> int:

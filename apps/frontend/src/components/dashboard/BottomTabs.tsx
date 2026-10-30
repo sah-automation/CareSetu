@@ -1,7 +1,7 @@
 "use client";
 
 // PHASE-2.6 T06 (#197): mobile bottom tab bar for both densities, rendered
-// from the role's nav-config via splitMobileTabs (blueprint §2.4). Up to five
+// from the role's nav-config via splitMobileTabs (blueprint A2.4). Up to five
 // destination columns; the center accent slot (patient Start Visit) is pinned
 // to the middle column; overflow destinations live in the More sheet. Pure
 // CSS visibility: `lg:hidden` swaps it out for the sidebar/top-nav at the
@@ -38,6 +38,14 @@ import { CountPill, SoonBadge } from "./NavItemLink";
 import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
 
+function useAuthOrNull() {
+  try {
+    return useAuth();
+  } catch {
+    return null;
+  }
+}
+
 export function BottomTabs({
   role,
   items,
@@ -51,8 +59,12 @@ export function BottomTabs({
   const pathname = usePathname();
   const { lang } = useLang();
   const [moreOpen, setMoreOpen] = useState(false);
+  const auth = useAuthOrNull();
+  const isAdmin =
+    auth?.user?.roles?.includes("operator") === true &&
+    auth?.user?.tier === "admin";
   const config = items ?? NAV_CONFIG[role];
-  const { tabs, overflow, hasMore } = splitMobileTabs(config);
+  const { tabs, overflow, hasMore } = splitMobileTabs(config, isAdmin);
   // #746: a configuration that declares disclosure groups (a parent carrying
   // `children`) turns the More sheet into the full grouped navigation. The
   // flat, overflow-only sheet the light patient shell uses is unchanged.

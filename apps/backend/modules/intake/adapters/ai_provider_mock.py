@@ -24,6 +24,8 @@ from modules.intake.adapters.ai_gateway import (
     AiGateway,
     DraftRxRequest,
     DraftRxResult,
+    EvaluateRequest,
+    EvaluateResult,
     RxItem,
     StructureRequest,
     StructureResult,
@@ -149,6 +151,19 @@ class MockAiProvider:
             output_tokens=0,
         )
         self._record_span("draft_rx", started=started)
+        return result
+
+    @observe(name="ai_evaluate", capture_input=False, capture_output=False)
+    async def evaluate(self, request: EvaluateRequest) -> EvaluateResult:
+        started = time.monotonic()
+        self._calls.append(request)
+        # Return a mock evaluation result - for completeness, return a high score
+        result = EvaluateResult(
+            raw_response={"score": 0.9, "reasoning": "mock evaluation"},
+            input_tokens=0,
+            output_tokens=0,
+        )
+        self._record_span("evaluate", started=started)
         return result
 
 

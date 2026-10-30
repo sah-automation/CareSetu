@@ -9,5 +9,7 @@
         }
       ]
     }
-  ]
+  ],
+  "installCommand": "rm -f package-lock.json && npm install --legacy-peer-deps --force",
+  "buildCommand": "next build"
 }

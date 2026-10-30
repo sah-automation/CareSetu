@@ -100,6 +100,9 @@ export interface NavItemDef {
   // metadata for the redesigned full-shell sidebar only; the mobile bars and
   // top-nav ignore it.
   group?: NavSectionKey;
+  // #796: admin-only navigation items are filtered from non-admin views; direct
+  // navigation renders a permission state.
+  adminOnly?: boolean;
   // #744: a disclosure parent's sub-destinations. Sub-membership is declared
   // here ONCE and read by every renderer that has a nested surface (the
   // sidebar disclosure and the mobile More sheet), never re-listed by hand. A
@@ -338,10 +341,23 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
           icon: HeartPulse,
         },
         {
+          key: "security",
+          labelKey: "security",
+          href: "/operator/observability/security",
+          icon: ShieldCheck,
+        },
+        {
           key: "settings",
           labelKey: "settings",
           href: "/operator/observability/settings",
           icon: Settings,
+          adminOnly: true,
+        },
+        {
+          key: "evals",
+          labelKey: "evals",
+          href: "/operator/observability/evals",
+          icon: ClipboardList,
         },
       ],
     },
@@ -388,18 +404,39 @@ function weaveCenter(
   return [...regular.slice(0, at), center, ...regular.slice(at)];
 }
 
-export function splitMobileTabs(items: NavItemDef[]): MobileTabSplit {
-  const center = items.find((item) => item.center);
+export function filterNavItems(
+  items: NavItemDef[],
+  isAdmin: boolean,
+): NavItemDef[] {
+  return items
+    .filter((item) => !item.adminOnly || isAdmin)
+    .map((item) => {
+      if (!item.children?.length) return item;
+      const filteredChildren = filterNavItems(item.children, isAdmin);
+      if (filteredChildren.length === 0) {
+        const { children: _children, ...rest } = item;
+        return rest;
+      }
+      return { ...item, children: filteredChildren };
+    });
+}
+
+export function splitMobileTabs(
+  items: NavItemDef[],
+  isAdmin: boolean = true,
+): MobileTabSplit {
+  const filteredItems = filterNavItems(items, isAdmin);
+  const center = filteredItems.find((item) => item.center);
   // #746: the pinned-overflow rule now also covers disclosure parents. A tab
   // column is a single flat destination and cannot expand a group, so an item
   // carrying `children` is pinned into the More sheet exactly like a
   // `mobileOverflow` destination - where the group (and every sub-destination)
   // renders. This is what makes adding nine sub-destinations change what fits
   // on the operator bar: the parent leaves the bar for the More sheet.
-  const pinnedOverflow = items.filter(
+  const pinnedOverflow = filteredItems.filter(
     (item) => (item.mobileOverflow || isGroupParent(item)) && !item.center,
   );
-  const regular = items.filter(
+  const regular = filteredItems.filter(
     (item) => !item.center && !item.mobileOverflow && !isGroupParent(item),
   );
   const capacity = center

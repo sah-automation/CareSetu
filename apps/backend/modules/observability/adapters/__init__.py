@@ -67,6 +67,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.config import get_settings
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
@@ -79,13 +80,17 @@ from bus.events import (
     EVENT_CONSENT_REQUESTED,
     EVENT_CONSENT_REVOKED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
+    EVENT_OPERATOR_MFA_FAILED,
+    EVENT_OTP_FAILED,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
     EVENT_PARTNER_REJECTED,
     EVENT_PARTNER_SELECTED,
     EVENT_PARTNER_VERIFICATION_STARTED,
+    EVENT_PATIENT_AUTH_FAILED,
     EVENT_RECORD_ACCESSED,
+    EVENT_RECORD_DENIED,
 )
 from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
@@ -103,12 +108,19 @@ from modules.observability.domain.consumer import (
     CaseConsultCompleteTelemetryPayload,
     ConsentLifecycleTelemetryPayload,
     IntakeDoctorAssignedTelemetryPayload,
+    OperatorMfaFailedTelemetryPayload,
+    OtpFailedEventPayload,
+    OtpFailedTelemetryPayload,
     PartnerCredentialReviewedTelemetryPayload,
     PartnerDecisionTelemetryPayload,
     PartnerRegisteredTelemetryPayload,
     PartnerSelectedTelemetryPayload,
     PartnerVerificationStartedTelemetryPayload,
+    PatientAuthFailedEventPayload,
+    PatientAuthFailedTelemetryPayload,
+    PromptInjectionDetectedTelemetryPayload,
     RecordAccessTelemetryPayload,
+    RecordDeniedTelemetryPayload,
     TamperDetectedTelemetryPayload,
     build_ai_egress_alert,
     build_tamper_alert,
@@ -118,11 +130,13 @@ from modules.observability.domain.product import (
     ProductStepPayload,
     product_steps,
 )
-from modules.observability.domain.pseudonym import ACTOR_KIND_PATIENT, actor_key
+from modules.observability.domain.pseudonym import ACTOR_KIND_DOCTOR, ACTOR_KIND_PATIENT, actor_key
+from modules.observability.domain.security_detector import SECURITY_SIGNAL_PROMPT_INJECTION
 from modules.observability.facade import (
     OBSERVABILITY_SCHEMA,
     accumulate_ai_usage,
     accumulate_business_count,
+    accumulate_security_signal,
     close_ai_queue_item,
     record_ai_job_spend,
     record_ai_queue_open,
@@ -160,6 +174,14 @@ _BUSINESS_EVENT_MIRRORS: dict[str, type[BaseModel]] = {
 _UNCLAIMED_EVENT_MIRRORS: dict[str, type[BaseModel]] = {
     EVENT_PARTNER_VERIFICATION_STARTED: PartnerVerificationStartedTelemetryPayload,
     EVENT_PARTNER_SELECTED: PartnerSelectedTelemetryPayload,
+    # #777: the two IAM-failure events had no consumer before security signals,
+    # so no module had claimed their payload model. These mirrors are the
+    # producer's full field contract (the dispatcher rebuilds the row before
+    # fan-out); the security handlers re-validate them into the narrower
+    # ``*TelemetryPayload`` views, which is where the phone number, attempt
+    # budget and lockout time are shed before anything is written.
+    EVENT_PATIENT_AUTH_FAILED: PatientAuthFailedEventPayload,
+    EVENT_OTP_FAILED: OtpFailedEventPayload,
 }
 
 
@@ -212,6 +234,10 @@ class _Seat:
     #: review outcomes in ``ANNOTATION_EVENT_MIRRORS``; a delivery carries it
     #: alongside whichever of the other two effects apply, never instead.
     annotation: bool
+    #: The security signal kind this event increments in
+    #: ``observability_security_signals``, or ``None`` when it is not a security
+    #: signal event.
+    security_signal: str | None
 
     @property
     def handler_name(self) -> str:
@@ -228,7 +254,20 @@ class _Seat:
             effects.append(f"product_event_{self.product_step.funnel}_{self.product_step.step}")
         if self.annotation:
             effects.append("annotation")
+        if self.security_signal is not None:
+            effects.append(f"security_signal_{self.security_signal}")
         return "record_" + "_and_".join(effects)
+
+
+def _consent_revocation_subject_key(payload: ConsentLifecycleTelemetryPayload) -> str:
+    """The pseudonymous subject key for a consent-revocation signal.
+
+    The subject is the patient whose grant was withdrawn: an anomaly on this
+    signal is a patient revoking in bulk, which is the event the detector exists
+    to surface. Hashed through the shared pseudonym scheme - the raw reference is
+    never written to ``observability_security_signals``.
+    """
+    return actor_key(ACTOR_KIND_PATIENT, payload.patient_id)
 
 
 def _seats(*, annotation_enabled: bool) -> tuple[_Seat, ...]:
@@ -251,11 +290,18 @@ def _seats(*, annotation_enabled: bool) -> tuple[_Seat, ...]:
     seat at all (a no-effect handler would write a ledger row naming no effect),
     while ``prescription.approved`` keeps its funnel-step seat with the flag
     dropped - the gate moves nothing but the gate.
+
+    Security signals are added for events that are already in BUSINESS_EVENT_METRICS
+    to avoid duplicate handler registrations (the ledger is keyed by event_id alone).
     """
     steps = {step.event_type: step for step in product_steps()}
     event_types = set(BUSINESS_EVENT_METRICS) | set(steps)
     if annotation_enabled:
         event_types |= set(ANNOTATION_EVENT_MIRRORS)
+    # Security signal kinds for events that are already in BUSINESS_EVENT_METRICS
+    security_signals: dict[str, str] = {
+        EVENT_CONSENT_REVOKED: "consent_revocation",
+    }
     return tuple(
         _Seat(
             event_type=event_type,
@@ -263,6 +309,7 @@ def _seats(*, annotation_enabled: bool) -> tuple[_Seat, ...]:
             business_metric=BUSINESS_EVENT_METRICS.get(event_type),
             product_step=steps.get(event_type),
             annotation=annotation_enabled and event_type in ANNOTATION_EVENT_MIRRORS,
+            security_signal=security_signals.get(event_type),
         )
         for event_type in sorted(event_types)
     )
@@ -296,6 +343,7 @@ def _register_seat(registry: HandlerRegistry, seat: _Seat) -> None:
     business_metric = seat.business_metric
     product_step = seat.product_step
     annotation = seat.annotation
+    security_signal = seat.security_signal
 
     async def handler(envelope: Envelope[BaseModel]) -> None:
         async def _impl(connection: AsyncConnection, payload: BaseModel) -> None:
@@ -315,6 +363,13 @@ def _register_seat(registry: HandlerRegistry, seat: _Seat) -> None:
                     trace_id=annotation_trace_id(),
                     occurred_at=envelope.occurred_at,
                 )
+            if security_signal is not None:
+                # ``consent.revoked`` is the only seat-borne signal, and its
+                # mirror is the consent lifecycle shape.
+                subject_key = _consent_revocation_subject_key(
+                    cast("ConsentLifecycleTelemetryPayload", payload)
+                )
+                await accumulate_security_signal(connection, envelope, security_signal, subject_key)
 
         await run_handler(
             envelope,
@@ -518,3 +573,165 @@ def register_handlers(registry: HandlerRegistry) -> None:
         )
 
     registry.register(EVENT_INTAKE_DOCTOR_ASSIGNED, record_care_attribution)
+
+    # Security signals (#777). One category the ticket names has no producer
+    # event to consume, so it is deliberately absent here rather than faked
+    # from another event:
+    # - Rate-limit responses: ``app/gateway/rate_limit.py`` answers 429 with no
+    #   event, and ``http_counter`` folds every status into 2xx/3xx/4xx/5xx, so
+    #   there is nothing to consume. It needs its own producer before it can have
+    #   a consumer.
+    # Operator MFA failures have a producer since #778 (T17): see
+    # ``record_operator_mfa_failure_signal`` below.
+    async def record_auth_failure_signal(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``patient.auth_failed``: increment the auth_failure security signal.
+
+        Subject is the identity (patient or operator) that failed auth. The identity
+        is hashed to a pseudonymous key; no phone number or free text is stored.
+        """
+
+        async def _impl(
+            connection: AsyncConnection, payload: PatientAuthFailedTelemetryPayload
+        ) -> None:
+            subject_key = (
+                actor_key(ACTOR_KIND_PATIENT, payload.identity_id)
+                if payload.identity_id is not None
+                else ""
+            )
+            await accumulate_security_signal(connection, envelope, "auth_failure", subject_key)
+
+        await run_handler(
+            envelope,
+            PatientAuthFailedTelemetryPayload,
+            _impl,
+            "record_auth_failure_signal",
+            OBSERVABILITY_SCHEMA,
+        )
+
+    registry.register(EVENT_PATIENT_AUTH_FAILED, record_auth_failure_signal)
+
+    async def record_otp_failure_signal(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``otp.failed``: increment otp_lockout or otp_failure.
+
+        ``otp.failed`` has two emitters (IAM registry §4.2). ``reason="lockout"``
+        is the brute-force trip - the phone is now unusable for OTP - so it is a
+        *lockout* signal. ``reason="delivery"`` is the SMS path exhausting its
+        retries - an operational *failure*, not an attack. Keeping them apart
+        lets the detector alert on lockout bursts without drowning them in SMS
+        outages, which is why the ticket says "OTP failures and lockouts".
+
+        Subject is the identity in both cases, hashed to a pseudonymous key; the
+        phone number and the OTP value never reach ``observability_security_signals``.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: OtpFailedTelemetryPayload) -> None:
+            signal_kind = "otp_lockout" if payload.reason == "lockout" else "otp_failure"
+            subject_key = actor_key(ACTOR_KIND_PATIENT, payload.identity_id)
+            await accumulate_security_signal(connection, envelope, signal_kind, subject_key)
+
+        await run_handler(
+            envelope,
+            OtpFailedTelemetryPayload,
+            _impl,
+            "record_otp_failure_signal",
+            OBSERVABILITY_SCHEMA,
+        )
+
+    registry.register(EVENT_OTP_FAILED, record_otp_failure_signal)
+
+    async def record_operator_mfa_failure_signal(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``operator.mfa_failed``: count the failure, and the lockout.
+
+        Every wrong operator TOTP code increments ``operator_mfa_failure``.
+        ``reason="lockout"`` is the failure that crossed the threshold, so it
+        also increments ``operator_mfa_lockout`` - a separate signal the
+        detector can alert on without counting every bad code. Subject is the
+        operator identity hashed to a pseudonymous key using the identity
+        (patient) namespace: operator profiles key the same ``iam_identities``
+        ids and the attribution vocabulary has no operator kind, so the one-way
+        hash still never names the operator. The TOTP code, secret, phone and
+        lockout lift time never reach ``observability_security_signals``.
+        """
+
+        async def _impl(
+            connection: AsyncConnection, payload: OperatorMfaFailedTelemetryPayload
+        ) -> None:
+            subject_key = actor_key(ACTOR_KIND_PATIENT, payload.identity_id)
+            await accumulate_security_signal(
+                connection, envelope, "operator_mfa_failure", subject_key
+            )
+            if payload.reason == "lockout":
+                await accumulate_security_signal(
+                    connection, envelope, "operator_mfa_lockout", subject_key
+                )
+
+        await run_handler(
+            envelope,
+            OperatorMfaFailedTelemetryPayload,
+            _impl,
+            "record_operator_mfa_failure_signal",
+            OBSERVABILITY_SCHEMA,
+        )
+
+    registry.register(EVENT_OPERATOR_MFA_FAILED, record_operator_mfa_failure_signal)
+
+    async def record_record_denial_signal(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``record.denied``: increment the record_denial security signal.
+
+        Subject is the actor the gate turned away. ``actor_type`` is the health
+        schema's counterparty kind - ``patient``, ``doctor``, ``lab`` or
+        ``chemist``. Only patient and doctor references belong to the attribution
+        vocabulary (``ActorKind``); a lab or chemist reference is a partner
+        account id in a different id space, so it is bucketed under the empty
+        subject key rather than hashed as a doctor and colliding with a doctor of
+        the same serial. The denial's scope and reason never reach the signal.
+        """
+
+        async def _impl(connection: AsyncConnection, payload: RecordDeniedTelemetryPayload) -> None:
+            if payload.actor_type == ACTOR_KIND_PATIENT:
+                subject_key = actor_key(ACTOR_KIND_PATIENT, payload.actor_id)
+            elif payload.actor_type == ACTOR_KIND_DOCTOR:
+                subject_key = actor_key(ACTOR_KIND_DOCTOR, payload.actor_id)
+            else:
+                subject_key = ""
+            await accumulate_security_signal(connection, envelope, "record_denial", subject_key)
+
+        await run_handler(
+            envelope,
+            RecordDeniedTelemetryPayload,
+            _impl,
+            "record_record_denial_signal",
+            OBSERVABILITY_SCHEMA,
+        )
+
+    registry.register(EVENT_RECORD_DENIED, record_record_denial_signal)
+
+    async def record_prompt_injection_signal(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``ai_egress.prompt_injection_detected``: count the finding.
+
+        The producer sheds the transcript and matched text before publishing, so
+        the payload carries categories and a score only. This handler re-validates
+        through the mirror and records one minute-granular ``prompt_injection``
+        signal with an EMPTY subject key: the payload deliberately names no actor,
+        so the signal is an anonymous platform count rather than a per-patient
+        trail.
+        """
+
+        async def _impl(
+            connection: AsyncConnection,
+            payload: PromptInjectionDetectedTelemetryPayload,
+        ) -> None:
+            del payload
+            await accumulate_security_signal(
+                connection, envelope, SECURITY_SIGNAL_PROMPT_INJECTION, ""
+            )
+
+        await run_handler(
+            envelope,
+            PromptInjectionDetectedTelemetryPayload,
+            _impl,
+            "record_prompt_injection_signal",
+            OBSERVABILITY_SCHEMA,
+        )
+
+    registry.register(EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED, record_prompt_injection_signal)

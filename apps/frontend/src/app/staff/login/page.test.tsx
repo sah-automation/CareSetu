@@ -69,7 +69,10 @@ const mockResumeSession = vi.fn();
 
 function mockSession(roles: string[] | null) {
   vi.mocked(useAuth).mockReturnValue({
-    user: roles === null ? null : { id: 1, phone: "+911234567890", roles },
+    user:
+      roles === null
+        ? null
+        : { id: 1, phone: "+911234567890", roles, tier: null },
     selectedRole: null,
     switchRole: vi.fn(),
     logout: vi.fn(),

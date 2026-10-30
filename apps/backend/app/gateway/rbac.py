@@ -21,6 +21,9 @@ from app.gateway.principal import Principal
 # widening access.
 KNOWN_SCOPE_ROLES = ("patient", "partner", "operator")
 
+#: The operator authority tier that admits admin-only routes (spec #761).
+ADMIN_TIER = "admin"
+
 
 def resolve_scope_roles(scope: str) -> tuple[str, ...]:
     """Map a token's ``scope`` claim to the ``Principal`` roles.
@@ -96,4 +99,22 @@ async def require_partner(request: Request) -> Principal:
         raise AuthenticationRequiredError("no valid session on a protected route")
     if "partner" not in principal.roles:
         raise InsufficientScopeError("the partner role is required for this route")
+    return principal
+
+
+async def require_admin(request: Request) -> Principal:
+    """FastAPI dependency: admit only an authenticated admin-tier operator.
+
+    Admin-only routes require the operator role AND the ``admin`` tier. An
+    anonymous caller is refused 401; an authenticated operator on the non-admin
+    tier, a patient/partner caller, and a token whose tier is missing or unknown
+    are all refused 403 through the shared error envelope (spec #761: missing or
+    unknown tiers fail admin routes closed). Existing operator reads and alert
+    acknowledgements stay on ``require_operator``.
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        raise AuthenticationRequiredError("no valid session on a protected route")
+    if "operator" not in principal.roles or principal.tier != ADMIN_TIER:
+        raise InsufficientScopeError("the admin tier is required for this route")
     return principal

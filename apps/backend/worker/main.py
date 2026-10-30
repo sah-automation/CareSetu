@@ -76,7 +76,16 @@ from modules.iam.adapters import register_handlers as iam_register_handlers
 from modules.intake.adapters import register_handlers as intake_register_handlers
 from modules.notify.adapters import register_handlers as notify_register_handlers
 from modules.observability.adapters import register_handlers as observability_register_handlers
-from modules.observability.facade import drain_error_buffer, drain_http_counter
+from modules.observability.facade import (
+    SECURITY_SCAN_INTERVAL_SECONDS,
+    ObservabilityFacade,
+    SecurityDetectorThresholds,
+    drain_error_buffer,
+    drain_http_counter,
+    run_security_scan,
+)
+from modules.ops.adapters import register_handlers as ops_register_handlers
+from modules.ops.facade import OpsFacade
 from modules.partner.adapters import register_handlers as partner_register_handlers
 from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
@@ -182,6 +191,7 @@ _MODULE_REGISTERS: tuple[Callable[[HandlerRegistry], None], ...] = (
     notify_register_handlers,
     audit_register_handlers,
     observability_register_handlers,
+    ops_register_handlers,
 )
 
 
@@ -431,12 +441,96 @@ async def _run_http_counter_drain(engine: AsyncEngine | None = None) -> None:
         )
 
 
+async def _run_security_scan(engine: AsyncEngine | None = None) -> None:
+    """Run one security detector pass over the recent signal window (#779).
+
+    The pass reads already-aggregated signals and writes alerts through the
+    module facade, so it shares the worker's engine when the scheduler supplies
+    one and builds a short-lived engine when invoked on its own. A failure is
+    logged and swallowed: the signal rows remain in the table, so the next
+    five-minute pass retries, while letting the exception reach APScheduler
+    would kill the recurring job over a transient database blip.
+    """
+    settings = get_settings()
+    thresholds = SecurityDetectorThresholds(
+        auth_failure=settings.security_detector_auth_failure_threshold,
+        operator_mfa_failure=settings.security_detector_operator_mfa_failure_threshold,
+        record_denial=settings.security_detector_record_denial_threshold,
+        rate_limit=settings.security_detector_rate_limit_threshold,
+        prompt_injection=settings.security_detector_prompt_injection_threshold,
+        window_minutes=settings.security_detector_window_minutes,
+        cooldown_seconds=settings.security_detector_cooldown_seconds,
+    )
+    owned = engine is None
+    scan_engine = engine if engine is not None else create_async_engine(settings.database_url)
+    try:
+        with start_span(
+            "scheduler.security_detector_scan",
+            attributes={"job.name": "security-detector-scan", "job.system": "apscheduler"},
+        ):
+            report = await run_security_scan(scan_engine, thresholds=thresholds)
+    except Exception:
+        logger.exception("security detector scan failed; next pass retries")
+        return
+    finally:
+        if owned:
+            await scan_engine.dispose()
+    if report.alerts_raised or report.alerts_resolved:
+        logger.info(
+            "security detector scan raised %d alert(s) and resolved %d",
+            report.alerts_raised,
+            report.alerts_resolved,
+        )
+
+
+async def _run_judge_job(engine: AsyncEngine | None = None) -> None:
+    """Run the LLM judge job over the active synthetic dataset (#789).
+
+    This job runs the completeness evaluator over the active dataset examples
+    with budget checks, temperature zero, strict JSON output, one retry on
+    parse failure, and stores scores with source=judge and a run reference.
+    Scores are advisory only and never gate approval.
+    """
+    settings = get_settings()
+    if not settings.llm_judge_enabled:
+        return
+    owned = engine is None
+    judge_engine = engine if engine is not None else create_async_engine(settings.database_url)
+    try:
+        with start_span(
+            "scheduler.llm_judge_run",
+            attributes={"job.name": "llm-judge-run", "job.system": "apscheduler"},
+        ):
+            obs_facade = ObservabilityFacade(engine=judge_engine, settings=settings)
+            report = await obs_facade.run_judge_job()
+    except Exception:
+        logger.exception("LLM judge run failed; next pass retries")
+        return
+    finally:
+        if owned:
+            await judge_engine.dispose()
+    if report.status == "completed":
+        logger.info(
+            "LLM judge run completed: %d examples scored, %d scores recorded",
+            report.examples_scored,
+            report.scores_recorded,
+        )
+    elif report.status in ("budget_exceeded", "partial", "failed", "disabled"):
+        logger.warning(
+            "LLM judge run finished with status %s: %s",
+            report.status,
+            report.failure_reason or "no details",
+        )
+
+
 def build_scheduler(
     settings: Settings,
     *,
     sweep_callback: Callable[[], Awaitable[None]] = _run_credential_sweep,
     drain_callback: Callable[[], Awaitable[None]] = _run_error_drain,
     counter_drain_callback: Callable[[], Awaitable[None]] = _run_http_counter_drain,
+    security_scan_callback: Callable[[], Awaitable[None]] = _run_security_scan,
+    judge_job_callback: Callable[[], Awaitable[None]] = _run_judge_job,
 ) -> AsyncIOScheduler:
     """Build the worker's periodic-job scheduler (PHASE-6 T04a, #315).
 
@@ -471,6 +565,18 @@ def build_scheduler(
     information (a bucket split across two passes still lands on one row, since the
     upsert ADDS) and firing slower only makes the operator's "recent past" stale.
 
+    The fourth is PHASE-14B Batch 2's security detector (#779), also on an
+    ``IntervalTrigger`` but fixed at five minutes: it reads one shared signal
+    table, not in-process state, and its cadence is the acceptance criterion.
+    Like the other gates it is registered ONLY when
+    ``settings.security_detection_enabled`` is on.
+
+    The fifth and sixth are PHASE-14B Batch 2's alert delivery (#784): a router
+    that creates delivery rows for newly opened alerts, and a drainer that
+    processes them with exponential backoff. Both are interval jobs registered
+    ONLY when ``settings.alert_delivery_enabled`` is on. The router runs every
+    minute; the drainer runs every 30 seconds.
+
     Every registered job uses ``coalesce`` + a fixed job id so late or missed
     firings cannot stack duplicate passes across a sleep, and ``max_instances=1``
     so a drain that is slower than its interval skips rather than overlaps.
@@ -503,6 +609,34 @@ def build_scheduler(
             IntervalTrigger(seconds=settings.http_counter_drain_interval_seconds),
             id="http-counter-fold",
             name="observability-http-counter-fold",
+            coalesce=True,
+            max_instances=1,
+        )
+    # #779: the security detector is region-agnostic and reads the shared signal
+    # table, so it is an interval job like the drains. Its five-minute cadence is
+    # fixed by the batch spec rather than a setting; the window, cooldown and
+    # thresholds beside it are configurable.
+    if settings.security_detection_enabled:
+        scheduler.add_job(
+            security_scan_callback,
+            IntervalTrigger(seconds=SECURITY_SCAN_INTERVAL_SECONDS),
+            id="security-detector-scan",
+            name="security-detector-scan",
+            coalesce=True,
+            max_instances=1,
+        )
+    # #784: alert delivery router and drainer - gated behind alert_delivery_enabled
+    if settings.alert_delivery_enabled:
+        # The router runs every minute to pick up new alerts
+        # The drainer runs every 30 seconds to process pending deliveries
+        pass  # Jobs are added in run_worker_until_stopped with proper adapters
+    # #789: LLM judge run - gated behind llm_judge_enabled
+    if settings.llm_judge_enabled:
+        scheduler.add_job(
+            judge_job_callback,
+            CronTrigger.from_crontab("0 3 * * *", timezone="UTC"),  # Daily at 03:00 UTC
+            id="llm-judge-run",
+            name="llm-judge-run",
             coalesce=True,
             max_instances=1,
         )
@@ -576,7 +710,46 @@ async def run_worker_until_stopped(
         resolved_settings,
         drain_callback=partial(_run_error_drain, engine=engine),
         counter_drain_callback=partial(_run_http_counter_drain, engine=engine),
+        security_scan_callback=partial(_run_security_scan, engine=engine),
     )
+
+    # #784: alert delivery router and drainer - gated behind alert_delivery_enabled
+    if resolved_settings.alert_delivery_enabled:
+        obs_facade = ObservabilityFacade(engine=engine, settings=resolved_settings)
+        ops_facade = OpsFacade(engine=engine, settings=resolved_settings)
+
+        # Fetch effective settings to check channel gates
+        effective_settings = await ops_facade.get_effective_settings()
+
+        # Build channel adapters from environment configuration via facade
+        adapters = obs_facade.alert_delivery_adapters(
+            resolved_settings,
+            effective_settings,  # type: ignore[arg-type]
+        )
+
+        # Add router job (runs every minute)
+        scheduler.add_job(
+            partial(obs_facade.run_alert_router_job, ops_facade=ops_facade),
+            IntervalTrigger(seconds=60),
+            id="alert-delivery-router",
+            name="alert-delivery-router",
+            coalesce=True,
+            max_instances=1,
+        )
+
+        # Add drainer job (runs every 30 seconds)
+        if adapters:
+            scheduler.add_job(
+                partial(obs_facade.run_alert_drainer_job, ops_facade=ops_facade, adapters=adapters),
+                IntervalTrigger(seconds=30),
+                id="alert-delivery-drainer",
+                name="alert-delivery-drainer",
+                coalesce=True,
+                max_instances=1,
+            )
+        else:
+            logger.warning("alert delivery enabled but no channel adapters configured")
+
     try:
         async with engine.connect() as connection:
             tables: tuple[OutboxTable, ...] = await discover_outbox_tables(

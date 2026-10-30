@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -31,6 +32,10 @@ from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
     InvalidAccessTokenError as InvalidAccessTokenError,
 )
+from modules.iam.domain.mfa_lockout import (
+    DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
+    DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+)
 from modules.iam.domain.otp import (
     OTP_TTL_SECONDS as OTP_TTL_SECONDS,
 )
@@ -48,6 +53,9 @@ from modules.iam.identity_facade import (
 )
 from modules.iam.identity_facade import (
     OperatorInvitedResult as OperatorInvitedResult,
+)
+from modules.iam.identity_facade import (
+    OperatorSummary as OperatorSummary,
 )
 from modules.iam.identity_facade import (
     PartnerCredentialCreatedResult as PartnerCredentialCreatedResult,
@@ -132,6 +140,8 @@ class IamFacade:
         access_token_ttl_seconds: int = 900,
         refresh_token_ttl_seconds: int = 2_592_000,
         mfa_secret_key: str = "",
+        operator_mfa_lockout_threshold: int = DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+        operator_mfa_lockout_seconds: int = DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
         media_store: ProfileMediaStore | None = None,
         photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
     ) -> None:
@@ -166,6 +176,8 @@ class IamFacade:
             access_token_ttl_seconds=access_token_ttl_seconds,
             refresh_token_ttl_seconds=refresh_token_ttl_seconds,
             mfa_secret_key=mfa_secret_key,
+            operator_mfa_lockout_threshold=operator_mfa_lockout_threshold,
+            operator_mfa_lockout_seconds=operator_mfa_lockout_seconds,
         )
 
     # -- Identity delegation (ADR-0006, ticket #169) -----------------------
@@ -190,16 +202,70 @@ class IamFacade:
         self,
         phone: str,
         invited_by_identity_id: int,
+        tier: str = "operator",
         connection: AsyncConnection | None = None,
     ) -> OperatorInvitedResult:
         """Invite a new operator (T07, #250): credentialed, MFA-bound at first login.
 
         Delegated to ``IdentityFacade``. The invited identity is created with an
         ``Active`` ``operator`` role grant, so an operator-scoped session is
-        minted only after MFA completes.
+        minted only after MFA completes. ``tier`` is the authority the invite
+        grants and defaults to the non-admin ``operator`` tier (spec #761).
         """
         return await self._identity.create_operator_account(
-            phone, invited_by_identity_id=invited_by_identity_id, connection=connection
+            phone,
+            invited_by_identity_id=invited_by_identity_id,
+            tier=tier,
+            connection=connection,
+        )
+
+    async def list_operators(
+        self, connection: AsyncConnection | None = None
+    ) -> list[OperatorSummary]:
+        """List operators with masked phones for the admin view (spec #761, #768).
+
+        Delegated to ``IdentityFacade``, which joins each operator profile to
+        its identity and MFA row and masks the phone before returning.
+        """
+        return await self._identity.list_operators(connection=connection)
+
+    async def update_operator_tier(
+        self,
+        identity_id: int,
+        tier: Literal["admin", "operator"],
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's tier (promote or demote).
+
+        Delegated to ``IdentityFacade``. Demotion and self-demotion are guarded:
+        - An operator cannot change their own tier.
+        - The last active admin cannot be demoted.
+        - Every change revokes the operator's active sessions and emits an
+          ``operator.tier_changed`` audit event.
+        """
+        return await self._identity.update_operator_tier(
+            identity_id, tier, actor_identity_id, connection=connection
+        )
+
+    async def update_operator_active(
+        self,
+        identity_id: int,
+        is_active: bool,
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's active state (deactivate or reactivate).
+
+        Delegated to ``IdentityFacade``. Deactivation and self-deactivation are guarded:
+        - An operator cannot change their own active state.
+        - The last active admin cannot be deactivated.
+        - Deactivation revokes the operator's active sessions and blocks login;
+          reactivation restores access.
+        - Every change emits an ``operator.active_changed`` audit event.
+        """
+        return await self._identity.update_operator_active(
+            identity_id, is_active, actor_identity_id, connection=connection
         )
 
     async def save_patient_profile(

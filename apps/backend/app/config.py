@@ -10,6 +10,11 @@ import os
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from modules.iam.domain.mfa_lockout import (
+    DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
+    DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+)
+
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
 DEFAULT_APP_ENVIRONMENT = "production"
 # The app's human-maintained version (PHASE-14A A4, #696): the default Sentry
@@ -98,6 +103,23 @@ DEFAULT_PROFILE_MEDIA_TIMEOUT_SECONDS = 30.0
 # facade, so raising ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` moves both limits
 # together. Nothing else may re-declare the number.
 DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+# CSP report-only (PHASE-14B Batch 2, #775): hardened CSP on API responses and
+# report-only CSP on the frontend. The report URI points to the backend collector
+# endpoint. When unset, reporting directives are omitted.
+DEFAULT_CSP_REPORT_ONLY_ENABLED = False
+DEFAULT_CSP_REPORT_URI = ""
+# CSP report collector (PHASE-14B Batch 2, #776): public, rate-limited endpoint
+# accepting both legacy (report-uri) and modern (report-to) CSP report formats.
+# All limits are configurable so a deployment can tune them without code changes
+# (coding-standards §9.1).
+DEFAULT_CSP_COLLECTOR_MAX_REPORT_BYTES = 16 * 1024  # 16 KB
+DEFAULT_CSP_COLLECTOR_MAX_DIRECTIVE_LENGTH = 100
+DEFAULT_CSP_COLLECTOR_MAX_DISPOSITION_LENGTH = 30
+DEFAULT_CSP_COLLECTOR_MAX_BLOCKED_SOURCE_LENGTH = 255
+DEFAULT_CSP_COLLECTOR_MAX_DOCUMENT_URI_LENGTH = 255
+DEFAULT_CSP_COLLECTOR_RATE_LIMIT_MAX_REQUESTS = 60
+DEFAULT_CSP_COLLECTOR_RATE_LIMIT_WINDOW_SECONDS = 60
+DEFAULT_CSP_COLLECTOR_MAX_BUCKETS = 1024
 # Rejected-partner re-submission throttle (PHASE-5 T09, #253): the max
 # re-submission rounds a rejected partner may open before the operator queue is
 # protected, and the cooldown (days) after which the budget refreshes. Queue
@@ -165,6 +187,12 @@ DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""
 DEFAULT_AI_FALLBACK_API_KEY = ""
 DEFAULT_AI_FALLBACK_MODEL = ""
+# LLM judge run (PHASE-14B Batch 2, #789): defaults for the synthetic judge.
+DEFAULT_LLM_JUDGE_ENABLED = False
+DEFAULT_LLM_JUDGE_MODEL = "gpt-4o-mini"
+DEFAULT_LLM_JUDGE_BUDGET_PAISE = 50_000
+DEFAULT_LLM_JUDGE_MAX_EXAMPLES = 100
+DEFAULT_LLM_JUDGE_PROMPT_VERSION = "v1"
 # Observability gates (PHASE-14A A5, #693; plan-phase14 §4, Appendix A.2):
 # every vendor gate is additive and disabled by default so local dev, tests and
 # CI are unchanged until one is set. Nothing reads these yet - later batch
@@ -237,6 +265,29 @@ DEFAULT_OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS = 900
 DEFAULT_OBSERVABILITY_COST_OUTLIER_MULTIPLE = Decimal("3")
 DEFAULT_OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS = 3
 DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT = 1
+# Security detector (PHASE-14B Batch 2, #779): a worker scan over the recent
+# ``observability_security_signals`` rows. Off until a deployment opts in, like
+# every other new safety behavior in this batch. The window bounds how much
+# history one pass counts; the cooldown stops a cleared-then-recurring condition
+# from raising a second alert immediately; each threshold is the count within the
+# window that raises that signal kind's alert. Every value is a limit an operator
+# may need to tune, so every value is configuration (coding-standards §9.1).
+DEFAULT_SECURITY_DETECTION_ENABLED = False
+DEFAULT_SECURITY_DETECTOR_WINDOW_MINUTES = 15
+DEFAULT_SECURITY_DETECTOR_COOLDOWN_SECONDS = 1800
+DEFAULT_SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD = 20
+DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD = 5
+DEFAULT_SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD = 10
+DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD = 50
+DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD = 10
+# Security summary (PHASE-14B Batch 2, #781): the window for the operator
+# security posture summary read. Configuration per coding-standards §9.1.
+DEFAULT_SECURITY_SUMMARY_WINDOW_MINUTES = 5
+# Prompt-injection heuristics (PHASE-14B Batch 2, #780): advisory text checks on
+# the transcript immediately before it leaves for the structuring provider. Off
+# until a deployment opts in, like every other new safety behavior in this
+# batch; a finding is recorded and the pipeline proceeds.
+DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED = False
 # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the AES-256-GCM key
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
@@ -309,6 +360,26 @@ class Settings:
     # the Render web service's env vars (free compute covers web services
     # only - background workers require a paid instance).
     dispatcher_in_process_enabled: bool = False
+    # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings read
+    # caches resolved values in-process for this many seconds so a polling
+    # operator surface does not re-query ``ops_settings`` on every call. Reflects
+    # the "effective values cached for 30s" contract; positive integer.
+    settings_cache_ttl_seconds: int = 30
+    # CSP report-only (PHASE-14B Batch 2, #775): hardened CSP on API responses and
+    # report-only CSP on the frontend. The report URI points to the backend collector
+    # endpoint. When unset, reporting directives are omitted.
+    csp_report_only_enabled: bool = DEFAULT_CSP_REPORT_ONLY_ENABLED
+    csp_report_uri: str = DEFAULT_CSP_REPORT_URI
+    # CSP report collector (PHASE-14B Batch 2, #776): public, rate-limited endpoint
+    # accepting both legacy (report-uri) and modern (report-to) CSP report formats.
+    csp_collector_max_report_bytes: int = DEFAULT_CSP_COLLECTOR_MAX_REPORT_BYTES
+    csp_collector_max_directive_length: int = DEFAULT_CSP_COLLECTOR_MAX_DIRECTIVE_LENGTH
+    csp_collector_max_disposition_length: int = DEFAULT_CSP_COLLECTOR_MAX_DISPOSITION_LENGTH
+    csp_collector_max_blocked_source_length: int = DEFAULT_CSP_COLLECTOR_MAX_BLOCKED_SOURCE_LENGTH
+    csp_collector_max_document_uri_length: int = DEFAULT_CSP_COLLECTOR_MAX_DOCUMENT_URI_LENGTH
+    csp_collector_rate_limit_max_requests: int = DEFAULT_CSP_COLLECTOR_RATE_LIMIT_MAX_REQUESTS
+    csp_collector_rate_limit_window_seconds: int = DEFAULT_CSP_COLLECTOR_RATE_LIMIT_WINDOW_SECONDS
+    csp_collector_max_buckets: int = DEFAULT_CSP_COLLECTOR_MAX_BUCKETS
     # Encrypted credential-document store (PHASE-5 T06, #251): local root and
     # the base64 AES-256 key. Root defaults to a repo-local ``var/`` dir; the
     # key is empty unless supplied by the environment (the store derives an
@@ -366,6 +437,13 @@ class Settings:
     # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
     # refuses to verify without it.
     iam_mfa_secret_key: str = ""
+    # Consecutive wrong operator TOTP codes before login locks, and how long
+    # the lock lasts (PHASE-14B T17, #778). The defaults live in
+    # ``modules.iam.domain.mfa_lockout`` so the policy and the environment share
+    # one source; override with ``IAM_OPERATOR_MFA_LOCKOUT_THRESHOLD`` /
+    # ``IAM_OPERATOR_MFA_LOCKOUT_SECONDS`` (listed in ``.env.example``).
+    iam_operator_mfa_lockout_threshold: int = DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD
+    iam_operator_mfa_lockout_seconds: int = DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS
     # Langfuse AI observability (plan-phase7-tracing-prep): the SDK keys for LLM
     # call tracing, consumed by the AI gateway port from Phase 7 onward. Both
     # empty by default = tracing disabled, the app boots cleanly without an
@@ -374,6 +452,22 @@ class Settings:
     langfuse_secret_key: str = ""
     langfuse_host: str = DEFAULT_LANGFUSE_HOST
     langfuse_timeout_seconds: float = DEFAULT_LANGFUSE_TIMEOUT_SECONDS
+    # Alert delivery (PHASE-14B Batch 2, #784): Slack webhook and SMTP credentials
+    # for notification channels. These are secrets - set in deployment environment,
+    # never committed. Empty by default = channel not configured.
+    slack_webhook_url: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_to: str = ""
+    smtp_use_tls: bool = True
+    # Alert delivery (PHASE-14B Batch 2, #784): delivery behavior tuning
+    alert_delivery_max_attempts: int = 5
+    alert_delivery_base_backoff_seconds: int = 30
+    alert_delivery_max_backoff_seconds: int = 3600
+    alert_delivery_console_base_url: str = ""
     # EXT-002 LLM/AI gateway (PHASE-7 T05, #348): provider selection is a config
     # knob (mock is the fail-closed default); the real provider key/base URL/
     # model. ``__post_init__`` refuses a real provider in dev/test unless demo
@@ -494,6 +588,31 @@ class Settings:
     observability_provider_rate_limit_alert_count: int = (
         DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT
     )
+    # Security detector (PHASE-14B Batch 2, #779): the scan gate and its
+    # thresholds. Off by default so deploying this batch changes no behavior
+    # until the operator opts in.
+    security_detection_enabled: bool = DEFAULT_SECURITY_DETECTION_ENABLED
+    security_detector_window_minutes: int = DEFAULT_SECURITY_DETECTOR_WINDOW_MINUTES
+    security_detector_cooldown_seconds: int = DEFAULT_SECURITY_DETECTOR_COOLDOWN_SECONDS
+    security_detector_auth_failure_threshold: int = DEFAULT_SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD
+    security_detector_operator_mfa_failure_threshold: int = (
+        DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD
+    )
+    security_detector_record_denial_threshold: int = (
+        DEFAULT_SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD
+    )
+    security_detector_rate_limit_threshold: int = DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD
+    security_detector_prompt_injection_threshold: int = (
+        DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD
+    )
+    # The producer-side half of the prompt-injection visibility (#780): when on,
+    # the intake pipeline screens the transcript before the structuring egress
+    # and emits a PHI-free finding. Off by default; the detector threshold above
+    # only governs the alert scan over whatever signals arrive.
+    prompt_injection_heuristics_enabled: bool = DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED
+    # Security summary (PHASE-14B Batch 2, #781): the window for the operator
+    # security posture summary read. Configuration per coding-standards §9.1.
+    security_summary_window_minutes: int = DEFAULT_SECURITY_SUMMARY_WINDOW_MINUTES
     # Batch-3 observability feature gates (#753): additive and disabled by
     # default, one gate per feature that shipped in this batch, so a deployment
     # opts in per feature and local dev / tests / CI run without them. The A5
@@ -501,11 +620,24 @@ class Settings:
     # ``evaluation_enabled`` runs the #751 code-evaluator batch as part of the
     # daily Langfuse pull (``worker/langfuse_metrics.py``); with it off the
     # pull still runs and only the evaluators are skipped. ``annotation_queue_enabled``
-    # feeds the #752 doctor-review annotation queue from review-outcome events;
-    # with it off the outcome seats still record their funnel/business effects
-    # and only the annotation write is skipped (``modules.observability.adapters``).
+    # feeds the #752 doctor-review annotation queue from review-outcome events; with
+    # it off the outcome seats still record their funnel/business effects and only
+    # the annotation write is skipped (``modules.observability.adapters``).
     evaluation_enabled: bool = False
     annotation_queue_enabled: bool = False
+    # Alert delivery (PHASE-14B Batch 2, #784): durable delivery of alerts via
+    # Slack/email with retries and redelivery. Off by default so deploying this
+    # batch changes no behavior until the operator opts in.
+    alert_delivery_enabled: bool = False
+    # LLM judge run (PHASE-14B Batch 2, #789): runs the LLM judge over the active
+    # synthetic dataset with a budget cap, temperature zero, strict JSON output,
+    # one retry on parse failure, and scores stored with source judge and a run
+    # reference. Off by default; scores are advisory only.
+    llm_judge_enabled: bool = DEFAULT_LLM_JUDGE_ENABLED
+    llm_judge_model: str = DEFAULT_LLM_JUDGE_MODEL
+    llm_judge_budget_paise: int = DEFAULT_LLM_JUDGE_BUDGET_PAISE
+    llm_judge_max_examples: int = DEFAULT_LLM_JUDGE_MAX_EXAMPLES
+    llm_judge_prompt_version: str = DEFAULT_LLM_JUDGE_PROMPT_VERSION
 
     def __post_init__(self) -> None:
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
@@ -640,6 +772,8 @@ class Settings:
             raise ValueError("ai_circuit_breaker_threshold must be positive")
         if self.ai_monthly_budget_paise <= 0:
             raise ValueError("ai_monthly_budget_paise must be positive")
+        if self.settings_cache_ttl_seconds <= 0:
+            raise ValueError("settings_cache_ttl_seconds must be positive")
         if self.observability_rollup_max_dates <= 0:
             raise ValueError("observability_rollup_max_dates must be positive")
         if self.error_capture_max_records <= 0:
@@ -675,6 +809,36 @@ class Settings:
             # Zero refusals is the ABSENCE of the condition, not a mild form of
             # it; a threshold of zero would make the alert permanent.
             raise ValueError("observability_provider_rate_limit_alert_count must be positive")
+        if self.security_detector_window_minutes <= 0:
+            raise ValueError("security_detector_window_minutes must be positive")
+        if self.security_detector_cooldown_seconds <= 0:
+            raise ValueError("security_detector_cooldown_seconds must be positive")
+        if self.security_summary_window_minutes <= 0:
+            raise ValueError("security_summary_window_minutes must be positive")
+        for name, value in (
+            (
+                "security_detector_auth_failure_threshold",
+                self.security_detector_auth_failure_threshold,
+            ),
+            (
+                "security_detector_operator_mfa_failure_threshold",
+                self.security_detector_operator_mfa_failure_threshold,
+            ),
+            (
+                "security_detector_record_denial_threshold",
+                self.security_detector_record_denial_threshold,
+            ),
+            (
+                "security_detector_rate_limit_threshold",
+                self.security_detector_rate_limit_threshold,
+            ),
+            (
+                "security_detector_prompt_injection_threshold",
+                self.security_detector_prompt_injection_threshold,
+            ),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
         parse_ai_pricing_table(self.ai_pricing_table)
         if self.ai_circuit_breaker_cooldown_seconds <= 0:
             raise ValueError("ai_circuit_breaker_cooldown_seconds must be positive")
@@ -686,6 +850,10 @@ class Settings:
             raise ValueError("directory_max_results must be positive")
         if self.audit_retention_days < 0:
             raise ValueError("audit_retention_days must be zero or positive (0 = no expiry)")
+        if self.iam_operator_mfa_lockout_threshold < 1:
+            raise ValueError("iam_operator_mfa_lockout_threshold must be at least 1")
+        if self.iam_operator_mfa_lockout_seconds <= 0:
+            raise ValueError("iam_operator_mfa_lockout_seconds must be positive")
         if self.gateway_access_token_ttl_seconds <= 0:
             raise ValueError("gateway_access_token_ttl_seconds must be positive")
         if self.gateway_refresh_token_ttl_seconds <= 0:
@@ -974,6 +1142,7 @@ def get_settings() -> Settings:
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
         dispatcher_in_process_enabled=_env_bool("DISPATCHER_IN_PROCESS_ENABLED", False),
+        settings_cache_ttl_seconds=_env_int("SETTINGS_CACHE_TTL_SECONDS", 30),
         partner_artifact_root=os.environ.get(
             "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
         ),
@@ -1026,6 +1195,12 @@ def get_settings() -> Settings:
             "PARTNER_CREDENTIAL_SWEEP_CRON", DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON
         ),
         iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
+        iam_operator_mfa_lockout_threshold=_env_int(
+            "IAM_OPERATOR_MFA_LOCKOUT_THRESHOLD", DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD
+        ),
+        iam_operator_mfa_lockout_seconds=_env_int(
+            "IAM_OPERATOR_MFA_LOCKOUT_SECONDS", DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS
+        ),
         langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
         langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
         langfuse_host=os.environ.get("LANGFUSE_HOST", DEFAULT_LANGFUSE_HOST),
@@ -1119,6 +1294,62 @@ def get_settings() -> Settings:
             "OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT",
             DEFAULT_OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT,
         ),
+        security_detection_enabled=_env_bool(
+            "SECURITY_DETECTION_ENABLED", DEFAULT_SECURITY_DETECTION_ENABLED
+        ),
+        security_detector_window_minutes=_env_int(
+            "SECURITY_DETECTOR_WINDOW_MINUTES", DEFAULT_SECURITY_DETECTOR_WINDOW_MINUTES
+        ),
+        security_detector_cooldown_seconds=_env_int(
+            "SECURITY_DETECTOR_COOLDOWN_SECONDS", DEFAULT_SECURITY_DETECTOR_COOLDOWN_SECONDS
+        ),
+        security_detector_auth_failure_threshold=_env_int(
+            "SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_AUTH_FAILURE_THRESHOLD,
+        ),
+        security_detector_operator_mfa_failure_threshold=_env_int(
+            "SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_OPERATOR_MFA_FAILURE_THRESHOLD,
+        ),
+        security_detector_record_denial_threshold=_env_int(
+            "SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_RECORD_DENIAL_THRESHOLD,
+        ),
+        security_detector_rate_limit_threshold=_env_int(
+            "SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_RATE_LIMIT_THRESHOLD,
+        ),
+        security_detector_prompt_injection_threshold=_env_int(
+            "SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD",
+            DEFAULT_SECURITY_DETECTOR_PROMPT_INJECTION_THRESHOLD,
+        ),
+        prompt_injection_heuristics_enabled=_env_bool(
+            "PROMPT_INJECTION_HEURISTICS_ENABLED", DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED
+        ),
+        security_summary_window_minutes=_env_int(
+            "SECURITY_SUMMARY_WINDOW_MINUTES", DEFAULT_SECURITY_SUMMARY_WINDOW_MINUTES
+        ),
         evaluation_enabled=_env_bool("EVALUATION_ENABLED", False),
         annotation_queue_enabled=_env_bool("ANNOTATION_QUEUE_ENABLED", False),
+        alert_delivery_enabled=_env_bool("ALERT_DELIVERY_ENABLED", False),
+        # LLM judge run (PHASE-14B Batch 2, #789)
+        llm_judge_enabled=_env_bool("LLM_JUDGE_ENABLED", DEFAULT_LLM_JUDGE_ENABLED),
+        llm_judge_model=os.environ.get("LLM_JUDGE_MODEL", DEFAULT_LLM_JUDGE_MODEL),
+        llm_judge_budget_paise=_env_int("LLM_JUDGE_BUDGET_PAISE", DEFAULT_LLM_JUDGE_BUDGET_PAISE),
+        llm_judge_max_examples=_env_int("LLM_JUDGE_MAX_EXAMPLES", DEFAULT_LLM_JUDGE_MAX_EXAMPLES),
+        llm_judge_prompt_version=os.environ.get(
+            "LLM_JUDGE_PROMPT_VERSION", DEFAULT_LLM_JUDGE_PROMPT_VERSION
+        ),
+        slack_webhook_url=os.environ.get("SLACK_WEBHOOK_URL", ""),
+        smtp_host=os.environ.get("SMTP_HOST", ""),
+        smtp_port=_env_int("SMTP_PORT", 587),
+        smtp_username=os.environ.get("SMTP_USERNAME", ""),
+        smtp_password=os.environ.get("SMTP_PASSWORD", ""),
+        smtp_from=os.environ.get("SMTP_FROM", ""),
+        smtp_to=os.environ.get("SMTP_TO", ""),
+        smtp_use_tls=_env_bool("SMTP_USE_TLS", True),
+        alert_delivery_max_attempts=_env_int("ALERT_DELIVERY_MAX_ATTEMPTS", 5),
+        alert_delivery_base_backoff_seconds=_env_int("ALERT_DELIVERY_BASE_BACKOFF_SECONDS", 30),
+        alert_delivery_max_backoff_seconds=_env_int("ALERT_DELIVERY_MAX_BACKOFF_SECONDS", 3600),
+        alert_delivery_console_base_url=os.environ.get("ALERT_DELIVERY_CONSOLE_BASE_URL", ""),
     )

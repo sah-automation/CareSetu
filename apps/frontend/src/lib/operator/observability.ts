@@ -2239,3 +2239,406 @@ export async function fetchDeeplinks(
     "The API returned an unexpected observability deeplinks shape",
   );
 }
+
+// ------------------------------------------------ the security lens (#781)
+
+/** One security signal kind's recent count and status. */
+export interface SecuritySignalView {
+  signal_kind: string;
+  count_last_5m: number;
+  threshold: number | null;
+  alert_kind: string | null;
+  is_deferred: boolean;
+  deferred_reason: string | null;
+}
+
+/** One CSP directive's daily violation count. */
+export interface CspAggregateView {
+  directive: string;
+  disposition: string;
+  blocked_source: string;
+  count: number;
+}
+
+/**
+ * Operator security posture summary (PHASE-14B Batch 2, #781).
+ *
+ * Shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+ * prompt-injection counts, and webhook monitoring status.
+ */
+export interface SecuritySummary {
+  signals: SecuritySignalView[];
+  csp_aggregates: CspAggregateView[];
+  prompt_injection_count: number;
+  webhook_monitoring_status: string;
+  webhook_monitoring_reason: string;
+}
+
+function isSecuritySignalView(value: unknown): value is SecuritySignalView {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "signal_kind",
+      "count_last_5m",
+      "threshold",
+      "alert_kind",
+      "is_deferred",
+      "deferred_reason",
+    ])
+  );
+}
+
+function isCspAggregateView(value: unknown): value is CspAggregateView {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["directive", "disposition", "blocked_source", "count"])
+  );
+}
+
+function isSecuritySummary(value: unknown): value is SecuritySummary {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "signals",
+      "csp_aggregates",
+      "prompt_injection_count",
+      "webhook_monitoring_status",
+      "webhook_monitoring_reason",
+    ]) &&
+    isArrayOf(value.signals, isSecuritySignalView) &&
+    isArrayOf(value.csp_aggregates, isCspAggregateView)
+  );
+}
+
+/**
+ * Read the operator security posture summary (#781).
+ */
+export async function fetchSecurity(): Promise<SecuritySummary> {
+  const data = await request<unknown>(`${OBSERVABILITY_BASE}/security`);
+  return guardShape(
+    data,
+    isSecuritySummary,
+    "The API returned an unexpected security summary shape",
+  );
+}
+
+// ------------------------------------------------ the evaluation read (#794)
+
+/** One evaluation score for an operator read. */
+export interface EvaluationScoreRead {
+  evaluator: string;
+  observation_ref: string;
+  observation_kind: string;
+  source: string;
+  data_type: string;
+  value: number;
+  judge_run_ref: string | null;
+  score_date: string;
+  trace_id: string | null;
+  metadata: Record<string, unknown>;
+}
+
+/** Judge run progress for the operator read. */
+export interface JudgeRunProgress {
+  run_ref: string;
+  dataset_name: string;
+  dataset_version: number;
+  status: string;
+  budget_paise: number;
+  cost_paise: number;
+  started_at: string | null;
+  completed_at: string | null;
+  failure_reason: string | null;
+  example_count: number;
+  scored_count: number;
+  synthetic_only: boolean;
+}
+
+/** Agreement between judge and human for one evaluator. */
+export interface EvaluationAgreementRead {
+  evaluator: string;
+  count: number;
+  mean_absolute_error: number;
+  within_tolerance_share: number;
+  kappa: number | null;
+  tolerance: number;
+  data_type: string;
+  synthetic_only: boolean;
+  empty: boolean;
+}
+
+/** Active evaluation dataset version. */
+export interface EvaluationDatasetVersion {
+  id: number;
+  name: string;
+  version: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  example_count: number;
+  is_active: boolean;
+}
+
+/** Complete evaluation read response for operators. */
+export interface EvaluationReadResponse {
+  active_dataset: EvaluationDatasetVersion | null;
+  judge_run: JudgeRunProgress | null;
+  judge_scores: EvaluationScoreRead[];
+  agreement: EvaluationAgreementRead[];
+  synthetic_only: boolean;
+}
+
+/** Decimal fields in the evaluation response (backend sends Decimal as JSON string). */
+const EVALUATION_SCORE_DECIMALS = ["value"] as const;
+const EVALUATION_AGREEMENT_DECIMALS = [
+  "mean_absolute_error",
+  "within_tolerance_share",
+  "kappa",
+  "tolerance",
+] as const;
+
+function isEvaluationScoreRead(value: unknown): value is EvaluationScoreRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "evaluator",
+      "observation_ref",
+      "observation_kind",
+      "source",
+      "data_type",
+      "value",
+      "judge_run_ref",
+      "score_date",
+      "trace_id",
+      "metadata",
+    ])
+  );
+}
+
+function isJudgeRunProgress(value: unknown): value is JudgeRunProgress {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "run_ref",
+      "dataset_name",
+      "dataset_version",
+      "status",
+      "budget_paise",
+      "cost_paise",
+      "started_at",
+      "completed_at",
+      "failure_reason",
+      "example_count",
+      "scored_count",
+      "synthetic_only",
+    ])
+  );
+}
+
+function isEvaluationAgreementRead(
+  value: unknown,
+): value is EvaluationAgreementRead {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "evaluator",
+      "count",
+      "mean_absolute_error",
+      "within_tolerance_share",
+      "kappa",
+      "tolerance",
+      "data_type",
+      "synthetic_only",
+      "empty",
+    ])
+  );
+}
+
+function isEvaluationDatasetVersion(
+  value: unknown,
+): value is EvaluationDatasetVersion {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "id",
+      "name",
+      "version",
+      "status",
+      "created_at",
+      "updated_at",
+      "example_count",
+      "is_active",
+    ])
+  );
+}
+
+function isEvaluationReadResponse(
+  value: unknown,
+): value is EvaluationReadResponse {
+  return (
+    isRecord(value) &&
+    hasKeys(value, [
+      "active_dataset",
+      "judge_run",
+      "judge_scores",
+      "agreement",
+      "synthetic_only",
+    ]) &&
+    (value.active_dataset === null ||
+      isEvaluationDatasetVersion(value.active_dataset)) &&
+    (value.judge_run === null || isJudgeRunProgress(value.judge_run)) &&
+    isArrayOf(value.judge_scores, isEvaluationScoreRead) &&
+    isArrayOf(value.agreement, isEvaluationAgreementRead)
+  );
+}
+
+/**
+ * Read the complete evaluation state (#794).
+ */
+export async function fetchEvaluation(): Promise<EvaluationReadResponse> {
+  const data = await request<unknown>(`${OBSERVABILITY_BASE}/evaluation`);
+  const read = guardShape(
+    data,
+    isEvaluationReadResponse,
+    "The API returned an unexpected evaluation shape",
+  );
+  return {
+    ...read,
+    judge_scores: read.judge_scores.map((score) =>
+      withDecimals(score, EVALUATION_SCORE_DECIMALS),
+    ),
+    agreement: read.agreement.map((agree) =>
+      withDecimals(agree, EVALUATION_AGREEMENT_DECIMALS),
+    ),
+  };
+}
+// #795: admin controls for the operator Evals page.
+
+export interface HumanLabelInput {
+  example_ref: string;
+  evaluator: string;
+  value: number;
+  data_type?: string;
+  score_date?: string;
+  trace_id?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export async function listEvaluationDatasetVersions(
+  name?: string,
+  page: number = 1,
+  pageSize: number = 25,
+): Promise<{
+  versions: EvaluationDatasetVersion[];
+  total_count: number;
+  page: number;
+  page_size: number;
+}> {
+  const query = new URLSearchParams();
+  if (name) query.set("name", name);
+  query.set("page", String(page));
+  query.set("page_size", String(pageSize));
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/datasets?${query.toString()}`,
+  );
+  return data as {
+    versions: EvaluationDatasetVersion[];
+    total_count: number;
+    page: number;
+    page_size: number;
+  };
+}
+
+export async function createEvaluationDatasetDraft(
+  name: string,
+  version: number,
+  examples: {
+    example_ref: string;
+    task_type: string;
+    input: Record<string, unknown>;
+    expected_output: Record<string, unknown>;
+    tags: string[];
+  }[],
+): Promise<EvaluationDatasetVersion> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/datasets`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, version, examples }),
+    },
+  );
+  return data as EvaluationDatasetVersion;
+}
+
+export async function editEvaluationDatasetDraft(
+  name: string,
+  version: number,
+  examples: {
+    example_ref: string;
+    task_type: string;
+    input: Record<string, unknown>;
+    expected_output: Record<string, unknown>;
+    tags: string[];
+  }[],
+): Promise<EvaluationDatasetVersion> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/datasets/${encodeURIComponent(
+      name,
+    )}/${version}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ examples }),
+    },
+  );
+  return data as EvaluationDatasetVersion;
+}
+
+export async function activateEvaluationDataset(
+  name: string,
+  version: number,
+): Promise<{
+  activated: EvaluationDatasetVersion;
+  retired: EvaluationDatasetVersion | null;
+}> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/datasets/${encodeURIComponent(
+      name,
+    )}/${version}/activate`,
+    { method: "POST" },
+  );
+  return data as {
+    activated: EvaluationDatasetVersion;
+    retired: EvaluationDatasetVersion | null;
+  };
+}
+
+export async function startJudgeRun(): Promise<JudgeRunProgress> {
+  const data = await request<unknown>(`${OBSERVABILITY_BASE}/evaluation/runs`, {
+    method: "POST",
+  });
+  return data as JudgeRunProgress;
+}
+
+export async function applyHumanLabel(
+  input: HumanLabelInput,
+): Promise<unknown> {
+  const data = await request<unknown>(
+    `${OBSERVABILITY_BASE}/evaluation/labels`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        example_ref: input.example_ref,
+        evaluator: input.evaluator,
+        value: input.value,
+        data_type: input.data_type,
+        score_date: input.score_date,
+        trace_id: input.trace_id ?? null,
+        metadata: input.metadata ?? {},
+      }),
+    },
+  );
+  return data;
+}

@@ -19,6 +19,33 @@ export interface OperatorLoginRequest {
   code: string;
 }
 
+export interface OperatorSummary {
+  identity_id: number;
+  phone_masked: string;
+  tier: string;
+  is_active: boolean;
+  mfa_enabled: boolean;
+  created_at: string;
+}
+
+export interface OperatorInviteRequest {
+  phone: string;
+  tier?: "admin" | "operator";
+}
+
+export interface OperatorInvitedResult {
+  identity_id: number;
+  phone_e164: string;
+}
+
+export interface OperatorTierUpdateRequest {
+  tier: "admin" | "operator";
+}
+
+export interface OperatorActiveUpdateRequest {
+  is_active: boolean;
+}
+
 export interface EnrollMfaResult {
   identity_id: number;
   phone_e164: string;
@@ -227,5 +254,113 @@ export async function submitOperatorDecision(
     data,
     isPartnerView,
     "The API returned an unexpected decision result shape",
+  );
+}
+
+function isOperatorSummary(value: unknown): value is OperatorSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.identity_id === "number" &&
+    typeof row.phone_masked === "string" &&
+    typeof row.tier === "string" &&
+    typeof row.is_active === "boolean" &&
+    typeof row.mfa_enabled === "boolean" &&
+    typeof row.created_at === "string"
+  );
+}
+
+interface OperatorListResponse {
+  operators: OperatorSummary[];
+}
+
+function isOperatorListResponse(value: unknown): value is OperatorListResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return Array.isArray(row.operators) && row.operators.every(isOperatorSummary);
+}
+
+function isOperatorInvitedResult(
+  value: unknown,
+): value is OperatorInvitedResult {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.identity_id === "number" && typeof row.phone_e164 === "string"
+  );
+}
+
+/**
+ * List all operators (admin only).
+ */
+export async function fetchOperators(): Promise<OperatorSummary[]> {
+  const data = await request<unknown>("/v1/auth/operator/users");
+  const read = guardShape(
+    data,
+    isOperatorListResponse,
+    "The API returned an unexpected operator list shape",
+  );
+  return read.operators;
+}
+
+/**
+ * Invite a new operator (admin only).
+ */
+export async function inviteOperator(
+  req: OperatorInviteRequest,
+): Promise<OperatorInvitedResult> {
+  const data = await request<unknown>("/v1/auth/operator/invite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return guardShape(
+    data,
+    isOperatorInvitedResult,
+    "The API returned an unexpected operator invite shape",
+  );
+}
+
+/**
+ * Update an operator's tier (admin only).
+ */
+export async function updateOperatorTier(
+  identityId: number,
+  req: OperatorTierUpdateRequest,
+): Promise<OperatorSummary> {
+  const data = await request<unknown>(
+    `/v1/auth/operator/users/${identityId}/tier`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  return guardShape(
+    data,
+    isOperatorSummary,
+    "The API returned an unexpected operator tier update shape",
+  );
+}
+
+/**
+ * Update an operator's active state (admin only).
+ */
+export async function updateOperatorActive(
+  identityId: number,
+  req: OperatorActiveUpdateRequest,
+): Promise<OperatorSummary> {
+  const data = await request<unknown>(
+    `/v1/auth/operator/users/${identityId}/active`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  return guardShape(
+    data,
+    isOperatorSummary,
+    "The API returned an unexpected operator active update shape",
   );
 }

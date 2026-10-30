@@ -14,6 +14,9 @@ class Principal(BaseModel):
 
     ``is_authenticated`` separates an anonymous caller from one the gateway
     recognized; ``roles`` carries the RBAC roles for the Phase 2 edge checks.
+    ``tier`` is the operator authority tier when the access token carries one
+    (``admin`` / ``operator``, spec #761); patient and partner callers leave it
+    ``None``, and an admin guard treats a missing or unknown value as denial.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -21,6 +24,7 @@ class Principal(BaseModel):
     subject_id: str
     roles: tuple[str, ...] = ()
     is_authenticated: bool = False
+    tier: str | None = None
 
     @classmethod
     def anonymous(cls) -> "Principal":
@@ -28,6 +32,6 @@ class Principal(BaseModel):
         return cls(subject_id="anonymous", is_authenticated=False)
 
     @classmethod
-    def for_subject(cls, subject_id: str, *roles: str) -> "Principal":
+    def for_subject(cls, subject_id: str, *roles: str, tier: str | None = None) -> "Principal":
         """Build an authenticated principal for a verified subject."""
-        return cls(subject_id=subject_id, roles=roles, is_authenticated=True)
+        return cls(subject_id=subject_id, roles=roles, is_authenticated=True, tier=tier)

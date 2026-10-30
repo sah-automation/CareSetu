@@ -43,7 +43,10 @@ class AccessTokenClaims(BaseModel):
     ``subject_id`` is the identity id (the JWT ``sub``) that the gateway scopes
     a patient to their own record; ``scope`` is the resolved RBAC scope carried
     in the token claim; ``jti``/``issued_at``/``expires_at`` mirror the claims
-    so revocation and rotation (T7) have an anchor.
+    so revocation and rotation (T7) have an anchor. ``tier`` is the optional
+    operator authority tier (``admin`` / ``operator``, spec #761): only an
+    operator token carries it, and a missing or unknown value is a fail-closed
+    answer for admin routes rather than a widened one.
     """
 
     jti: str
@@ -51,6 +54,7 @@ class AccessTokenClaims(BaseModel):
     scope: str
     issued_at: datetime
     expires_at: datetime
+    tier: str | None = None
 
 
 def issue_token(
@@ -61,13 +65,15 @@ def issue_token(
     signing_key: str,
     now: datetime,
     ttl_seconds: int = ACCESS_TOKEN_TTL_SECONDS,
+    tier: str | None = None,
 ) -> str:
     """Mint an HS256 access JWT carrying ``jti``, ``sub``, ``scope``, ``iat``, ``exp``.
 
     ``exp`` is ``now + ttl_seconds`` (~15 minutes at the default) so a stolen
     access token has limited value (spec #51 §2.5). An empty ``signing_key``
     fails closed - a misconfigured deployment refuses to mint rather than sign
-    with a blank key.
+    with a blank key. ``tier`` is emitted only when given, so patient and
+    partner tokens stay tier-free (spec #761).
     """
     if not signing_key:
         raise ValueError("access-token signing key is not configured; refusing to sign")
@@ -79,6 +85,8 @@ def issue_token(
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl_seconds)).timestamp()),
     }
+    if tier is not None:
+        payload["tier"] = tier
     signing_input = f"{_b64url_encode(_json_bytes(header))}.{_b64url_encode(_json_bytes(payload))}"
     signature = _b64url_encode(_sign(signing_input, signing_key))
     return f"{signing_input}.{signature}"
@@ -168,12 +176,15 @@ def _extract_claims(payload: dict[str, object], now: datetime) -> AccessTokenCla
     scope = payload.get("scope")
     exp = payload.get("exp")
     iat = payload.get("iat")
+    tier = payload.get("tier")
     if not isinstance(jti, str) or not jti:
         raise AccessTokenMalformedError("access token has no jti claim")
     if not isinstance(sub, str) or not sub:
         raise AccessTokenMalformedError("access token has no sub claim")
     if not isinstance(scope, str) or not scope:
         raise AccessTokenMalformedError("access token has no scope claim")
+    if tier is not None and (not isinstance(tier, str) or not tier):
+        raise AccessTokenMalformedError("access token tier claim must be a non-empty string")
     if not isinstance(exp, (int, float)) or not isinstance(iat, (int, float)):
         raise AccessTokenMalformedError("access token exp/iat claims must be numeric")
     try:
@@ -189,4 +200,5 @@ def _extract_claims(payload: dict[str, object], now: datetime) -> AccessTokenCla
         scope=scope,
         issued_at=datetime.fromtimestamp(iat, tz=UTC),
         expires_at=expires_at,
+        tier=tier,
     )

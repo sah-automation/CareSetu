@@ -64,12 +64,14 @@ from modules.intake.adapters.ai_provider_ext import Ext002CallError
 from modules.intake.adapters.media_store import IntakeMediaStore, build_media_store
 from modules.intake.budget_meter import BudgetMeter
 from modules.intake.domain.events import (
+    ai_egress_prompt_injection_detected_envelope,
     ai_egress_recorded_envelope,
     intake_retry_requested_envelope,
     pre_summary_low_confidence_envelope,
     pre_summary_ready_envelope,
 )
 from modules.intake.domain.presummary_machine import is_low_confidence
+from modules.intake.domain.prompt_injection import detect_prompt_injection
 from modules.intake.domain.state_machine import (
     IntakeAction,
     IntakeState,
@@ -455,6 +457,9 @@ async def _run_structuring_pipeline(
                 )
             )
 
+        if settings.prompt_injection_heuristics_enabled:
+            await _screen_prompt_injection(connection, transcript)
+
         ai_job_id = await insert_ai_job(
             connection,
             intake_id,
@@ -573,6 +578,34 @@ async def _degrade_to_raw_review(
         )
     )
     logger.warning("intake %s degraded to raw doctor review: %s", intake_id, reason)
+
+
+async def _screen_prompt_injection(connection: AsyncConnection, text: str) -> None:
+    """Record an advisory prompt-injection finding for the text about to egress.
+
+    Runs immediately before the structuring call. The finding is advisory: it
+    never blocks the pipeline, and a failure in the screen itself is logged and
+    swallowed so a heuristic bug cannot stop a patient's intake. Only category
+    names and a bounded score cross the outbox; the transcript and any matched
+    text stay in this process.
+    """
+    try:
+        finding = detect_prompt_injection(text)
+        if not finding.detected:
+            return
+        await write_outbox(
+            connection,
+            INTAKE_SCHEMA,
+            INTAKE_OUTBOX_TABLE,
+            ai_egress_prompt_injection_detected_envelope(
+                categories=finding.categories,
+                score=finding.score,
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "intake prompt-injection screen failed; continuing without a finding (advisory)"
+        )
 
 
 async def _audit_egress(

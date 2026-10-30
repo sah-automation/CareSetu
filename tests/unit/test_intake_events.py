@@ -35,6 +35,7 @@ from sqlalchemy import CheckConstraint
 from bus.dispatcher import OutboxRow, envelope_from_row
 from bus.envelope import Envelope, is_valid_event_type
 from bus.events import (
+    EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
     EVENT_AI_EGRESS_RECORDED,
     EVENT_AI_JOB_COMPLETED,
     EVENT_AI_JOB_FAILED,
@@ -51,9 +52,11 @@ from bus.registry import HandlerRegistry
 from modules.intake.adapters import intake_started_count, register_handlers
 from modules.intake.domain.events import (
     PRODUCER_MODULE,
+    AiEgressPromptInjectionDetectedPayload,
     AiTaskType,
     IntakeComposerOpenedPayload,
     IntakeStartedPayload,
+    ai_egress_prompt_injection_detected_envelope,
     ai_egress_recorded_envelope,
     ai_job_completed_envelope,
     ai_job_failed_envelope,
@@ -78,6 +81,7 @@ _ALL_EVENT_TYPES = (
     EVENT_AI_JOB_FAILED,
     EVENT_AI_JOB_QUEUED,
     EVENT_AI_EGRESS_RECORDED,
+    EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
     EVENT_INTAKE_DOCTOR_ASSIGNED,
 )
 
@@ -107,6 +111,7 @@ def test_every_intake_event_type_is_registered_in_bus_events() -> None:
     assert EVENT_AI_JOB_FAILED == "ai_job.failed"
     assert EVENT_AI_JOB_QUEUED == "ai_job.queued"
     assert EVENT_AI_EGRESS_RECORDED == "ai_egress.recorded"
+    assert EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED == ("ai_egress.prompt_injection_detected")
     assert EVENT_INTAKE_DOCTOR_ASSIGNED == "intake.doctor_assigned"
     assert EVENT_INTAKE_COMPOSER_OPENED == "intake.composer_opened"
 
@@ -304,6 +309,39 @@ def test_ai_egress_recorded_names_the_job_and_reason() -> None:
     assert envelope.payload.reason == "transcribe"
 
 
+def test_prompt_injection_detected_carries_categories_and_a_score_and_nothing_else() -> None:
+    """#780: the advisory finding is category names plus a bounded score.
+
+    The producer sheds the transcript, matched substrings and every subject id
+    before publishing, so the payload is exactly ``categories`` + ``score``.
+    """
+    envelope = ai_egress_prompt_injection_detected_envelope(
+        categories=("instruction_override", "system_prompt_probing"),
+        score=70,
+    )
+
+    assert envelope.event_type == EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED
+    assert envelope.producer == PRODUCER_MODULE
+    assert set(envelope.payload.model_dump(mode="json")) == {"categories", "score"}
+    assert envelope.payload.categories == ["instruction_override", "system_prompt_probing"]
+    assert envelope.payload.score == 70
+
+
+def test_prompt_injection_detected_rejects_an_empty_category_list() -> None:
+    with pytest.raises(ValueError):
+        AiEgressPromptInjectionDetectedPayload(categories=[], score=40)
+
+
+def test_prompt_injection_detected_rejects_a_score_above_the_cap() -> None:
+    with pytest.raises(ValueError):
+        AiEgressPromptInjectionDetectedPayload(categories=["tool_call"], score=101)
+
+
+def test_prompt_injection_detected_rejects_an_unknown_category() -> None:
+    with pytest.raises(ValueError):
+        AiEgressPromptInjectionDetectedPayload(categories=["made_up"], score=40)
+
+
 def test_doctor_assigned_names_the_intake_the_patient_and_the_doctor() -> None:
     """The care-attribution edge rides the event: all three references, nothing else.
 
@@ -444,6 +482,7 @@ def test_register_handlers_registers_the_self_subscriptions() -> None:
         EVENT_AI_JOB_COMPLETED,
         EVENT_AI_JOB_FAILED,
         EVENT_AI_EGRESS_RECORDED,
+        EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
         EVENT_INTAKE_DOCTOR_ASSIGNED,
         EVENT_INTAKE_COMPOSER_OPENED,
     ):
@@ -543,3 +582,19 @@ def test_emitted_envelope_round_trips_through_the_registry_validator() -> None:
         assert reconstructed.producer == "intake"
         assert isinstance(reconstructed.payload, payload_model)
         assert reconstructed.payload.model_dump(mode="json") == row.payload
+
+
+def test_prompt_injection_envelope_round_trips_through_the_registry_validator() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+
+    envelope = ai_egress_prompt_injection_detected_envelope(categories=("exfiltration",), score=55)
+    payload_model = registry.payload_model_for(envelope.event_type)
+
+    assert payload_model is not None
+    assert payload_model is AiEgressPromptInjectionDetectedPayload
+    reconstructed = envelope_from_row(_row_for(envelope), "intake", payload_model)
+    assert reconstructed.payload.model_dump(mode="json") == {
+        "categories": ["exfiltration"],
+        "score": 55,
+    }

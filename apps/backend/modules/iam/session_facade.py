@@ -22,10 +22,17 @@ from modules.iam.domain import events, jwt, refresh
 from modules.iam.domain.exceptions import (
     InvalidOperatorCodeError,
     OperatorMfaError,
+    OperatorMfaLockedError,
     RefreshTokenExpiredError,
     RefreshTokenRevokedError,
     RefreshTokenUnknownError,
     SessionIssuanceError,
+)
+from modules.iam.domain.lockout import lockout_remaining_seconds
+from modules.iam.domain.mfa_lockout import (
+    DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
+    DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+    evaluate_mfa_failure,
 )
 from modules.iam.domain.shared import _identity_phone
 from modules.iam.domain.verify import IDENTITY_ACTIVE, IDENTITY_SUSPENDED
@@ -33,6 +40,7 @@ from modules.iam.outbox import IAM_OUTBOX_TABLE
 from modules.iam.schema.models import (
     iam_identities,
     iam_operator_mfa,
+    iam_operator_profiles,
     iam_role_grants,
     iam_sessions,
 )
@@ -49,6 +57,10 @@ _OPERATOR_ROLE = "operator"
 VerifyPartnerExists = Callable[[AsyncConnection, int], Awaitable[None]]
 
 VerifyPartnerProfile = Callable[[AsyncConnection, int], Awaitable[None]]
+
+
+class _OperatorTotpFailure(Exception):
+    """Internal signal: the code was wrong, so persist the failure after rollback."""
 
 
 class SessionResult(BaseModel):
@@ -78,11 +90,14 @@ class ValidatedAccessToken(BaseModel):
 
     ``subject_id`` is the identity id the gateway scopes to the patient's own
     record; ``scope`` is the RBAC scope resolved from the token claim.
+    ``tier`` is the optional operator authority tier (spec #761) - absent on
+    patient and partner tokens, and never inferred when missing.
     """
 
     subject_id: int
     scope: str
     jti: str
+    tier: str | None = None
 
 
 def _default_clock() -> datetime:
@@ -101,6 +116,8 @@ class SessionFacade:
         access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
         refresh_token_ttl_seconds: int = refresh.REFRESH_TOKEN_TTL_SECONDS,
         mfa_secret_key: str = "",
+        operator_mfa_lockout_threshold: int = DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+        operator_mfa_lockout_seconds: int = DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
     ) -> None:
         self._engine = engine
         self._clock = clock
@@ -108,6 +125,8 @@ class SessionFacade:
         self._access_token_ttl_seconds = access_token_ttl_seconds
         self._refresh_token_ttl_seconds = refresh_token_ttl_seconds
         self._mfa_secret_key = mfa_secret_key
+        self._operator_mfa_lockout_threshold = operator_mfa_lockout_threshold
+        self._operator_mfa_lockout_seconds = operator_mfa_lockout_seconds
 
     async def issue_session(self, phone: str) -> SessionResult:
         """Mint an access JWT for a verified patient (spec #51 section 2.5, ticket #57).
@@ -179,7 +198,10 @@ class SessionFacade:
         names the missing precondition - an operator can never land an
         operator-scoped session on the phone-OTP factor alone. The minted
         ``scope`` resolves to ``operator`` so the gateway's ``require_operator``
-        admits the caller.
+        admits the caller. The operator's active profile tier (``admin`` /
+        ``operator``, spec #761) rides the access token as the optional ``tier``
+        claim; a missing profile fails closed rather than minting a tier-free
+        operator token.
 
         The ``code`` parameter is an RFC-6238 TOTP code derived from the
         operator's enrolled MFA secret.  It is verified against the decrypted
@@ -203,72 +225,135 @@ class SessionFacade:
             )
         now = self._clock()
 
-        async with self._engine.begin() as connection:
-            locked = await _lock_identity_by_phone(connection, phone_e164)
-            if locked is None:
-                raise SessionIssuanceError(
-                    f"no identity for {mask_phone(phone_e164)}; "
-                    "invite the operator before issuing a session"
-                )
-            identity_id = locked.identity_id
-            identity_status = locked.status
-            if identity_status != IDENTITY_ACTIVE:
-                raise SessionIssuanceError(
-                    f"identity {identity_id} is {identity_status}, not Active; "
-                    "verify the phone before issuing a session"
-                )
-            if not await _mfa_verified(connection, identity_id):
-                raise OperatorMfaError(
-                    f"identity {identity_id} has not completed the MFA second factor; "
-                    "enroll and verify MFA before issuing an operator session"
-                )
-
-            # S8: genuine TOTP verification - decrypt the stored secret and
-            # verify the presented code at the current clock time.  The MFA
-            # row is guaranteed non-None by the ``_mfa_verified`` gate above.
-            if not self._mfa_secret_key:
-                raise SessionIssuanceError(
-                    f"identity {identity_id} cannot complete MFA: encryption key "
-                    "is not configured (set IAM_MFA_SECRET_KEY)"
-                )
-            secret_ciphertext = (
-                await connection.execute(
-                    select(iam_operator_mfa.c.secret).where(
-                        iam_operator_mfa.c.identity_id == identity_id
+        try:
+            async with self._engine.begin() as connection:
+                locked = await _lock_identity_by_phone(connection, phone_e164)
+                if locked is None:
+                    raise SessionIssuanceError(
+                        f"no identity for {mask_phone(phone_e164)}; "
+                        "invite the operator before issuing a session"
                     )
-                )
-            ).scalar_one_or_none()
-            if not secret_ciphertext:
-                raise OperatorMfaError(
-                    f"identity {identity_id} has no enrolled TOTP secret; "
-                    "complete MFA enrollment before issuing an operator session"
-                )
-            try:
-                decrypted_secret = decrypt_secret(secret_ciphertext, self._mfa_secret_key)
-                verify_totp(decrypted_secret, code, clock=self._clock)
-            except (TotpSecretEmptyError, TotpVerificationError, ValueError) as exc:
-                raise InvalidOperatorCodeError(
-                    f"TOTP verification failed for identity {identity_id}: {exc}"
-                ) from exc
+                identity_id = locked.identity_id
+                identity_status = locked.status
+                if identity_status != IDENTITY_ACTIVE:
+                    raise SessionIssuanceError(
+                        f"identity {identity_id} is {identity_status}, not Active; "
+                        "verify the phone before issuing a session"
+                    )
+                if not await _mfa_verified(connection, identity_id):
+                    raise OperatorMfaError(
+                        f"identity {identity_id} has not completed the MFA second factor; "
+                        "enroll and verify MFA before issuing an operator session"
+                    )
 
-            scope = await _resolve_active_role(connection, identity_id, _OPERATOR_ROLE)
-            if scope is None:
-                raise SessionIssuanceError(
-                    f"identity {identity_id} has no active operator role grant"
+                if not self._mfa_secret_key:
+                    raise SessionIssuanceError(
+                        f"identity {identity_id} cannot complete MFA: encryption key "
+                        "is not configured (set IAM_MFA_SECRET_KEY)"
+                    )
+
+                profile = await _lock_operator_profile(connection, identity_id)
+                if profile is not None:
+                    remaining = lockout_remaining_seconds(profile["mfa_locked_until"], now)
+                    if remaining is not None:
+                        raise OperatorMfaLockedError(
+                            f"identity {identity_id} is locked after repeated TOTP "
+                            f"failures; try again in {remaining} seconds",
+                            remaining_seconds=remaining,
+                        )
+
+                secret_ciphertext = (
+                    await connection.execute(
+                        select(iam_operator_mfa.c.secret).where(
+                            iam_operator_mfa.c.identity_id == identity_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                if not secret_ciphertext:
+                    raise OperatorMfaError(
+                        f"identity {identity_id} has no enrolled TOTP secret; "
+                        "complete MFA enrollment before issuing an operator session"
+                    )
+                try:
+                    decrypted_secret = decrypt_secret(secret_ciphertext, self._mfa_secret_key)
+                    verify_totp(decrypted_secret, code, clock=self._clock)
+                except (TotpSecretEmptyError, TotpVerificationError, ValueError) as exc:
+                    raise _OperatorTotpFailure(str(exc)) from exc
+
+                scope = await _resolve_active_role(connection, identity_id, _OPERATOR_ROLE)
+                if scope is None:
+                    raise SessionIssuanceError(
+                        f"identity {identity_id} has no active operator role grant"
+                    )
+                tier = await _resolve_operator_tier(connection, identity_id)
+                if tier is None:
+                    raise SessionIssuanceError(
+                        f"identity {identity_id} has no active operator profile; "
+                        "refusing to issue an operator session without a tier"
+                    )
+
+                if profile is not None:
+                    await connection.execute(
+                        iam_operator_profiles.update()
+                        .where(iam_operator_profiles.c.identity_id == identity_id)
+                        .values(mfa_failed_attempts=0, mfa_locked_until=None)
+                    )
+
+                jti, refresh_token, token = await self._mint_session_row(
+                    connection, identity_id, scope, now, tier=tier
                 )
 
-            jti, refresh_token, token = await self._mint_session_row(
-                connection, identity_id, scope, now
+            return SessionResult(
+                jwt=token,
+                jti=jti,
+                scope=scope,
+                identity_id=identity_id,
+                expires_in_seconds=self._access_token_ttl_seconds,
+                refresh_token=refresh_token,
             )
+        except _OperatorTotpFailure as failure:
+            await self._record_operator_mfa_failure(identity_id, now)
+            raise InvalidOperatorCodeError(
+                f"TOTP verification failed for identity {identity_id}: {failure}"
+            ) from failure.__cause__
 
-        return SessionResult(
-            jwt=token,
-            jti=jti,
-            scope=scope,
-            identity_id=identity_id,
-            expires_in_seconds=self._access_token_ttl_seconds,
-            refresh_token=refresh_token,
-        )
+    async def _record_operator_mfa_failure(self, identity_id: int, now: datetime) -> None:
+        """Persist one wrong operator TOTP code in its own transaction.
+
+        The failed login transaction rolls back before this runs - it issued no
+        session, so the counter and lockout must commit separately. The profile
+        row is locked ``FOR UPDATE`` so concurrent wrong codes cannot lose an
+        increment, and the ``operator.mfa_failed`` event commits with it.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _lock_operator_profile(connection, identity_id)
+            if profile is None:
+                return
+            decision = evaluate_mfa_failure(
+                consecutive_failures=int(profile["mfa_failed_attempts"]),
+                now=now,
+                lockout_until=profile["mfa_locked_until"],
+                threshold=self._operator_mfa_lockout_threshold,
+                lockout_seconds=self._operator_mfa_lockout_seconds,
+            )
+            await connection.execute(
+                iam_operator_profiles.update()
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(
+                    mfa_failed_attempts=decision.counter,
+                    mfa_locked_until=decision.lockout_until,
+                )
+            )
+            await bus_outbox_write(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.operator_mfa_failed_envelope(
+                    identity_id=identity_id,
+                    reason="lockout" if decision.locked else "failure",
+                    lockout_until=decision.lockout_until,
+                ),
+            )
 
     async def resolve_identity_id_by_phone(self, phone: str) -> int:
         """The identity id for a phone, without minting a session (WI-3, #336).
@@ -392,7 +477,7 @@ class SessionFacade:
         """
         claims = jwt.verify_token(token, self._access_token_signing_key, now=self._clock())
         return ValidatedAccessToken(
-            subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti
+            subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti, tier=claims.tier
         )
 
     async def refresh_session(
@@ -429,8 +514,10 @@ class SessionFacade:
         ``FOR UPDATE`` (after the session
         row) so a concurrent role change cannot race the refresh, and the
         session-row lock serializes two concurrent refreshes of the same token
-        so only one rotation wins.  An empty signing key fails closed exactly
-        like ``issue_session``.
+        so only one rotation wins.  An operator refresh re-derives the tier from
+        the operator profile (spec #761), so a tier change lands within the
+        access-token lifetime; a missing tier fails closed.  An empty signing
+        key fails closed exactly like ``issue_session``.
 
         Partner-scoped sessions renew differently (F014-T05, #465): a waiting
         partner holds no ``partner`` role grant until activation (ADR-0010), so
@@ -490,6 +577,7 @@ class SessionFacade:
                 identity_id = identity.identity_id
                 identity_status = identity.status
                 scope_name = session_row["scope"]
+                tier: str | None = None
                 if scope_name == _PARTNER_ROLE:
                     if identity_status == IDENTITY_SUSPENDED:
                         raise RefreshTokenRevokedError(
@@ -515,9 +603,16 @@ class SessionFacade:
                             f"identity {identity_id} has no active {scope_name} role grant; "
                             "refusing to refresh"
                         )
+                    if scope == _OPERATOR_ROLE:
+                        tier = await _resolve_operator_tier(connection, identity_id)
+                        if tier is None:
+                            raise RefreshTokenRevokedError(
+                                f"identity {identity_id} has no active operator profile; "
+                                "refusing to refresh"
+                            )
 
                 new_jti, new_refresh_token, token = await self._mint_session_row(
-                    connection, identity_id, scope, now
+                    connection, identity_id, scope, now, tier=tier
                 )
                 await connection.execute(
                     iam_sessions.update()
@@ -545,13 +640,16 @@ class SessionFacade:
         identity_id: int,
         scope: str,
         now: datetime,
+        *,
+        tier: str | None = None,
     ) -> tuple[str, str, str]:
         """Mint a fresh access JWT + opaque refresh token and record the session row.
 
         Shared by ``issue_session`` and ``refresh_session`` so both mint the
         same row shape: a random ``jti``, a fresh opaque refresh token (stored
         hashed, never in clear) with its ~30-day sliding ``refresh_expires_at``,
-        and an access JWT whose ``exp`` is the access-token TTL out.  Returns
+        and an access JWT whose ``exp`` is the access-token TTL out. ``tier``
+        rides the access JWT only for operators (spec #761). Returns
         ``(jti, refresh_token, jwt)``.
         """
         jti = uuid.uuid4().hex
@@ -563,6 +661,7 @@ class SessionFacade:
             signing_key=self._access_token_signing_key,
             now=now,
             ttl_seconds=self._access_token_ttl_seconds,
+            tier=tier,
         )
         await connection.execute(
             iam_sessions.insert().values(
@@ -603,6 +702,26 @@ async def _lock_identity_by_id(
     return await _lock_identity_row(connection, iam_identities.c.id == identity_id)
 
 
+async def _lock_operator_profile(
+    connection: AsyncConnection, identity_id: int
+) -> RowMapping | None:
+    """Row-lock an operator profile and return its failure/lock state."""
+    return (
+        (
+            await connection.execute(
+                select(
+                    iam_operator_profiles.c.mfa_failed_attempts,
+                    iam_operator_profiles.c.mfa_locked_until,
+                )
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .with_for_update()
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+
 async def _session_for_refresh(connection: AsyncConnection, token_hash: str) -> RowMapping | None:
     """The session row for a refresh-token hash, locked to serialize rotation."""
     return (
@@ -635,6 +754,24 @@ async def _resolve_active_role(
                 iam_role_grants.c.identity_id == identity_id,
                 iam_role_grants.c.role == role,
                 iam_role_grants.c.status == IDENTITY_ACTIVE,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _resolve_operator_tier(connection: AsyncConnection, identity_id: int) -> str | None:
+    """The active operator tier for ``identity_id`` (``admin`` / ``operator``).
+
+    A missing or inactive profile returns ``None`` so callers fail closed: an
+    operator session is never minted without a tier (spec #761).
+    """
+    return (
+        await connection.execute(
+            select(iam_operator_profiles.c.tier)
+            .where(
+                iam_operator_profiles.c.identity_id == identity_id,
+                iam_operator_profiles.c.is_active.is_(True),
             )
             .limit(1)
         )

@@ -43,6 +43,7 @@ def _token(
     subject_id: int = 42,
     scope: str = _SCOPE,
     ttl_seconds: int = ACCESS_TOKEN_TTL_SECONDS,
+    tier: str | None = None,
 ) -> str:
     return issue_token(
         jti=jti,
@@ -51,6 +52,7 @@ def _token(
         signing_key=_KEY,
         now=_NOW,
         ttl_seconds=ttl_seconds,
+        tier=tier,
     )
 
 
@@ -98,6 +100,28 @@ def test_issued_token_carries_the_expected_claims() -> None:
 
 def test_access_token_ttl_defaults_to_about_fifteen_minutes() -> None:
     assert ACCESS_TOKEN_TTL_SECONDS == 900
+
+
+def test_operator_token_carries_the_tier_claim() -> None:
+    token = _token(scope="operator", tier="admin")
+
+    assert verify_token(token, _KEY, _NOW).tier == "admin"
+
+
+def test_patient_token_omits_the_tier_claim() -> None:
+    _header, payload, _signature = _token().split(".")
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
+
+    assert "tier" not in claims
+    assert verify_token(_token(), _KEY, _NOW).tier is None
+
+
+def test_payload_with_a_non_string_tier_is_rejected() -> None:
+    payload = _valid_forged_payload()
+    payload["tier"] = 7
+
+    with pytest.raises(AccessTokenMalformedError):
+        verify_token(_jws({"alg": "HS256", "typ": "JWT"}, payload), _KEY, _NOW)
 
 
 def test_issued_token_is_a_three_segment_jws() -> None:

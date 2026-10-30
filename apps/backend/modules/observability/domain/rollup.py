@@ -128,6 +128,23 @@ ALERT_KIND_ERROR_RATE_HIGH = "error_rate_high"
 ALERT_KIND_PROVIDER_RATE_LIMITED = "provider_rate_limited"
 ALERT_KIND_LATENCY_OBJECTIVE_BREACH = "latency_objective_breach"
 
+#: Security detector kinds (PHASE-14B Batch 2, #779). The six ``*_high`` kinds
+#: describe a COUNT over a rolling window, so they clear themselves when the
+#: window falls back below the configured threshold. The four remaining kinds
+#: each describe one irreversible event (a lockout, a consent revocation, a
+#: rejected webhook signature) and therefore never auto-resolve. The webhook
+#: kind is reserved now even though no inbound webhook exists (#761 decision 1,
+#: #781); its producer will use this exact name.
+ALERT_KIND_AUTH_FAILURE_HIGH = "auth_failure_high"
+ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH = "operator_mfa_failure_high"
+ALERT_KIND_RECORD_DENIAL_HIGH = "record_denial_high"
+ALERT_KIND_RATE_LIMIT_HIGH = "rate_limit_high"
+ALERT_KIND_PROMPT_INJECTION_HIGH = "prompt_injection_high"
+ALERT_KIND_OTP_LOCKOUT = "otp_lockout"
+ALERT_KIND_OPERATOR_MFA_LOCKOUT = "operator_mfa_lockout"
+ALERT_KIND_CONSENT_REVOCATION = "consent_revocation"
+ALERT_KIND_WEBHOOK_SIGNATURE_FAILURE = "webhook_signature_failure"
+
 #: The share of a budget that raises ``ai_budget`` (plan-phase14 §11, the
 #: "AI budget meter > 80%" member of the minimum alert set). The VALUE is
 #: configuration (``app.config``), so a deployment moves it with an environment
@@ -307,6 +324,14 @@ RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
         ALERT_KIND_ERROR_RATE_HIGH,
         ALERT_KIND_PROVIDER_RATE_LIMITED,
         ALERT_KIND_LATENCY_OBJECTIVE_BREACH,
+        # Security detector's threshold kinds (#779): a rolling-window COUNT
+        # that falls back below its limit clears the alert.
+        # OTP delivery failures are operational and not paged.
+        ALERT_KIND_AUTH_FAILURE_HIGH,
+        ALERT_KIND_OPERATOR_MFA_FAILURE_HIGH,
+        ALERT_KIND_RECORD_DENIAL_HIGH,
+        ALERT_KIND_RATE_LIMIT_HIGH,
+        ALERT_KIND_PROMPT_INJECTION_HIGH,
     }
 )
 
@@ -321,6 +346,12 @@ RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
 NON_RESOLVABLE_ALERT_KINDS: frozenset[str] = frozenset(
     {
         ALERT_KIND_PROVIDER_HEALTH_DROP,
+        # Each security kind below records ONE irreversible incident (#779).
+        # There is no later reading that can say the event did not happen.
+        ALERT_KIND_OTP_LOCKOUT,
+        ALERT_KIND_OPERATOR_MFA_LOCKOUT,
+        ALERT_KIND_CONSENT_REVOCATION,
+        ALERT_KIND_WEBHOOK_SIGNATURE_FAILURE,
     }
 )
 

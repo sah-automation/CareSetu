@@ -16,7 +16,7 @@ key replays the stored result instead of re-executing.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -28,13 +28,16 @@ from app.config import Settings
 from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_operator
+from app.gateway.rbac import require_admin, require_operator
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain.exceptions import (
     IamError,
     InvalidOperatorCodeError,
     InvalidPhoneError,
+    OperatorLastAdminError,
     OperatorMfaError,
+    OperatorMfaLockedError,
+    OperatorSelfChangeError,
     PatientProfileNotSetError,
     ProfilePhotoTransferError,
     ProfilePhotoValidationError,
@@ -48,6 +51,7 @@ from modules.iam.facade import (
     EnrollMfaResult,
     IamFacade,
     OperatorInvitedResult,
+    OperatorSummary,
     PartnerLoginOtpResult,
     PartnerVerifyOtpResult,
     RegisterPatientResult,
@@ -129,11 +133,39 @@ class RefreshSessionRequest(BaseModel):
 
 
 class OperatorInviteRequest(BaseModel):
-    """Body of ``POST /v1/auth/operator/invite`` (S9, #262)."""
+    """Body of ``POST /v1/auth/operator/invite`` (S9, #262; spec #761, #768)."""
 
     model_config = ConfigDict(extra="forbid")
 
     phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    tier: Literal["admin", "operator"] = Field(
+        default="operator",
+        description="Authority to grant; defaults to the non-admin operator tier",
+    )
+
+
+class OperatorTierUpdateRequest(BaseModel):
+    """Body of ``PATCH /v1/auth/operator/users/{identity_id}/tier`` (spec #761, #769)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tier: Literal["admin", "operator"] = Field(description="New authority tier for the operator")
+
+
+class OperatorActiveUpdateRequest(BaseModel):
+    """Body of ``PATCH /v1/auth/operator/users/{identity_id}/active`` (spec #761, #769)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool = Field(description="New active state for the operator")
+
+
+class OperatorListResponse(BaseModel):
+    """Shape of ``GET /v1/auth/operator/users`` - operators wrapped, not a bare list."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operators: list[OperatorSummary]
 
 
 class OperatorLoginRequest(BaseModel):
@@ -483,31 +515,110 @@ async def refresh_session(
     return response
 
 
+@router.get(
+    "/operator/users",
+    response_model=OperatorListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List operators (admin only)",
+)
+async def list_operators(
+    request: Request,
+    admin: Annotated[Principal, Depends(require_admin)],
+) -> OperatorListResponse:
+    """List the operator group for user management (spec #761, #768).
+
+    Admin-only (``require_admin``): the operator role alone is not enough - a
+    non-admin operator, a patient or partner caller, and a token with a missing
+    or unknown tier all receive the shared 403 envelope. Every row carries the
+    masked phone, tier, active state, MFA state, and the identity's creation
+    date; the facade masks the phone before the value leaves the module, so the
+    canonical number is never in the response.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    operators = await facade.list_operators()
+    return OperatorListResponse(operators=operators)
+
+
 @router.post(
     "/operator/invite",
     response_model=OperatorInvitedResult,
     status_code=status.HTTP_201_CREATED,
-    summary="Invite a new operator (operator only)",
+    summary="Invite a new operator (admin only)",
 )
 async def invite_operator(
     request: Request,
-    operator: Annotated[Principal, Depends(require_operator)],
+    operator: Annotated[Principal, Depends(require_admin)],
     body: OperatorInviteRequest,
 ) -> OperatorInvitedResult:
-    """Grow the trusted queue-running group (US-22).
+    """Grow the trusted queue-running group (US-22; admin only, spec #761).
 
-    Operator-scoped (``require_operator``): only an attested operator can
-    invite another phone. The invited identity is created ``[Unverified]``
-    with an ``Active`` ``operator`` role grant, so the invited phone completes
-    MFA at first login. The requesting operator is recorded as the inviter on
-    the ``operator.invited`` audit event. Duplicate phones resolve to the
-    existing identity (idempotent by phone, plus the edge ``Idempotency-Key``).
+    Admin-scoped (``require_admin``): only an admin-tier operator can invite
+    another phone. The invited identity is created ``[Unverified]`` with an
+    ``Active`` ``operator`` role grant, so the invited phone completes MFA at
+    first login. ``tier`` chooses the authority and defaults to the non-admin
+    ``operator`` tier, so privilege is granted deliberately. The requesting
+    admin is recorded as the inviter on the ``operator.invited`` audit event.
+    Duplicate phones resolve to the existing identity (idempotent by phone,
+    plus the edge ``Idempotency-Key``) and never rewrite the existing tier.
     """
     invited_by = int(operator.subject_id)
     facade = cast(IamFacade, request.app.state.iam_facade)
     return await run_idempotent(
         request,
-        lambda: facade.create_operator_account(body.phone, invited_by_identity_id=invited_by),
+        lambda: facade.create_operator_account(
+            body.phone, invited_by_identity_id=invited_by, tier=body.tier
+        ),
+    )
+
+
+@router.patch(
+    "/operator/users/{identity_id}/tier",
+    response_model=OperatorSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Update an operator's tier (admin only)",
+)
+async def update_operator_tier(
+    request: Request,
+    identity_id: int,
+    admin: Annotated[Principal, Depends(require_admin)],
+    body: OperatorTierUpdateRequest,
+) -> OperatorSummary:
+    """Promote or demote an operator (spec #761, #769).
+
+    Admin-only (``require_admin``): only an admin-tier operator can change
+    another operator's tier. Self-demotion is refused. Demoting the last
+    active admin is refused. Every change revokes the operator's active
+    sessions and emits an ``operator.tier_changed`` audit event.
+    """
+    actor_id = int(admin.subject_id)
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.update_operator_tier(identity_id, body.tier, actor_identity_id=actor_id)
+
+
+@router.patch(
+    "/operator/users/{identity_id}/active",
+    response_model=OperatorSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Update an operator's active state (admin only)",
+)
+async def update_operator_active(
+    request: Request,
+    identity_id: int,
+    admin: Annotated[Principal, Depends(require_admin)],
+    body: OperatorActiveUpdateRequest,
+) -> OperatorSummary:
+    """Deactivate or reactivate an operator (spec #761, #769).
+
+    Admin-only (``require_admin``): only an admin-tier operator can change
+    another operator's active state. Self-deactivation is refused.
+    Deactivating the last active admin is refused. Deactivation revokes the
+    operator's active sessions and blocks login; reactivation restores
+    access. Every change emits an ``operator.active_changed`` audit event.
+    """
+    actor_id = int(admin.subject_id)
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.update_operator_active(
+        identity_id, body.is_active, actor_identity_id=actor_id
     )
 
 
@@ -641,6 +752,35 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    async def _operator_mfa_locked(request: Request, exc: Exception) -> JSONResponse:
+        locked = cast(OperatorMfaLockedError, exc)
+        return error_response(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "OPERATOR_MFA_LOCKED",
+            "operator login is locked after too many MFA failures",
+            headers={"Retry-After": str(locked.remaining_seconds)},
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _operator_self_change(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "OPERATOR_SELF_CHANGE",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _operator_last_admin(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "OPERATOR_LAST_ADMIN",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
     async def _refresh_token_unknown(request: Request, exc: Exception) -> JSONResponse:
         return error_response(
             status.HTTP_401_UNAUTHORIZED,
@@ -728,7 +868,10 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
     app.add_exception_handler(SessionIssuanceError, _session_refused)
     app.add_exception_handler(OperatorMfaError, _operator_mfa_failed)
+    app.add_exception_handler(OperatorMfaLockedError, _operator_mfa_locked)
     app.add_exception_handler(InvalidOperatorCodeError, _invalid_operator_code)
+    app.add_exception_handler(OperatorSelfChangeError, _operator_self_change)
+    app.add_exception_handler(OperatorLastAdminError, _operator_last_admin)
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
     app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)

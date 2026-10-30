@@ -281,6 +281,37 @@ class DraftRxResult(BaseModel):
     output_tokens: int = 0
 
 
+class EvaluateRequest(BaseModel):
+    """Input to the evaluation leg: a prompt for LLM-as-judge evaluation.
+
+    This is a generic completion endpoint for evaluation tasks. It carries
+    only the prompt and minimal context - never PHI. The caller is responsible
+    for constructing a prompt that asks the model to evaluate a specific
+    example and return a structured JSON response. Temperature is forced to
+    zero and response format to JSON for deterministic, parseable output.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str
+    context: AiEgressContext
+    temperature: float = 0.0
+    response_format: Literal["json_object"] = "json_object"
+
+
+class EvaluateResult(BaseModel):
+    """The evaluation result from the LLM judge.
+
+    ``raw_response`` is the parsed JSON object returned by the model.
+    ``input_tokens`` / ``output_tokens`` carry the provider's reported usage
+    for metering (PS-01).
+    """
+
+    raw_response: dict[str, object]
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 class Ext002CallError(RuntimeError):
     """A failed EXT-002 call, typed for the circuit breaker (error taxonomy).
 
@@ -310,7 +341,7 @@ class Ext002CallError(RuntimeError):
 
 
 class AiGateway(Protocol):
-    """Port every EXT-002 adapter satisfies (A6) - the three egress operations.
+    """Port every EXT-002 adapter satisfies (A6) - the four egress operations.
 
     Abstract by declaration; concrete adapters implement each operation and own
     the tracing (``@observe``) on the methods that make the LLM call.
@@ -334,6 +365,8 @@ class AiGateway(Protocol):
 
     async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult: ...
 
+    async def evaluate(self, request: EvaluateRequest) -> EvaluateResult: ...
+
 
 __all__ = [
     "LANG_EN",
@@ -342,6 +375,8 @@ __all__ = [
     "AiGateway",
     "DraftRxRequest",
     "DraftRxResult",
+    "EvaluateRequest",
+    "EvaluateResult",
     "Ext002CallError",
     "RxItem",
     "StructureRequest",

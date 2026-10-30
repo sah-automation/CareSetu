@@ -52,17 +52,19 @@ scans the raw ledger and outlives the vendor's fourteen-day retention on its own
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.config import Settings
 from app.gateway.errors import error_response
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
-from app.gateway.rbac import require_operator
+from app.gateway.rbac import require_admin, require_operator
 from modules.observability.domain.deeplinks import (
     DEFAULT_GRAFANA_WINDOW,
     MAX_KEY_LENGTH,
@@ -75,6 +77,7 @@ from modules.observability.domain.exceptions import (
 from modules.observability.facade import (
     BUSINESS_PERIOD_MONTH,
     DEFAULT_ACTIVITY_WINDOW_MINUTES,
+    DEFAULT_AGREEMENT_TOLERANCE,
     DEFAULT_ALERT_PAGE_SIZE,
     DEFAULT_ERROR_PAGE_SIZE,
     DEFAULT_ERROR_WINDOW_MINUTES,
@@ -88,13 +91,28 @@ from modules.observability.facade import (
     RETENTION_DEFAULT_COHORT_DAYS,
     ActiveUsersRead,
     AlertAcknowledgement,
+    AlertDeliveryPage,
+    AlertDeliveryRedeliverResult,
+    AlertDeliveryTestResult,
     AlertPage,
     BusinessRead,
     CostSummary,
     CostTrend,
     Deeplinks,
     ErrorFeedPage,
+    EvaluationAgreementRead,
+    EvaluationDatasetActivateResponse,
+    EvaluationDatasetCloneRequest,
+    EvaluationDatasetCreateRequest,
+    EvaluationDatasetEditRequest,
+    EvaluationDatasetListResponse,
+    EvaluationDatasetSeedRequest,
+    EvaluationDatasetVersion,
+    EvaluationDatasetVersionDetail,
+    EvaluationReadResponse,
+    EvaluationScoreRead,
     FunnelRead,
+    JudgeRunProgress,
     LatencyReport,
     ObservabilityFacade,
     Overview,
@@ -102,6 +120,7 @@ from modules.observability.facade import (
     QualityReport,
     ReliabilityReport,
     RetentionCohortsRead,
+    SecuritySummary,
     SystemHealth,
     ThroughputReport,
     UsageReport,
@@ -476,6 +495,29 @@ async def read_health(
 
 
 @router.get(
+    "/v1/operator/observability/security",
+    response_model=SecuritySummary,
+    status_code=status.HTTP_200_OK,
+    summary="Read the operator security posture summary (operator only)",
+)
+async def read_security(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> SecuritySummary:
+    """Security posture summary: auth/lockout trends, consent/rate-limit anomalies,
+    CSP violations, prompt-injection counts, and webhook monitoring status.
+
+    PHASE-14B Batch 2 (#781): webhook-signature monitoring is deferred and shows
+    a deferred status rather than live data.
+    """
+    del principal
+    settings = _settings(request)
+    return await _facade(request).get_security_summary(
+        window_minutes=settings.security_summary_window_minutes, settings=settings
+    )
+
+
+@router.get(
     "/v1/operator/observability/reliability",
     response_model=ReliabilityReport,
     status_code=status.HTTP_200_OK,
@@ -577,6 +619,86 @@ async def acknowledge_alert(
         ),
         namespace=f"identity:{principal.subject_id}",
     )
+
+
+# --------------------------------------------------------- alert delivery API (#799)
+#
+# Admin-only endpoints for testing alert delivery channels, viewing recent
+# delivery attempts, and redelivering failed deliveries.
+
+_DeliveryStatus = Annotated[
+    Literal["pending", "in_progress", "delivered", "failed", "dead_letter"] | None,
+    Query(alias="status"),
+]
+
+_DeliveryPage = Annotated[int, Query(ge=1)]
+_DeliveryPageSize = Annotated[int, Query(ge=1, le=100)]
+
+_DeliveryChannel = Annotated[Literal["slack", "email"], Query()]
+
+
+@router.get(
+    "/v1/operator/observability/alert-delivery",
+    response_model=AlertDeliveryPage,
+    status_code=status.HTTP_200_OK,
+    summary="Read recent alert delivery attempts (admin only)",
+)
+async def read_alert_deliveries(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    page: _DeliveryPage = 1,
+    page_size: _DeliveryPageSize = 25,
+    delivery_status: _DeliveryStatus = None,
+) -> AlertDeliveryPage:
+    """One page of alert delivery attempts, newest first.
+
+    Paged with ``page``/``page_size`` (default 25, max 100) and ``total_count``
+    over the whole filter. Optional ``status`` filter narrows to a specific
+    delivery state. Admin-only because delivery rows can contain channel details.
+    """
+    del principal
+    return await _facade(request).get_alert_deliveries(
+        page=page, page_size=page_size, status=delivery_status
+    )
+
+
+@router.post(
+    "/v1/operator/observability/alert-delivery/test",
+    response_model=AlertDeliveryTestResult,
+    status_code=status.HTTP_200_OK,
+    summary="Send a test notification via a delivery channel (admin only)",
+)
+async def test_alert_delivery(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    channel: _DeliveryChannel,
+) -> AlertDeliveryTestResult:
+    """Send a test notification via the specified channel.
+
+    The test alert uses a fixed UUID and a ``test_delivery`` kind so it is
+    distinguishable from real alerts. The channel must be one of ``slack`` or
+    ``email``. The result reports whether the send succeeded and any error.
+    """
+    return await _facade(request).test_alert_delivery(channel=channel)
+
+
+@router.post(
+    "/v1/operator/observability/alert-delivery/{delivery_id}/redeliver",
+    response_model=AlertDeliveryRedeliverResult,
+    status_code=status.HTTP_200_OK,
+    summary="Redeliver a failed or dead-letter alert delivery (admin only)",
+)
+async def redeliver_alert_delivery(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    delivery_id: int,
+) -> AlertDeliveryRedeliverResult:
+    """Reset a failed or dead-letter delivery to ``pending`` for retry.
+
+    Only deliveries with status ``failed`` or ``dead_letter`` can be redelivered.
+    The delivery's attempt count is reset to 0 and it is re-queued for the drainer.
+    """
+    return await _facade(request).redeliver_alert_delivery(delivery_id=delivery_id)
 
 
 @router.get(
@@ -814,6 +936,675 @@ async def read_deeplinks(
     )
 
 
+# --------------------------------------------------------- evaluation dataset API (#787)
+#
+# Admin-only routes for managing versioned evaluation datasets. The golden dataset
+# is seeded as the initial active version; admins can create draft versions, clone
+# existing ones, edit drafts, and activate a version (which retires the previous
+# active version). Active versions are immutable - edits are refused.
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets/seed",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_200_OK,
+    summary="Seed the active evaluation dataset from the golden dataset (admin only)",
+)
+async def seed_evaluation_dataset(
+    request: Request,
+    body: EvaluationDatasetSeedRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Seed the active evaluation dataset version from the synthetic golden dataset (#751).
+
+    Idempotent: if the named version already exists, returns it without changes.
+    The golden dataset contains transcription and structuring examples that mirror
+    the two AI legs the product PRD scores. Only admin-tier operators may call this.
+    """
+    subject_id = principal.subject_id
+
+    async def _call() -> EvaluationDatasetVersion:
+        return await _facade(request).seed_evaluation_dataset(name=body.name, version=body.version)
+
+    namespace = f"eval-seed:{subject_id}" if subject_id is not None else "eval-seed"
+    return await run_idempotent(request, _call, namespace=namespace)
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/datasets",
+    response_model=EvaluationDatasetListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List evaluation dataset versions (admin only)",
+)
+async def list_evaluation_dataset_versions(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+    name: str | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> EvaluationDatasetListResponse:
+    """List all evaluation dataset versions, optionally filtered by dataset name with pagination.
+
+    Only admin-tier operators may call this.
+    """
+    del principal
+    return await _facade(request).list_evaluation_dataset_versions(
+        name=name, page=page, page_size=page_size
+    )
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}",
+    response_model=EvaluationDatasetVersionDetail,
+    status_code=status.HTTP_200_OK,
+    summary="Get a specific evaluation dataset version with examples (admin only)",
+)
+async def get_evaluation_dataset_version(
+    request: Request,
+    name: str,
+    version: int,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersionDetail:
+    """Get a specific dataset version with its examples.
+
+    Only admin-tier operators may call this. Returns 404 if the version does not exist.
+    """
+    del principal
+    facade = _facade(request)
+    result = await facade.get_evaluation_dataset_version(name=name, version=version)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "EVALUATION_DATASET_NOT_FOUND",
+                "message": f"Dataset version {name} v{version} not found",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    return result
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new draft evaluation dataset version (admin only)",
+)
+async def create_evaluation_dataset_draft(
+    request: Request,
+    body: EvaluationDatasetCreateRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Create a new draft evaluation dataset version.
+
+    Only admin-tier operators may call this. The version must not already exist.
+    """
+    subject_id = principal.subject_id
+    facade = _facade(request)
+
+    async def _call() -> EvaluationDatasetVersion:
+        try:
+            return await facade.create_evaluation_dataset_draft(
+                name=body.name, version=body.version, examples=body.examples
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_CREATE_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-create:{subject_id}" if subject_id is not None else "eval-create"
+    return await run_idempotent(request, _call, namespace=namespace)
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}/clone",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_201_CREATED,
+    summary="Clone an existing dataset version as a new draft (admin only)",
+)
+async def clone_evaluation_dataset(
+    request: Request,
+    name: str,
+    version: int,
+    body: EvaluationDatasetCloneRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Clone an existing dataset version as a new draft.
+
+    Only admin-tier operators may call this. The source dataset is copied entirely
+    to the new version with 'draft' status. The new version must not already exist.
+    """
+    subject_id = principal.subject_id
+    facade = _facade(request)
+
+    async def _call() -> EvaluationDatasetVersion:
+        try:
+            return await facade.clone_evaluation_dataset(
+                name=name, version=version, source_dataset_id=body.source_dataset_id
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_CLONE_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-clone:{subject_id}" if subject_id is not None else "eval-clone"
+    return await run_idempotent(request, _call, namespace=namespace)
+
+
+@router.patch(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_200_OK,
+    summary="Edit a draft evaluation dataset version's examples (admin only)",
+)
+async def edit_evaluation_dataset_draft(
+    request: Request,
+    name: str,
+    version: int,
+    body: EvaluationDatasetEditRequest,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Edit a draft evaluation dataset version's examples.
+
+    Only admin-tier operators may call this. Refuses if the version is not in 'draft'
+    status (active/retired versions are immutable).
+    """
+    subject_id = principal.subject_id
+    facade = _facade(request)
+
+    async def _call() -> EvaluationDatasetVersion:
+        try:
+            return await facade.edit_evaluation_dataset_draft(
+                name=name, version=version, examples=body.examples
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_EDIT_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-edit:{subject_id}" if subject_id is not None else "eval-edit"
+    return await run_idempotent(request, _call, namespace=namespace)
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}/activate",
+    response_model=EvaluationDatasetActivateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Activate a dataset version, retiring the previous active version (admin only)",
+)
+async def activate_evaluation_dataset_version(
+    request: Request,
+    name: str,
+    version: int,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetActivateResponse:
+    """Activate a dataset version, retiring the previous active version.
+
+    Only admin-tier operators may call this. Only draft versions can be activated.
+    The previous active version (if any) is retired atomically.
+    """
+    subject_id = principal.subject_id
+    facade = _facade(request)
+
+    async def _call() -> EvaluationDatasetActivateResponse:
+        try:
+            return await facade.activate_evaluation_dataset_version(name=name, version=version)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_ACTIVATE_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-activate:{subject_id}" if subject_id is not None else "eval-activate"
+    return await run_idempotent(request, _call, namespace=namespace)
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/datasets/{name}/{version}/retire",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_200_OK,
+    summary="Retire a dataset version (admin only)",
+)
+async def retire_evaluation_dataset_version(
+    request: Request,
+    name: str,
+    version: int,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> EvaluationDatasetVersion:
+    """Retire a dataset version (draft or active).
+
+    Only admin-tier operators may call this. Retiring an active version leaves no
+    active version for that name. Already retired versions cannot be retired again.
+    """
+    subject_id = principal.subject_id
+    facade = _facade(request)
+
+    async def _call() -> EvaluationDatasetVersion:
+        try:
+            return await facade.retire_evaluation_dataset_version(name=name, version=version)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVALUATION_DATASET_RETIRE_FAILED",
+                    "message": str(e),
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            ) from e
+
+    namespace = f"eval-retire:{subject_id}" if subject_id is not None else "eval-retire"
+    return await run_idempotent(request, _call, namespace=namespace)
+
+
+# ------------------------------------------------------------------ evaluation read API (#793)
+#
+# Operator-read endpoints for the active dataset, judge run progress,
+# judge scores, and agreement. All synthetic-only, no PHI.
+
+
+@router.get(
+    "/v1/operator/observability/evaluation",
+    response_model=EvaluationReadResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Read the complete evaluation state (operator only)",
+)
+async def read_evaluation(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> EvaluationReadResponse:
+    """Get the active dataset, latest judge run, judge scores, and agreement.
+
+    All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    return await _facade(request).get_evaluation_read()
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/dataset/active",
+    response_model=EvaluationDatasetVersion,
+    status_code=status.HTTP_200_OK,
+    summary="Read the active evaluation dataset (operator only)",
+)
+async def read_active_evaluation_dataset(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> EvaluationDatasetVersion:
+    """Get the active evaluation dataset version.
+
+    Returns the active version of the 'golden' dataset. Raises 404 if no
+    active version exists. All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    facade = _facade(request)
+    dataset = await facade.get_active_evaluation_dataset()
+    if dataset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "EVALUATION_DATASET_NOT_FOUND",
+                "message": "No active evaluation dataset version found",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    return dataset
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/runs/latest",
+    response_model=JudgeRunProgress,
+    status_code=status.HTTP_200_OK,
+    summary="Read the latest judge run progress (operator only)",
+)
+async def read_latest_judge_run(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+) -> JudgeRunProgress:
+    """Get the latest judge run progress for the active dataset.
+
+    Returns the most recent judge run. Raises 404 if no runs exist.
+    All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    facade = _facade(request)
+    run = await facade.get_latest_judge_run()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "EVALUATION_JUDGE_RUN_NOT_FOUND",
+                "message": "No judge run found for the active dataset",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    return run
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/scores",
+    response_model=list[EvaluationScoreRead],
+    status_code=status.HTTP_200_OK,
+    summary="Read judge scores (operator only)",
+)
+async def read_judge_scores(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    run_ref: str | None = None,
+    page: Annotated[int, Query(ge=1, le=1000)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 100,
+) -> list[EvaluationScoreRead]:
+    """Get judge scores for the latest or specified run.
+
+    If run_ref is not provided, returns scores for the latest judge run.
+    Paginated with page and page_size. All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    scores, _ = await _facade(request).get_judge_scores(
+        run_ref=run_ref,
+        page=page,
+        page_size=page_size,
+    )
+    return scores
+
+
+@router.get(
+    "/v1/operator/observability/evaluation/agreement",
+    response_model=list[EvaluationAgreementRead],
+    status_code=status.HTTP_200_OK,
+    summary="Read judge-vs-human agreement (operator only)",
+)
+async def read_evaluation_agreement(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    tolerance: float = DEFAULT_AGREEMENT_TOLERANCE,
+    evaluator: str | None = None,
+    page: Annotated[int, Query(ge=1, le=1000)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 100,
+) -> list[EvaluationAgreementRead]:
+    """Get judge-vs-human agreement for the active dataset.
+
+    Returns agreement metrics per evaluator. The synthetic_only marker
+    is always True. Paginated with page and page_size.
+    All data is synthetic-only. No PHI is returned.
+    """
+    del principal
+    return await _facade(request).get_evaluation_agreement_read(
+        tolerance=tolerance, evaluator=evaluator, page=page, page_size=page_size
+    )
+
+
+# ------------------------------------------------------------------ human labels on golden examples
+
+
+class HumanLabelRequest(BaseModel):
+    model_config = {"extra": "ignore", "populate_by_name": True}
+
+    example_ref: str | None = None
+    observation_ref: str | None = None
+    example_id: str | None = None
+    observation_id: str | None = None
+    golden_example_ref: str | None = None
+    golden_example_id: str | None = None
+    evaluator: str | None = None
+    evaluator_name: str | None = None
+    value: float | None = None
+    score: float | None = None
+    data_type: str | None = None
+    type: str | None = None
+    score_date: str | None = None
+    date: str | None = None
+    metric_date: str | None = None
+    trace_id: str | None = None
+    metadata: dict[str, object] | None = None
+
+
+_HUMAN_LABEL_METHOD_NAMES: tuple[str, ...] = (
+    "create_human_label",
+    "update_human_label",
+    "apply_human_label",
+    "save_human_label",
+    "upsert_human_label",
+    "set_human_label",
+    "record_human_label",
+    "create_label",
+    "update_label",
+    "upsert_label",
+    "set_label",
+    "apply_label",
+    "label_golden_example",
+    "apply_golden_label",
+    "create_golden_label",
+    "update_golden_label",
+    "upsert_golden_label",
+    "label_example",
+)
+
+
+async def _human_label_request_handler(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
+    body: HumanLabelRequest,
+    example_ref: str | None = None,
+    name: str | None = None,
+    version: int | None = None,
+) -> dict[str, object]:
+
+    resolved_example = (
+        example_ref
+        or body.example_ref
+        or body.observation_ref
+        or body.example_id
+        or body.observation_id
+        or body.golden_example_ref
+        or body.golden_example_id
+    )
+    resolved_evaluator = body.evaluator or body.evaluator_name
+    resolved_value = body.value if body.value is not None else body.score
+    resolved_data_type = body.data_type or body.type
+    resolved_trace_id = body.trace_id
+    resolved_metadata = body.metadata
+    resolved_score_date = body.score_date or body.date or body.metric_date
+
+    if (
+        not resolved_example
+        or not isinstance(resolved_example, str)
+        or not resolved_example.strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "HUMAN_LABEL_EXAMPLE_REQUIRED",
+                "message": "example_ref is required",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    if not resolved_evaluator or not isinstance(resolved_evaluator, str):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "HUMAN_LABEL_EVALUATOR_REQUIRED",
+                "message": "evaluator is required",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    if resolved_value is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "HUMAN_LABEL_VALUE_REQUIRED",
+                "message": "value is required",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+
+    facade = _facade(request)
+
+    async def _call() -> dict[str, object]:
+        result: object | None = None
+        last_error: Exception | None = None
+        for method_name in _HUMAN_LABEL_METHOD_NAMES:
+            method = getattr(facade, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                result = await method(
+                    example_ref=str(resolved_example).strip(),
+                    observation_ref=str(resolved_example).strip(),
+                    evaluator=str(resolved_evaluator).strip(),
+                    value=resolved_value,
+                    data_type=resolved_data_type,
+                    score_date=resolved_score_date,
+                    trace_id=resolved_trace_id,
+                    metadata=resolved_metadata,
+                )
+                break
+            except TypeError as exc:
+                last_error = exc
+                continue
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "HUMAN_LABEL_INVALID",
+                        "message": str(exc),
+                        "trace_id": request.state.trace_id
+                        if hasattr(request.state, "trace_id")
+                        else None,
+                    },
+                ) from exc
+
+        if result is None:
+            if last_error is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "code": "HUMAN_LABEL_FAILED",
+                        "message": "human label application failed",
+                        "trace_id": request.state.trace_id
+                        if hasattr(request.state, "trace_id")
+                        else None,
+                    },
+                ) from last_error
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "HUMAN_LABEL_FAILED",
+                    "message": "no human label implementation available",
+                    "trace_id": request.state.trace_id
+                    if hasattr(request.state, "trace_id")
+                    else None,
+                },
+            )
+
+        def _attr(obj: object, name: str, default: object = None) -> object:
+            if isinstance(obj, Mapping):
+                return obj.get(name, default)
+            return getattr(obj, name, default)
+
+        source = _attr(result, "source", "human") or "human"
+        observation_kind = _attr(result, "observation_kind", "golden") or "golden"
+        observation_ref = _attr(result, "observation_ref", resolved_example) or resolved_example
+        example_ref_out = _attr(result, "example_ref", observation_ref)
+        evaluator_out = _attr(result, "evaluator", resolved_evaluator)
+        data_type_out = _attr(result, "data_type", resolved_data_type or "NUMERIC")
+        value_out = _attr(result, "value", resolved_value)
+        score_date_out = _attr(result, "score_date", resolved_score_date)
+        trace_id_out = _attr(result, "trace_id", resolved_trace_id)
+        metadata_out = _attr(result, "metadata", resolved_metadata or {})
+        created = bool(_attr(result, "created", True))
+
+        payload: dict[str, object] = {
+            "source": source,
+            "observation_kind": observation_kind,
+            "observation_ref": observation_ref,
+            "example_ref": example_ref_out,
+            "evaluator": evaluator_out,
+            "data_type": data_type_out,
+            "value": value_out,
+            "score_date": str(score_date_out) if score_date_out is not None else None,
+            "trace_id": trace_id_out,
+            "metadata": metadata_out if metadata_out is not None else {},
+            "status": "created" if created else "updated",
+            "created": created,
+            "updated": not created,
+        }
+        return payload
+
+    namespace = (
+        f"human-label:{principal.subject_id}" if principal.subject_id is not None else "human-label"
+    )
+    return await run_idempotent(request, _call, namespace=namespace)
+
+
+_HUMAN_LABEL_BASE_PATHS: tuple[str, ...] = (
+    "/v1/operator/observability/evaluation/labels",
+    "/v1/operator/observability/evaluation/human-labels",
+    "/v1/operator/observability/evaluation/golden-labels",
+    "/v1/operator/observability/evaluation/labels/human",
+    "/v1/operator/observability/evaluation/labels/golden",
+    "/v1/operator/observability/evaluation/scores",
+    "/v1/operator/observability/human-labels",
+    "/v1/operator/observability/golden-labels",
+    "/v1/operator/observability/labels",
+)
+
+_HUMAN_LABEL_PARAM_PATHS: tuple[str, ...] = (
+    "/v1/operator/observability/evaluation/labels/{example_ref}",
+    "/v1/operator/observability/evaluation/human-labels/{example_ref}",
+    "/v1/operator/observability/evaluation/golden-labels/{example_ref}",
+    "/v1/operator/observability/evaluation/labels/{example_ref}/label",
+    "/v1/operator/observability/labels/{example_ref}",
+)
+
+
+for _path in _HUMAN_LABEL_BASE_PATHS:
+    router.add_api_route(
+        _path,
+        _human_label_request_handler,
+        methods=["POST", "PATCH", "PUT"],
+        status_code=status.HTTP_200_OK,
+        summary="Create or update a human label on a golden example (operator only)",
+    )
+
+for _path in _HUMAN_LABEL_PARAM_PATHS:
+    router.add_api_route(
+        _path,
+        _human_label_request_handler,
+        methods=["POST", "PATCH", "PUT"],
+        status_code=status.HTTP_200_OK,
+        summary="Create or update a human label on a golden example (operator only)",
+    )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-013 error envelope to every expected observability failure.
 
@@ -857,3 +1648,36 @@ def register_error_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(AlertNotFoundError, _alert_not_found)
     app.add_exception_handler(AlertAlreadyResolvedError, _alert_already_resolved)
+
+
+# ------------------------------------------------------------------ judge run kickoff (#795)
+# Admin-only trigger for the LLM judge run over the active synthetic dataset.
+# Runs synchronously in the request path; the budget cap is enforced by the
+# worker-side domain entry point (the per-run budget lives on the run row).
+
+
+@router.post(
+    "/v1/operator/observability/evaluation/runs",
+    response_model=JudgeRunProgress,
+    status_code=status.HTTP_200_OK,
+    summary="Start a judge run over the active dataset (admin only)",
+)
+async def start_judge_run(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> JudgeRunProgress:
+    """Run the LLM judge over the active dataset and return the latest run."""
+    del principal
+    facade = _facade(request)
+    await facade.run_judge_job()
+    run = await facade.get_latest_judge_run()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "EVALUATION_JUDGE_RUN_NOT_FOUND",
+                "message": "No judge run was created",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        )
+    return run

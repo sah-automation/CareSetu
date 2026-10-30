@@ -37,6 +37,17 @@ from modules.observability.domain.product import (
     non_clinical_event_word,
     product_steps,
 )
+from modules.observability.domain.security_detector import (
+    SECURITY_SIGNAL_AUTH_FAILURE,
+    SECURITY_SIGNAL_CONSENT_REVOCATION,
+    SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+    SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+    SECURITY_SIGNAL_OTP_LOCKOUT,
+    SECURITY_SIGNAL_PROMPT_INJECTION,
+    SECURITY_SIGNAL_RATE_LIMIT,
+    SECURITY_SIGNAL_RECORD_DENIAL,
+    SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+)
 from modules.observability.facade import (
     ACTIVE_USER_SOURCE_CONVENTION,
     ACTIVE_USER_WINDOW_CONVENTION,
@@ -69,15 +80,21 @@ from modules.observability.facade import (
     CostSummary,
     CostTrend,
     CostTrendPoint,
+    CspAggregateView,
     Deeplinks,
     DependencyHealth,
     DoctorSpend,
     ErrorFeedEntry,
     ErrorFeedPage,
+    EvaluationAgreementRead,
+    EvaluationDatasetVersion,
+    EvaluationReadResponse,
+    EvaluationScoreRead,
     FunnelOutcomeTotals,
     FunnelRead,
     FunnelStepRow,
     GrafanaDeeplinks,
+    JudgeRunProgress,
     LatencyReport,
     LatencyRow,
     MarginPercent,
@@ -97,6 +114,8 @@ from modules.observability.facade import (
     RetentionCohortDay,
     RetentionCohortsRead,
     RouteThroughputRow,
+    SecuritySignalView,
+    SecuritySummary,
     SystemHealth,
     TaskTypeSpend,
     ThroughputPoint,
@@ -129,6 +148,12 @@ BUSINESS_PATH = "/v1/operator/observability/business"
 FUNNEL_PATH = "/v1/operator/observability/product/funnel"
 ACTIVE_USERS_PATH = "/v1/operator/observability/product/active-users"
 RETENTION_PATH = "/v1/operator/observability/product/retention-cohorts"
+SECURITY_PATH = "/v1/operator/observability/security"
+EVALUATION_PATH = "/v1/operator/observability/evaluation"
+EVALUATION_ACTIVE_DATASET_PATH = "/v1/operator/observability/evaluation/dataset/active"
+EVALUATION_LATEST_RUN_PATH = "/v1/operator/observability/evaluation/runs/latest"
+EVALUATION_SCORES_PATH = "/v1/operator/observability/evaluation/scores"
+EVALUATION_AGREEMENT_PATH = "/v1/operator/observability/evaluation/agreement"
 
 _ALERT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
@@ -452,6 +477,169 @@ _ERRORS = ErrorFeedPage(
     ],
 )
 
+#: The security summary stub the route serialises. PHASE-14B Batch 2 (#782):
+#: shows auth/lockout trends, consent/rate-limit anomalies, CSP violations,
+#: prompt-injection counts, and webhook monitoring status.
+_SECURITY = SecuritySummary(
+    signals=[
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_AUTH_FAILURE,
+            count_last_5m=12,
+            threshold=10,
+            alert_kind="auth_failure_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+            count_last_5m=3,
+            threshold=5,
+            alert_kind="operator_mfa_failure_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_RECORD_DENIAL,
+            count_last_5m=0,
+            threshold=10,
+            alert_kind="record_denial_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_RATE_LIMIT,
+            count_last_5m=7,
+            threshold=20,
+            alert_kind="rate_limit_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_PROMPT_INJECTION,
+            count_last_5m=2,
+            threshold=3,
+            alert_kind="prompt_injection_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OTP_LOCKOUT,
+            count_last_5m=1,
+            threshold=None,
+            alert_kind="otp_lockout",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="operator_mfa_lockout",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_CONSENT_REVOCATION,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="consent_revocation",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="webhook_signature_failure",
+            is_deferred=True,
+            deferred_reason="No inbound webhook exists",
+        ),
+    ],
+    csp_aggregates=[
+        CspAggregateView(
+            directive="script-src",
+            disposition="enforce",
+            blocked_source="https://evil.example.com",
+            count=5,
+        ),
+        CspAggregateView(
+            directive="img-src",
+            disposition="report-only",
+            blocked_source="",
+            count=2,
+        ),
+    ],
+    prompt_injection_count=2,
+    webhook_monitoring_status="deferred",
+    webhook_monitoring_reason="No inbound webhook exists",
+)
+
+#: The empty security summary stub: no signals, no CSP aggregates, zero counts.
+_EMPTY_SECURITY = SecuritySummary(
+    signals=[
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_AUTH_FAILURE,
+            count_last_5m=0,
+            threshold=10,
+            alert_kind="auth_failure_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OPERATOR_MFA_FAILURE,
+            count_last_5m=0,
+            threshold=5,
+            alert_kind="operator_mfa_failure_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_RECORD_DENIAL,
+            count_last_5m=0,
+            threshold=10,
+            alert_kind="record_denial_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_RATE_LIMIT,
+            count_last_5m=0,
+            threshold=20,
+            alert_kind="rate_limit_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_PROMPT_INJECTION,
+            count_last_5m=0,
+            threshold=3,
+            alert_kind="prompt_injection_high",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OTP_LOCKOUT,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="otp_lockout",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_OPERATOR_MFA_LOCKOUT,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="operator_mfa_lockout",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_CONSENT_REVOCATION,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="consent_revocation",
+            is_deferred=False,
+        ),
+        SecuritySignalView(
+            signal_kind=SECURITY_SIGNAL_WEBHOOK_SIGNATURE_FAILURE,
+            count_last_5m=0,
+            threshold=None,
+            alert_kind="webhook_signature_failure",
+            is_deferred=True,
+            deferred_reason="No inbound webhook exists",
+        ),
+    ],
+    csp_aggregates=[],
+    prompt_injection_count=0,
+    webhook_monitoring_status="deferred",
+    webhook_monitoring_reason="No inbound webhook exists",
+)
+
 
 _BUSINESS = BusinessRead(
     period="month_to_date",
@@ -689,6 +877,14 @@ class StubObservabilityFacade:
         self.funnel_calls: list[tuple[int, str | None]] = []
         self.active_user_days: list[int] = []
         self.retention_days: list[int] = []
+        self.security_summary_calls: list[dict[str, Any]] = []
+        self.security_summary_empty = False
+        # Evaluation read API (#793)
+        self.evaluation_read_calls = 0
+        self.active_dataset_calls = 0
+        self.latest_judge_run_calls = 0
+        self.judge_scores_calls: list[str | None] = []
+        self.agreement_calls: list[dict[str, Any]] = []
 
     async def get_cost_summary(self) -> CostSummary:
         self.summary_calls += 1
@@ -757,6 +953,12 @@ class StubObservabilityFacade:
             alert=entry, already_acknowledged=self.acknowledgement_is_repeat
         )
 
+    async def get_security_summary(
+        self, *, window_minutes: int, settings: Settings
+    ) -> SecuritySummary:
+        self.security_summary_calls.append({"window_minutes": window_minutes})
+        return _EMPTY_SECURITY if self.security_summary_empty else _SECURITY
+
     async def get_error_feed(
         self,
         *,
@@ -784,6 +986,38 @@ class StubObservabilityFacade:
     async def get_retention_cohorts(self, *, days: int) -> RetentionCohortsRead:
         self.retention_days.append(days)
         return _RETENTION.model_copy(update={"days": days})
+
+    # Evaluation read API (#793)
+    async def get_evaluation_read(self) -> EvaluationReadResponse:
+        self.evaluation_read_calls += 1
+        return _EVALUATION_READ
+
+    async def get_active_evaluation_dataset(self) -> EvaluationDatasetVersion:
+        self.active_dataset_calls += 1
+        return _ACTIVE_EVALUATION_DATASET
+
+    async def get_latest_judge_run(self) -> JudgeRunProgress:
+        self.latest_judge_run_calls += 1
+        return _LATEST_JUDGE_RUN
+
+    async def get_judge_scores(
+        self, *, run_ref: str | None = None, page: int = 1, page_size: int = 100
+    ) -> tuple[list[EvaluationScoreRead], int]:
+        self.judge_scores_calls.append({"run_ref": run_ref, "page": page, "page_size": page_size})
+        return _JUDGE_SCORES, len(_JUDGE_SCORES)
+
+    async def get_evaluation_agreement_read(
+        self,
+        *,
+        tolerance: float = 0.1,
+        evaluator: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> list[EvaluationAgreementRead]:
+        self.agreement_calls.append(
+            {"tolerance": tolerance, "evaluator": evaluator, "page": page, "page_size": page_size}
+        )
+        return _AGREEMENT_READ
 
     def get_deeplinks(
         self,
@@ -1105,6 +1339,125 @@ def test_throughput_rates_are_exact_decimals_not_binary_floats() -> None:
     assert Decimal(body["error_rate"]) == Decimal("0.2143")
     assert isinstance(body["requests_per_minute"], str)
     assert Decimal(body["requests_per_minute"]) == Decimal("0.23")
+
+
+# ------------------------------------------------------------- security (#782)
+
+
+def test_operator_reads_security_summary_with_signals_csp_and_prompt_injection() -> None:
+    """Security posture summary: auth/lockout trends, consent/rate-limit anomalies,
+    CSP violations, prompt-injection counts, and webhook monitoring status.
+    """
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(SECURITY_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    assert facade.security_summary_calls == [{"window_minutes": 5}]
+    body = response.json()
+
+    # Signals cover all tracked kinds with thresholds and alert kinds
+    assert len(body["signals"]) == 9
+    signal_kinds = {s["signal_kind"] for s in body["signals"]}
+    expected_kinds = {
+        "auth_failure",
+        "operator_mfa_failure",
+        "record_denial",
+        "rate_limit",
+        "prompt_injection",
+        "otp_lockout",
+        "operator_mfa_lockout",
+        "consent_revocation",
+        "webhook_signature_failure",
+    }
+    assert signal_kinds == expected_kinds
+
+    # Threshold signals have threshold and alert_kind
+    auth_failure = next(s for s in body["signals"] if s["signal_kind"] == "auth_failure")
+    assert auth_failure["count_last_5m"] == 12
+    assert auth_failure["threshold"] == 10
+    assert auth_failure["alert_kind"] == "auth_failure_high"
+    assert auth_failure["is_deferred"] is False
+
+    # Irreversible signals have no threshold but have alert_kind
+    otp_lockout = next(s for s in body["signals"] if s["signal_kind"] == "otp_lockout")
+    assert otp_lockout["count_last_5m"] == 1
+    assert otp_lockout["threshold"] is None
+    assert otp_lockout["alert_kind"] == "otp_lockout"
+    assert otp_lockout["is_deferred"] is False
+
+    # Webhook signature failure is deferred
+    webhook = next(s for s in body["signals"] if s["signal_kind"] == "webhook_signature_failure")
+    assert webhook["count_last_5m"] == 0
+    assert webhook["threshold"] is None
+    assert webhook["alert_kind"] == "webhook_signature_failure"
+    assert webhook["is_deferred"] is True
+    assert webhook["deferred_reason"] == "No inbound webhook exists"
+
+    # CSP aggregates
+    assert len(body["csp_aggregates"]) == 2
+    assert body["csp_aggregates"][0]["directive"] == "script-src"
+    assert body["csp_aggregates"][0]["disposition"] == "enforce"
+    assert body["csp_aggregates"][0]["blocked_source"] == "https://evil.example.com"
+    assert body["csp_aggregates"][0]["count"] == 5
+
+    # Prompt injection count
+    assert body["prompt_injection_count"] == 2
+
+    # Webhook monitoring status
+    assert body["webhook_monitoring_status"] == "deferred"
+    assert body["webhook_monitoring_reason"] == "No inbound webhook exists"
+
+
+def test_security_summary_empty_state_returns_zero_counts_and_empty_csp() -> None:
+    """Empty and degraded states: zero counts, empty CSP, but all signal kinds present."""
+    facade = StubObservabilityFacade()
+    facade.security_summary_empty = True
+    client = _client(facade)
+
+    response = client.get(SECURITY_PATH, headers=_operator())
+
+    assert response.status_code == 200
+    body = response.json()
+
+    # All signal kinds present with zero counts
+    assert len(body["signals"]) == 9
+    for signal in body["signals"]:
+        assert signal["count_last_5m"] == 0
+
+    # No CSP aggregates
+    assert body["csp_aggregates"] == []
+
+    # Zero prompt injection count
+    assert body["prompt_injection_count"] == 0
+
+    # Webhook monitoring still deferred
+    assert body["webhook_monitoring_status"] == "deferred"
+    assert body["webhook_monitoring_reason"] == "No inbound webhook exists"
+
+
+def test_security_summary_no_phi_or_raw_reports() -> None:
+    """Response never contains PHI, raw CSP reports, or subject keys."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    body = client.get(SECURITY_PATH, headers=_operator()).json()
+
+    # No raw reports, no subject keys, no phone numbers, no free text
+    response_str = str(body)
+    assert "subject_key" not in response_str
+    assert "phone" not in response_str.lower()
+    assert "raw" not in response_str.lower()
+
+
+def test_security_route_refuses_anonymous_and_non_operator_callers() -> None:
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    assert client.get(SECURITY_PATH).status_code == 401
+    assert client.get(SECURITY_PATH, headers=_bearer(_token(scope="patient"))).status_code == 403
+    assert facade.security_summary_calls == []
 
 
 def test_health_reports_dependencies_outbox_and_breakers() -> None:
@@ -2183,6 +2536,186 @@ _RETENTION = RetentionCohortsRead(
 )
 
 
+# ------------------------------------------------------------------ eval read API test data (#793)
+_EVALUATION_READ = EvaluationReadResponse(
+    active_dataset=EvaluationDatasetVersion(
+        id=1,
+        name="golden",
+        version=1,
+        status="active",
+        created_at="2026-10-01T00:00:00+00:00",
+        updated_at="2026-10-12T00:00:00+00:00",
+        example_count=20,
+        is_active=True,
+    ),
+    judge_run=JudgeRunProgress(
+        run_ref="eval-run-001",
+        dataset_name="golden",
+        dataset_version=1,
+        status="completed",
+        budget_paise=10_000,
+        cost_paise=8_500,
+        started_at="2026-10-12T10:00:00+00:00",
+        completed_at="2026-10-12T10:05:00+00:00",
+        failure_reason=None,
+        example_count=20,
+        scored_count=20,
+        synthetic_only=True,
+    ),
+    judge_scores=[
+        EvaluationScoreRead(
+            evaluator="completeness",
+            observation_ref="transcribe-001",
+            observation_kind="golden",
+            source="judge",
+            data_type="NUMERIC",
+            value=0.95,
+            judge_run_ref="eval-run-001",
+            score_date="2026-10-12",
+            trace_id="trace-001",
+            metadata={"model": "gpt-4o-mini", "prompt_version": "v1"},
+        ),
+        EvaluationScoreRead(
+            evaluator="confidence_calibration",
+            observation_ref="structure-001",
+            observation_kind="golden",
+            source="judge",
+            data_type="NUMERIC",
+            value=0.88,
+            judge_run_ref="eval-run-001",
+            score_date="2026-10-12",
+            trace_id="trace-002",
+            metadata={"model": "gpt-4o-mini", "prompt_version": "v1"},
+        ),
+    ],
+    agreement=[
+        EvaluationAgreementRead(
+            evaluator="completeness",
+            count=10,
+            mean_absolute_error=0.05,
+            within_tolerance_share=0.9,
+            kappa=None,
+            tolerance=0.1,
+            data_type="NUMERIC",
+            synthetic_only=True,
+            empty=False,
+        ),
+        EvaluationAgreementRead(
+            evaluator="confidence_calibration",
+            count=10,
+            mean_absolute_error=0.08,
+            within_tolerance_share=0.8,
+            kappa=None,
+            tolerance=0.1,
+            data_type="NUMERIC",
+            synthetic_only=True,
+            empty=False,
+        ),
+        EvaluationAgreementRead(
+            evaluator="job_succeeded",
+            count=10,
+            mean_absolute_error=0.0,
+            within_tolerance_share=1.0,
+            kappa=1.0,
+            tolerance=0.1,
+            data_type="BOOLEAN",
+            synthetic_only=True,
+            empty=False,
+        ),
+    ],
+    synthetic_only=True,
+)
+
+_ACTIVE_EVALUATION_DATASET = EvaluationDatasetVersion(
+    id=1,
+    name="golden",
+    version=1,
+    status="active",
+    created_at="2026-10-01T00:00:00+00:00",
+    updated_at="2026-10-12T00:00:00+00:00",
+    example_count=20,
+    is_active=True,
+)
+
+_LATEST_JUDGE_RUN = JudgeRunProgress(
+    run_ref="eval-run-001",
+    dataset_name="golden",
+    dataset_version=1,
+    status="completed",
+    budget_paise=10_000,
+    cost_paise=8_500,
+    started_at="2026-10-12T10:00:00+00:00",
+    completed_at="2026-10-12T10:05:00+00:00",
+    failure_reason=None,
+    example_count=20,
+    scored_count=20,
+    synthetic_only=True,
+)
+
+_JUDGE_SCORES = [
+    EvaluationScoreRead(
+        evaluator="completeness",
+        observation_ref="transcribe-001",
+        observation_kind="golden",
+        source="judge",
+        data_type="NUMERIC",
+        value=0.95,
+        judge_run_ref="eval-run-001",
+        score_date="2026-10-12",
+        trace_id="trace-001",
+        metadata={"model": "gpt-4o-mini", "prompt_version": "v1"},
+    ),
+    EvaluationScoreRead(
+        evaluator="confidence_calibration",
+        observation_ref="structure-001",
+        observation_kind="golden",
+        source="judge",
+        data_type="NUMERIC",
+        value=0.88,
+        judge_run_ref="eval-run-001",
+        score_date="2026-10-12",
+        trace_id="trace-002",
+        metadata={"model": "gpt-4o-mini", "prompt_version": "v1"},
+    ),
+]
+
+_AGREEMENT_READ = [
+    EvaluationAgreementRead(
+        evaluator="completeness",
+        count=10,
+        mean_absolute_error=0.05,
+        within_tolerance_share=0.9,
+        kappa=None,
+        tolerance=0.1,
+        data_type="NUMERIC",
+        synthetic_only=True,
+        empty=False,
+    ),
+    EvaluationAgreementRead(
+        evaluator="confidence_calibration",
+        count=10,
+        mean_absolute_error=0.08,
+        within_tolerance_share=0.8,
+        kappa=None,
+        tolerance=0.1,
+        data_type="NUMERIC",
+        synthetic_only=True,
+        empty=False,
+    ),
+    EvaluationAgreementRead(
+        evaluator="job_succeeded",
+        count=10,
+        mean_absolute_error=0.0,
+        within_tolerance_share=1.0,
+        kappa=1.0,
+        tolerance=0.1,
+        data_type="BOOLEAN",
+        synthetic_only=True,
+        empty=False,
+    ),
+]
+
+
 def test_the_retention_route_defaults_to_a_window_that_has_mature_cohorts() -> None:
     """AC1: the default has to leave the thirty-day column something to say.
 
@@ -2275,6 +2808,208 @@ def test_the_retention_route_rides_its_four_conventions() -> None:
     assert "raw ledger is never scanned" in body["source_convention"]
 
 
+# ------------------------------------------------------------------ evaluation read API (#793)
+
+
+def test_the_evaluation_read_route_returns_complete_state() -> None:
+    """AC1: the complete evaluation read returns dataset, run, scores, and agreement."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(EVALUATION_PATH, headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.evaluation_read_calls == 1
+    body = response.json()
+    assert body["synthetic_only"] is True
+    assert body["active_dataset"]["name"] == "golden"
+    assert body["active_dataset"]["is_active"] is True
+    assert body["judge_run"]["run_ref"] == "eval-run-001"
+    assert body["judge_run"]["status"] == "completed"
+    assert len(body["judge_scores"]) == 2
+    assert len(body["agreement"]) == 3
+
+
+def test_the_active_evaluation_dataset_route_returns_active_version() -> None:
+    """AC1: the active dataset endpoint returns the active golden dataset version."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(EVALUATION_ACTIVE_DATASET_PATH, headers=_bearer(_token()))
+    body = response.json()
+
+    assert response.status_code == 200
+    assert facade.active_dataset_calls == 1
+    assert body["name"] == "golden"
+    assert body["version"] == 1
+    assert body["status"] == "active"
+    assert body["is_active"] is True
+    assert body["example_count"] == 20
+
+
+def test_the_latest_judge_run_route_returns_run_progress() -> None:
+    """AC1: the latest judge run endpoint returns run progress."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(EVALUATION_LATEST_RUN_PATH, headers=_bearer(_token()))
+    body = response.json()
+
+    assert response.status_code == 200
+    assert facade.latest_judge_run_calls == 1
+    assert body["run_ref"] == "eval-run-001"
+    assert body["dataset_name"] == "golden"
+    assert body["status"] == "completed"
+    assert body["budget_paise"] == 10_000
+    assert body["cost_paise"] == 8_500
+    assert body["example_count"] == 20
+    assert body["scored_count"] == 20
+    assert body["synthetic_only"] is True
+
+
+def test_the_judge_scores_route_returns_scores_for_latest_run() -> None:
+    """AC1: the judge scores endpoint returns scores for the latest run by default."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(EVALUATION_SCORES_PATH, headers=_bearer(_token()))
+    body = response.json()
+
+    assert response.status_code == 200
+    assert facade.judge_scores_calls == [{"run_ref": None, "page": 1, "page_size": 100}]
+    assert len(body) == 2
+    assert body[0]["evaluator"] == "completeness"
+    assert body[0]["source"] == "judge"
+    assert body[0]["data_type"] == "NUMERIC"
+    assert body[0]["value"] == 0.95
+    assert body[1]["evaluator"] == "confidence_calibration"
+    assert body[1]["value"] == 0.88
+
+
+def test_the_judge_scores_route_accepts_run_ref_param() -> None:
+    """The judge scores endpoint accepts an optional run_ref query parameter."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(
+        f"{EVALUATION_SCORES_PATH}?run_ref=custom-run-001", headers=_bearer(_token())
+    )
+
+    assert response.status_code == 200
+    assert facade.judge_scores_calls == [{"run_ref": "custom-run-001", "page": 1, "page_size": 100}]
+
+
+def test_the_judge_scores_route_accepts_pagination_params() -> None:
+    """The judge scores endpoint accepts optional pagination query parameters."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{EVALUATION_SCORES_PATH}?page=2&page_size=5", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.judge_scores_calls == [{"run_ref": None, "page": 2, "page_size": 5}]
+
+
+def test_the_agreement_route_returns_agreement_per_evaluator() -> None:
+    """AC1: the agreement endpoint returns judge-vs-human agreement per evaluator."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(EVALUATION_AGREEMENT_PATH, headers=_bearer(_token()))
+    body = response.json()
+
+    assert response.status_code == 200
+    assert len(facade.agreement_calls) == 1
+    assert facade.agreement_calls[0] == {
+        "tolerance": 0.1,
+        "evaluator": None,
+        "page": 1,
+        "page_size": 100,
+    }
+    assert len(body) == 3
+    assert body[0]["evaluator"] == "completeness"
+    assert body[0]["count"] == 10
+    assert body[0]["mean_absolute_error"] == 0.05
+    assert body[0]["within_tolerance_share"] == 0.9
+    assert body[0]["synthetic_only"] is True
+    assert body[1]["evaluator"] == "confidence_calibration"
+    assert body[2]["evaluator"] == "job_succeeded"
+    assert body[2]["kappa"] == 1.0
+    assert body[2]["data_type"] == "BOOLEAN"
+
+
+def test_the_agreement_route_accepts_tolerance_param() -> None:
+    """The agreement endpoint accepts an optional tolerance query parameter."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(f"{EVALUATION_AGREEMENT_PATH}?tolerance=0.05", headers=_bearer(_token()))
+
+    assert response.status_code == 200
+    assert facade.agreement_calls[0]["tolerance"] == 0.05
+
+
+def test_the_agreement_route_accepts_evaluator_param() -> None:
+    """The agreement endpoint accepts an optional evaluator query parameter."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(
+        f"{EVALUATION_AGREEMENT_PATH}?evaluator=completeness", headers=_bearer(_token())
+    )
+
+    assert response.status_code == 200
+    assert facade.agreement_calls[0]["evaluator"] == "completeness"
+
+
+def test_the_agreement_route_accepts_pagination_params() -> None:
+    """The agreement endpoint accepts optional pagination query parameters."""
+    facade = StubObservabilityFacade()
+    client = _client(facade)
+
+    response = client.get(
+        f"{EVALUATION_AGREEMENT_PATH}?page=2&page_size=5", headers=_bearer(_token())
+    )
+
+    assert response.status_code == 200
+    assert facade.agreement_calls[0]["page"] == 2
+    assert facade.agreement_calls[0]["page_size"] == 5
+
+
+def test_every_evaluation_read_route_is_operator_guarded() -> None:
+    """AC: all evaluation read routes require operator scope."""
+    for path in [
+        EVALUATION_PATH,
+        EVALUATION_ACTIVE_DATASET_PATH,
+        EVALUATION_LATEST_RUN_PATH,
+        EVALUATION_SCORES_PATH,
+        EVALUATION_AGREEMENT_PATH,
+    ]:
+        # Anonymous -> 401
+        facade = StubObservabilityFacade()
+        client = _client(facade)
+        response = client.get(path)
+        assert response.status_code == 401
+        assert response.json()["code"] == "AUTH_UNAUTHENTICATED"
+        assert _facade_untouched(facade)
+
+        # Patient scope -> 403
+        facade = StubObservabilityFacade()
+        client = _client(facade)
+        response = client.get(path, headers=_bearer(_token(scope="patient")))
+        assert response.status_code == 403
+        assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+        assert _facade_untouched(facade)
+
+        # Partner scope -> 403
+        facade = StubObservabilityFacade()
+        client = _client(facade)
+        response = client.get(path, headers=_bearer(_token(scope="partner")))
+        assert response.status_code == 403
+        assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
+        assert _facade_untouched(facade)
+
+
 # ------------------------------------------------------------------ refuses
 
 
@@ -2296,6 +3031,12 @@ _ALL_PATHS = [
     FUNNEL_PATH,
     ACTIVE_USERS_PATH,
     RETENTION_PATH,
+    SECURITY_PATH,
+    EVALUATION_PATH,
+    EVALUATION_ACTIVE_DATASET_PATH,
+    EVALUATION_LATEST_RUN_PATH,
+    EVALUATION_SCORES_PATH,
+    EVALUATION_AGREEMENT_PATH,
 ]
 
 
@@ -2340,6 +3081,13 @@ def _facade_untouched(facade: StubObservabilityFacade) -> bool:
         and facade.deeplink_settings == []
         and facade.business_periods == []
         and facade.funnel_calls == []
+        and facade.security_summary_calls == []
+        # Evaluation read API (#793)
+        and facade.evaluation_read_calls == 0
+        and facade.active_dataset_calls == 0
+        and facade.latest_judge_run_calls == 0
+        and facade.judge_scores_calls == []
+        and facade.agreement_calls == []
     )
 
 

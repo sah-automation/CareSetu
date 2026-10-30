@@ -62,6 +62,14 @@ EVENT_AUDIT_TAMPER_DETECTED = "audit.tamper_detected"
 # MOD-002 (partner): emitted when a partner credential account is created
 # synchronously by the iam facade (ADR-0010, ticket #245).
 EVENT_OPERATOR_INVITED = "operator.invited"
+# MOD-001 (iam): emitted for each failed operator TOTP verification. ``reason``
+# is ``failure``, or ``lockout`` on the trip with ``lockout_until`` naming the
+# lift time (PHASE-14B T17, #778).
+EVENT_OPERATOR_MFA_FAILED = "operator.mfa_failed"
+# MOD-001 (iam): emitted when an admin changes an operator's tier (promote/demote).
+EVENT_OPERATOR_TIER_CHANGED = "operator.tier_changed"
+# MOD-001 (iam): emitted when an admin changes an operator's active state (deactivate/reactivate).
+EVENT_OPERATOR_ACTIVE_CHANGED = "operator.active_changed"
 EVENT_PARTNER_REGISTERED = "partner.registered"
 # MOD-002 (partner): emitted when a verification round (first-time or
 # re-verification) opens, carrying the round/version in the payload so the
@@ -131,6 +139,12 @@ EVENT_AI_JOB_FAILED = "ai_job.failed"
 # Telemetry, deliberately NOT in ``REGULATED_ACT_TYPES``.
 EVENT_AI_JOB_QUEUED = "ai_job.queued"
 EVENT_AI_EGRESS_RECORDED = "ai_egress.recorded"
+# MOD-005 (intake): emitted when the advisory prompt-injection screen matches
+# before the structuring egress (#780). Advisory only - the pipeline proceeds.
+# The payload carries category names and a bounded score, never the transcript
+# or a matched substring. MOD-013 consumes it into the ``prompt_injection``
+# security signal. Telemetry, deliberately NOT in ``REGULATED_ACT_TYPES``.
+EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED = "ai_egress.prompt_injection_detected"
 # MOD-005 (intake): emitted at the moment a patient picks their doctor, in the
 # SAME transaction as the ``assigned_partner_id`` write (B4d, #720). Carries the
 # intake, patient and doctor references, so doctor attribution rides an event

@@ -31,7 +31,10 @@ const switchRole = vi.fn();
 
 function mockSession(roles: string[] | null) {
   vi.mocked(useAuth).mockReturnValue({
-    user: roles === null ? null : { id: 7, phone: "+911234567890", roles },
+    user:
+      roles === null
+        ? null
+        : { id: 7, phone: "+911234567890", roles, tier: null },
     selectedRole: null,
     switchRole,
     logout: vi.fn(),

@@ -71,6 +71,19 @@ class InvalidOperatorCodeError(SessionIssuanceError):
     """
 
 
+class OperatorMfaLockedError(OperatorMfaError):
+    """Operator TOTP login is locked after too many wrong codes (#778).
+
+    The refusal carries the whole seconds left on the lock so the edge can
+    answer 429 with ``Retry-After``. It subclasses ``OperatorMfaError`` so
+    broad MFA catches still recognise it as an authentication refusal.
+    """
+
+    def __init__(self, message: str, *, remaining_seconds: int) -> None:
+        super().__init__(message)
+        self.remaining_seconds = remaining_seconds
+
+
 class InvalidAccessTokenError(IamError):
     """Base for an access token the gateway must reject (spec #51 §2.5).
 
@@ -153,4 +166,20 @@ class ProfilePhotoTransferError(IamError):
     resilience, mirroring the intake upload ladder). The message names the
     failing patient only - never the ciphertext or object state - so a 502 is
     safe for the envelope and logs.
+    """
+
+
+class OperatorSelfChangeError(IamError):
+    """An operator attempted to change their own tier or active state.
+
+    Raised when an admin tries to demote or deactivate themselves. The message
+    is human-safe for the 409 envelope.
+    """
+
+
+class OperatorLastAdminError(IamError):
+    """An operator change would leave no active admin.
+
+    Raised when demoting or deactivating the last active admin operator. The
+    message is human-safe for the 409 envelope.
     """

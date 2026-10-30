@@ -16,7 +16,10 @@ from pydantic import BaseModel
 
 from bus.envelope import Envelope
 from bus.events import (
+    EVENT_OPERATOR_ACTIVE_CHANGED,
     EVENT_OPERATOR_INVITED,
+    EVENT_OPERATOR_MFA_FAILED,
+    EVENT_OPERATOR_TIER_CHANGED,
     EVENT_OTP_FAILED,
     EVENT_OTP_SENT,
     EVENT_PATIENT_AUTH_FAILED,
@@ -190,18 +193,22 @@ class OperatorInvitedPayload(BaseModel):
     Emitted synchronously when an existing operator invites a new phone
     to join the operator group. The invited identity is created
     ``[Unverified]`` with an ``operator`` role grant, MFA-bound at first
-    login - no session is minted until MFA enrollment completes.
+    login - no session is minted until MFA enrollment completes. ``tier`` is
+    the authority the invite granted (``admin`` / ``operator``, spec #761), so
+    the audit trail records the privilege handed over, not only the identity.
     """
 
     identity_id: int
     phone_e164: str
     invited_by_identity_id: int
+    tier: str
 
 
 def operator_invited_envelope(
     identity_id: int,
     phone_e164: str,
     invited_by_identity_id: int,
+    tier: str,
 ) -> Envelope[OperatorInvitedPayload]:
     """Build the ``operator.invited`` envelope for the iam outbox."""
     return Envelope[OperatorInvitedPayload](
@@ -212,5 +219,100 @@ def operator_invited_envelope(
             identity_id=identity_id,
             phone_e164=phone_e164,
             invited_by_identity_id=invited_by_identity_id,
+            tier=tier,
+        ),
+    )
+
+
+class OperatorMfaFailedPayload(BaseModel):
+    """Subject of ``operator.mfa_failed``: an operator's TOTP check failed.
+
+    ``reason`` is ``failure`` for a wrong code and ``lockout`` when this
+    failure crossed the threshold, with ``lockout_until`` naming when login
+    reopens. The payload carries the identity and lift time only - never the
+    code, its secret, or the phone.
+    """
+
+    identity_id: int
+    reason: Literal["failure", "lockout"]
+    lockout_until: datetime | None = None
+
+
+def operator_mfa_failed_envelope(
+    identity_id: int,
+    reason: Literal["failure", "lockout"] = "failure",
+    lockout_until: datetime | None = None,
+) -> Envelope[OperatorMfaFailedPayload]:
+    """Build the ``operator.mfa_failed`` envelope for the iam outbox."""
+    return Envelope[OperatorMfaFailedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_OPERATOR_MFA_FAILED,
+        producer=PRODUCER_MODULE,
+        payload=OperatorMfaFailedPayload(
+            identity_id=identity_id,
+            reason=reason,
+            lockout_until=lockout_until,
+        ),
+    )
+
+
+class OperatorTierChangedPayload(BaseModel):
+    """Subject of ``operator.tier_changed``: an operator's tier was changed.
+
+    Emitted when an admin promotes or demotes an operator. The ``new_tier``
+    records the resulting authority; ``changed_by_identity_id`` names the admin
+    who made the change.
+    """
+
+    identity_id: int
+    new_tier: str
+    changed_by_identity_id: int
+
+
+def operator_tier_changed_envelope(
+    identity_id: int,
+    new_tier: str,
+    changed_by_identity_id: int,
+) -> Envelope[OperatorTierChangedPayload]:
+    """Build the ``operator.tier_changed`` envelope for the iam outbox."""
+    return Envelope[OperatorTierChangedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_OPERATOR_TIER_CHANGED,
+        producer=PRODUCER_MODULE,
+        payload=OperatorTierChangedPayload(
+            identity_id=identity_id,
+            new_tier=new_tier,
+            changed_by_identity_id=changed_by_identity_id,
+        ),
+    )
+
+
+class OperatorActiveChangedPayload(BaseModel):
+    """Subject of ``operator.active_changed``: an operator's active state was changed.
+
+    Emitted when an admin deactivates or reactivates an operator. The
+    ``is_active`` records the resulting state; ``changed_by_identity_id`` names
+    the admin who made the change.
+    """
+
+    identity_id: int
+    is_active: bool
+    changed_by_identity_id: int
+
+
+def operator_active_changed_envelope(
+    identity_id: int,
+    is_active: bool,
+    changed_by_identity_id: int,
+) -> Envelope[OperatorActiveChangedPayload]:
+    """Build the ``operator.active_changed`` envelope for the iam outbox."""
+    return Envelope[OperatorActiveChangedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_OPERATOR_ACTIVE_CHANGED,
+        producer=PRODUCER_MODULE,
+        payload=OperatorActiveChangedPayload(
+            identity_id=identity_id,
+            is_active=is_active,
+            changed_by_identity_id=changed_by_identity_id,
         ),
     )

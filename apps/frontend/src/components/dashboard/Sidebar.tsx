@@ -1,6 +1,6 @@
 "use client";
 
-// PHASE-2.6 T06 (#197): full-shell desktop sidebar (blueprint §2.3 right).
+// PHASE-2.6 T06 (#197): full-shell desktop sidebar (blueprint A2.3 right).
 // Responsiveness is pure CSS - `hidden lg:flex` removes the sidebar from the
 // layout entirely below the lg breakpoint, where the bottom tab bar takes
 // over; the retired JS viewport-collapse / icon-rail mechanics are gone. The
@@ -22,7 +22,7 @@
 // paired it with sign-out; the footer now holds Log out alone inside the
 // divider it already had. Both of its accessible names come from the string
 // dictionary (nav.collapseSidebar / nav.expandSidebar) rather than being
-// hardcoded English, so they exist in both locales per blueprint §9.2.
+// hardcoded English, so they exist in both locales per blueprint A9.2.
 //
 // #575: the expanded rail narrows from 240px to 208px (`w-60` -> `w-52`) so
 // more of the clinical workspace is visible. The collapsed rail keeps its 64px
@@ -57,7 +57,12 @@ import { STRINGS, type Lang } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 
-import { NAV_CONFIG, isNavItemActive, sidebarSections } from "./nav-config";
+import {
+  filterNavItems,
+  NAV_CONFIG,
+  isNavItemActive,
+  sidebarSections,
+} from "./nav-config";
 import {
   ActiveIndicator,
   CountPill,
@@ -66,6 +71,14 @@ import {
 } from "./NavItemLink";
 import type { NavItemDef, SidebarSection } from "./nav-config";
 import type { Role } from "./types";
+
+function useAuthOrNull() {
+  try {
+    return useAuth();
+  } catch {
+    return null;
+  }
+}
 
 interface SidebarProps {
   role: Role;
@@ -82,7 +95,11 @@ export function Sidebar({
   onToggleCollapse,
   items,
 }: SidebarProps) {
-  const navItems = items ?? NAV_CONFIG[role];
+  const auth = useAuthOrNull();
+  const isAdmin =
+    auth?.user?.roles?.includes("operator") === true &&
+    auth?.user?.tier === "admin";
+  const navItems = filterNavItems(items ?? NAV_CONFIG[role], isAdmin);
   const sections = sidebarSections(navItems);
   const { logout } = useAuth();
   const { lang } = useLang();

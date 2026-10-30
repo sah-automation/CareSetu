@@ -32,6 +32,8 @@ from modules.intake.adapters.ai_gateway import (
     AiGateway,
     DraftRxRequest,
     DraftRxResult,
+    EvaluateRequest,
+    EvaluateResult,
     Ext002CallError,
     StructureRequest,
     StructureResult,
@@ -181,6 +183,19 @@ class FallbackAiGateway:
             self._record_span("draft_rx", status="failed")
             raise
         self._record_span("draft_rx", status="success")
+        return result
+
+    @observe(name="ai_evaluate", capture_input=False, capture_output=False)
+    async def evaluate(self, request: EvaluateRequest) -> EvaluateResult:
+        try:
+            result = await self._route(
+                lambda: self._primary.evaluate(request),
+                lambda: self._secondary.evaluate(request),
+            )
+        except Ext002CallError:
+            self._record_span("evaluate", status="failed")
+            raise
+        self._record_span("evaluate", status="success")
         return result
 
 

@@ -17,15 +17,18 @@ from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.config import DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
 from bus.outbox_writer import write_outbox
+from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
     IamError,
+    OperatorLastAdminError,
+    OperatorSelfChangeError,
     PatientProfileNotSetError,
     ProfilePhotoTransferError,
     ProfilePhotoValidationError,
@@ -45,7 +48,13 @@ from modules.iam.domain.shared import (
     _reissue_otp_challenge,
 )
 from modules.iam.outbox import IAM_OUTBOX_TABLE
-from modules.iam.schema.models import iam_identities, iam_patient_profiles
+from modules.iam.schema.models import (
+    iam_identities,
+    iam_operator_mfa,
+    iam_operator_profiles,
+    iam_patient_profiles,
+    iam_sessions,
+)
 from modules.iam.session_facade import grant_operator_role
 from modules.profile_media.facade import PATIENT_PREFIX, ProfileMediaStore
 
@@ -102,6 +111,25 @@ class OperatorInvitedResult(BaseModel):
 
     identity_id: int
     phone_e164: str
+
+
+class OperatorSummary(BaseModel):
+    """One operator row for the admin user-management list (spec #761, #768).
+
+    The phone is always masked before it leaves the facade - the list is a
+    management view, never a contact-data export. ``mfa_enabled`` reports
+    whether the operator has enrolled a TOTP factor (invited-but-not-enrolled
+    operators show ``False``). ``created_at`` is the identity's creation time,
+    so a backfilled operator keeps its real join date rather than the migration
+    timestamp.
+    """
+
+    identity_id: int
+    phone_masked: str
+    tier: str
+    is_active: bool
+    mfa_enabled: bool
+    created_at: datetime
 
 
 class PatientProfile(BaseModel):
@@ -401,28 +429,32 @@ class IdentityFacade:
         self,
         phone: str,
         invited_by_identity_id: int,
+        tier: str = "operator",
         connection: AsyncConnection | None = None,
     ) -> OperatorInvitedResult:
         """Invite a new operator: create a credentialed, MFA-bound account (T07, #250).
 
         Operators are a trusted closed group that never self-registers - the
-        only way to grow the queue-running group is an existing operator
-        inviting a new phone. The invited identity is created ``[Unverified]``
-        and immediately granted an ``Active`` ``operator`` role, so a session
-        can be issued only after the invited phone completes MFA at first
-        login (the second factor precedes session minting in ``issue_operator_session``).
+        only way to grow the queue-running group is an admin inviting a new
+        phone. The invited identity is created ``[Unverified]`` and immediately
+        granted an ``Active`` ``operator`` role, so a session can be issued only
+        after the invited phone completes MFA at first login (the second factor
+        precedes session minting in ``issue_operator_session``).
 
-        Unlike ``create_credential_account`` (a partner is login-capable with
-        no role until activation), the operator role grant is handed over at
-        invite time - MFA, not a separate activation step, is the gate that
-        binds the account. ``invited_by_identity_id`` names the inviting
-        operator for the ``operator.invited`` audit event, emitted in the same
-        transaction as the identity insert. ``connection`` lets the caller
+        ``tier`` is the authority the invite grants (``admin`` / ``operator``,
+        spec #761) and defaults to the non-admin tier, so privilege is always
+        deliberate. Unlike ``create_credential_account`` (a partner is
+        login-capable with no role until activation), the operator role grant is
+        handed over at invite time - MFA, not a separate activation step, is the
+        gate that binds the account. ``invited_by_identity_id`` names the
+        inviting admin for the ``operator.invited`` audit event, emitted in the
+        same transaction as the identity insert. ``connection`` lets the caller
         share an open transaction; when omitted the method opens its own,
         preserving the standalone seam shape the iam tests exercise. Concurrency
         converges via the unique ``phone_e164`` index (``INSERT ... ON CONFLICT
         DO NOTHING`` then a re-read); a duplicate phone resolves to the existing
-        identity with the role grant still ensured and no duplicate event.
+        identity with the role grant still ensured and no duplicate event. A
+        duplicate invite never changes an existing profile's tier.
         """
         phone_e164 = normalize_phone(phone)
 
@@ -438,6 +470,35 @@ class IdentityFacade:
                 )
             ).scalar_one()
             await grant_operator_role(connection, identity_id)
+            # Every operator carries a profile; a new invite starts at the
+            # requested tier, defaulting to the non-admin ``operator`` tier
+            # (spec #761). ON CONFLICT keeps a duplicate invite from changing an
+            # existing admin's authority.
+            created_by_val = (
+                invited_by_identity_id
+                if invited_by_identity_id and invited_by_identity_id != 0
+                else None
+            )
+            updated_by_val = created_by_val
+            # Only set if inviter actually exists to satisfy FK
+            if created_by_val is not None:
+                inviter_row = await connection.execute(
+                    select(iam_identities.c.id).where(iam_identities.c.id == created_by_val)
+                )
+                if inviter_row.scalar_one_or_none() is None:
+                    created_by_val = None
+                    updated_by_val = None
+            await connection.execute(
+                postgresql_insert(iam_operator_profiles)
+                .values(
+                    identity_id=identity_id,
+                    tier=tier,
+                    is_active=True,
+                    created_by=created_by_val,
+                    updated_by=updated_by_val,
+                )
+                .on_conflict_do_nothing(index_elements=["identity_id"])
+            )
             if inserted.rowcount == 1:
                 await write_outbox(
                     connection,
@@ -447,6 +508,7 @@ class IdentityFacade:
                         identity_id=identity_id,
                         phone_e164=phone_e164,
                         invited_by_identity_id=invited_by_identity_id,
+                        tier=tier,
                     ),
                 )
             return int(identity_id)
@@ -458,6 +520,264 @@ class IdentityFacade:
                 identity_id = await _run(connection)
 
         return OperatorInvitedResult(identity_id=identity_id, phone_e164=phone_e164)
+
+    async def list_operators(
+        self, connection: AsyncConnection | None = None
+    ) -> list[OperatorSummary]:
+        """List operators for the admin user-management view (spec #761, #768).
+
+        Reads the operator profiles joined to their identities, with the MFA
+        factor left-joined so an invited operator who has not enrolled yet
+        still appears (``mfa_enabled`` false). Phones are masked here, in the
+        same transaction that reads them, so no caller can accidentally serve
+        the canonical number. Ordered oldest-first so the list is stable across
+        requests. ``connection`` lets a caller share an open transaction; when
+        omitted the read opens its own.
+        """
+
+        async def _run(connection: AsyncConnection) -> list[OperatorSummary]:
+            rows = await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.phone_e164,
+                    iam_identities.c.created_at,
+                    iam_operator_profiles.c.tier,
+                    iam_operator_profiles.c.is_active,
+                    func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                )
+                .select_from(
+                    iam_operator_profiles.join(
+                        iam_identities,
+                        iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                    ).outerjoin(
+                        iam_operator_mfa,
+                        iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                    )
+                )
+                .order_by(iam_identities.c.created_at, iam_identities.c.id)
+            )
+            return [
+                OperatorSummary(
+                    identity_id=int(row[0]),
+                    phone_masked=mask_phone(str(row[1])),
+                    tier=str(row[3]),
+                    is_active=bool(row[4]),
+                    mfa_enabled=bool(row[5]),
+                    created_at=row[2],
+                )
+                for row in rows
+            ]
+
+        if connection is not None:
+            return await _run(connection)
+        async with self._engine.connect() as connection:
+            return await _run(connection)
+
+    async def update_operator_tier(
+        self,
+        identity_id: int,
+        tier: Literal["admin", "operator"],
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's tier (promote or demote).
+
+        Admin-only action. Demotion and self-demotion are guarded:
+        - An operator cannot change their own tier.
+        - The last active admin cannot be demoted.
+        - Every change revokes the operator's active sessions and emits an
+          ``operator.tier_changed`` audit event.
+        """
+        if identity_id == actor_identity_id:
+            raise OperatorSelfChangeError("an operator cannot change their own tier")
+
+        async def _run(connection: AsyncConnection) -> OperatorSummary:
+            # Check if target is the last active admin
+            if tier == "operator":
+                active_admin_count = await connection.execute(
+                    select(func.count(iam_operator_profiles.c.identity_id)).where(
+                        (iam_operator_profiles.c.tier == "admin")
+                        & (iam_operator_profiles.c.is_active.is_(True))
+                    )
+                )
+                count = active_admin_count.scalar_one()
+                target_is_admin = await connection.execute(
+                    select(iam_operator_profiles.c.tier).where(
+                        iam_operator_profiles.c.identity_id == identity_id
+                    )
+                )
+                target_tier = target_is_admin.scalar_one_or_none()
+                if target_tier == "admin" and count <= 1:
+                    raise OperatorLastAdminError("cannot demote the last active admin operator")
+
+            # Update tier
+            await connection.execute(
+                update(iam_operator_profiles)
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(tier=tier, updated_by=actor_identity_id)
+            )
+
+            # Revoke sessions by deleting their refresh tokens
+            await connection.execute(
+                iam_sessions.delete().where(
+                    (iam_sessions.c.identity_id == identity_id)
+                    & (iam_sessions.c.scope == "operator")
+                )
+            )
+
+            # Emit audit event
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.operator_tier_changed_envelope(
+                    identity_id=identity_id,
+                    new_tier=tier,
+                    changed_by_identity_id=actor_identity_id,
+                ),
+            )
+
+            # Return updated operator summary
+            rows = await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.phone_e164,
+                    iam_identities.c.created_at,
+                    iam_operator_profiles.c.tier,
+                    iam_operator_profiles.c.is_active,
+                    func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                )
+                .select_from(
+                    iam_operator_profiles.join(
+                        iam_identities,
+                        iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                    ).outerjoin(
+                        iam_operator_mfa,
+                        iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                    )
+                )
+                .where(iam_identities.c.id == identity_id)
+            )
+            row = rows.first()
+            if row is None:
+                raise IamError(f"operator {identity_id} not found after tier update")
+            return OperatorSummary(
+                identity_id=int(row[0]),
+                phone_masked=mask_phone(str(row[1])),
+                tier=str(row[3]),
+                is_active=bool(row[4]),
+                mfa_enabled=bool(row[5]),
+                created_at=row[2],
+            )
+
+        if connection is not None:
+            return await _run(connection)
+        async with self._engine.begin() as connection:
+            return await _run(connection)
+
+    async def update_operator_active(
+        self,
+        identity_id: int,
+        is_active: bool,
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's active state (deactivate or reactivate).
+
+        Admin-only action. Deactivation and self-deactivation are guarded:
+        - An operator cannot change their own active state.
+        - The last active admin cannot be deactivated.
+        - Deactivation revokes the operator's active sessions and blocks login;
+          reactivation restores access.
+        - Every change emits an ``operator.active_changed`` audit event.
+        """
+        if identity_id == actor_identity_id:
+            raise OperatorSelfChangeError("an operator cannot change their own active state")
+
+        async def _run(connection: AsyncConnection) -> OperatorSummary:
+            # Check if target is the last active admin
+            if not is_active:
+                active_admin_count = await connection.execute(
+                    select(func.count(iam_operator_profiles.c.identity_id)).where(
+                        (iam_operator_profiles.c.tier == "admin")
+                        & (iam_operator_profiles.c.is_active.is_(True))
+                    )
+                )
+                count = active_admin_count.scalar_one()
+                target_is_active_admin = await connection.execute(
+                    select(iam_operator_profiles.c.tier, iam_operator_profiles.c.is_active).where(
+                        iam_operator_profiles.c.identity_id == identity_id
+                    )
+                )
+                target = target_is_active_admin.first()
+                if target and target.tier == "admin" and target.is_active and count <= 1:
+                    raise OperatorLastAdminError("cannot deactivate the last active admin operator")
+
+            # Update active state
+            await connection.execute(
+                update(iam_operator_profiles)
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(is_active=is_active, updated_by=actor_identity_id)
+            )
+
+            # Revoke sessions if deactivating
+            if not is_active:
+                await connection.execute(
+                    iam_sessions.delete().where(
+                        (iam_sessions.c.identity_id == identity_id)
+                        & (iam_sessions.c.scope == "operator")
+                    )
+                )
+
+            # Emit audit event
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.operator_active_changed_envelope(
+                    identity_id=identity_id,
+                    is_active=is_active,
+                    changed_by_identity_id=actor_identity_id,
+                ),
+            )
+
+            # Return updated operator summary
+            rows = await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.phone_e164,
+                    iam_identities.c.created_at,
+                    iam_operator_profiles.c.tier,
+                    iam_operator_profiles.c.is_active,
+                    func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                )
+                .select_from(
+                    iam_operator_profiles.join(
+                        iam_identities,
+                        iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                    ).outerjoin(
+                        iam_operator_mfa,
+                        iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                    )
+                )
+                .where(iam_identities.c.id == identity_id)
+            )
+            row = rows.first()
+            if row is None:
+                raise IamError(f"operator {identity_id} not found after active update")
+            return OperatorSummary(
+                identity_id=int(row[0]),
+                phone_masked=mask_phone(str(row[1])),
+                tier=str(row[3]),
+                is_active=bool(row[4]),
+                mfa_enabled=bool(row[5]),
+                created_at=row[2],
+            )
+
+        if connection is not None:
+            return await _run(connection)
+        async with self._engine.begin() as connection:
+            return await _run(connection)
 
     async def save_patient_profile(
         self,

@@ -233,9 +233,9 @@ describe("operator Observability group (#744)", () => {
 
   it("declares the decision-28 sub-destinations in order", () => {
     // Spec #717 decision 28: Observability holds Overview, Business, Product,
-    // Reliability, the four existing AI panels and Settings. #745 renders this
-    // exact order as the disclosure's sub-menu, so the order is a contract, not
-    // an incidental detail.
+    // Reliability, the four existing AI panels, Security and Settings. #745
+    // renders this exact order as the disclosure's sub-menu, so the order is a
+    // contract, not an incidental detail.
     expect(parent?.children?.map((child) => child.key)).toEqual([
       "overview",
       "business",
@@ -245,7 +245,9 @@ describe("operator Observability group (#744)", () => {
       "usage",
       "quality",
       "health",
+      "security",
       "settings",
+      "evals",
     ]);
     // #747: no sub-destination is a coming-soon stub any more. Settings is the
     // placeholder shell behind a live page, so the whole sub-menu is clickable.

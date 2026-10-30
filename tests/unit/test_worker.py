@@ -39,7 +39,11 @@ import worker.main as worker_main
 from app.config import Settings
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.registry import HandlerRegistry
-from modules.observability.facade import ErrorDrainReport, HttpCounterDrainReport
+from modules.observability.facade import (
+    ErrorDrainReport,
+    HttpCounterDrainReport,
+    SecurityScanReport,
+)
 from modules.partner.facade import PartnerFacade
 
 
@@ -254,6 +258,84 @@ def test_build_scheduler_skips_the_error_drain_when_the_capture_gate_is_off() ->
     assert not any(job.id == "error-buffer-drain" for job in scheduler.get_jobs())
     assert not any(job.id == "http-counter-fold" for job in scheduler.get_jobs())
     _job(scheduler, "credential-expiry-sweep")
+
+
+def test_build_scheduler_registers_the_security_scan_every_five_minutes() -> None:
+    """#779: the detector is an interval job fixed at the batch's five minutes."""
+    scheduler = worker_main.build_scheduler(Settings(security_detection_enabled=True))
+
+    job = _job(scheduler, "security-detector-scan")
+    assert isinstance(job.trigger, IntervalTrigger)
+    assert job.func is worker_main._run_security_scan
+    assert job.max_instances == 1
+    assert job.coalesce
+    assert job.trigger.interval == timedelta(seconds=300)
+
+
+def test_build_scheduler_skips_the_security_scan_when_gate_is_off() -> None:
+    """The default deployment registers no detector job at all."""
+    scheduler = worker_main.build_scheduler(Settings())
+
+    assert not any(job.id == "security-detector-scan" for job in scheduler.get_jobs())
+
+
+async def test_security_scan_callback_passes_configured_thresholds_through_the_facade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#779: the job reads config once and reaches the module through its facade."""
+    seen: list[tuple[object, object]] = []
+
+    async def fake_scan(engine: object, *, thresholds: object) -> SecurityScanReport:
+        seen.append((engine, thresholds))
+        return SecurityScanReport(alerts_raised=1, alerts_resolved=0)
+
+    engine = SimpleNamespace(dispose=_unreachable_dispose)
+    monkeypatch.setattr(worker_main, "run_security_scan", fake_scan)
+
+    await worker_main._run_security_scan(engine=engine)
+
+    assert len(seen) == 1
+    scanned_engine, thresholds = seen[0]
+    assert scanned_engine is engine
+    assert thresholds.auth_failure == Settings().security_detector_auth_failure_threshold
+    assert thresholds.window_minutes == Settings().security_detector_window_minutes
+    assert thresholds.cooldown_seconds == Settings().security_detector_cooldown_seconds
+
+
+async def test_security_scan_callback_builds_and_disposes_its_own_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A standalone worker's scheduler takes the default callback; it must not leak."""
+    disposed = 0
+
+    async def fake_scan(engine: object, *, thresholds: object) -> SecurityScanReport:
+        return SecurityScanReport(alerts_raised=0, alerts_resolved=0)
+
+    async def dispose() -> None:
+        nonlocal disposed
+        disposed += 1
+
+    monkeypatch.setattr(worker_main, "run_security_scan", fake_scan)
+    monkeypatch.setattr(
+        worker_main, "create_async_engine", lambda url: SimpleNamespace(dispose=dispose)
+    )
+
+    await worker_main._run_security_scan()
+
+    assert disposed == 1
+
+
+async def test_security_scan_callback_swallows_a_failed_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient database blip must not kill the recurring job."""
+
+    async def exploding_scan(engine: object, *, thresholds: object) -> SecurityScanReport:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(worker_main, "run_security_scan", exploding_scan)
+
+    await worker_main._run_security_scan(engine=SimpleNamespace(dispose=_unreachable_dispose))
 
 
 async def test_drain_callback_persists_the_buffer_through_the_module_facade(

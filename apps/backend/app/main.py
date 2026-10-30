@@ -72,11 +72,14 @@ from modules.intake.adapters.routes import (
 )
 from modules.intake.adapters.routes import router as intake_router
 from modules.intake.facade import IntakeFacade
+from modules.observability.adapters.csp_routes import router as csp_collector_router
 from modules.observability.adapters.routes import (
     register_error_handlers as register_observability_error_handlers,
 )
 from modules.observability.adapters.routes import router as observability_router
 from modules.observability.facade import ObservabilityFacade
+from modules.ops.adapters.routes import router as ops_router
+from modules.ops.facade import OpsFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
 from modules.partner.adapters.routes import directory_router
 from modules.partner.adapters.routes import (
@@ -151,12 +154,15 @@ class MeResponse(BaseModel):
     their own record id and nothing else; ``roles`` is the resolved RBAC scope
     from the token claim (api-standards §6). ``phone`` (PHASE-2.6 T05, #196,
     decision D4) is the caller's E.164 number resolved from the identity
-    table, additive so older clients keep working.
+    table, additive so older clients keep working. ``tier`` is the operator
+    authority tier from the token claim (spec #761) - ``None`` for patient and
+    partner callers.
     """
 
     subject_id: str
     roles: list[str]
     phone: str
+    tier: str | None = None
 
 
 class PatientProfileResponse(BaseModel):
@@ -425,6 +431,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         access_token_ttl_seconds=resolved_settings.gateway_access_token_ttl_seconds,
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
         mfa_secret_key=resolved_settings.iam_mfa_secret_key,
+        operator_mfa_lockout_threshold=resolved_settings.iam_operator_mfa_lockout_threshold,
+        operator_mfa_lockout_seconds=resolved_settings.iam_operator_mfa_lockout_seconds,
         media_store=profile_media_store,
         photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
     )
@@ -511,6 +519,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # read one resolved object and their tests stub it wholesale, like the audit
     # instance above.
     app.state.observability_facade = ObservabilityFacade(engine=engine)
+    # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings facade
+    # reads this module's own ``ops_settings`` table for database overrides and
+    # falls back to the settled Settings (environment then default). Its 30s
+    # in-process cache keeps an operator read from re-querying on every poll.
+    app.state.ops_facade = OpsFacade(engine=engine, settings=resolved_settings)
+    # Provide OpsFacade to ObservabilityFacade for alert delivery operations
+    app.state.observability_facade.set_ops_facade(app.state.ops_facade)
     # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
     # and, for open registration (ADR-0010), the settled iam facade - the sync
     # ``create_credential_account`` seam is called in-sequence at registration
@@ -683,6 +698,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(consent_router)
     app.include_router(audit_router)
     app.include_router(observability_router)
+    app.include_router(csp_collector_router)
+    app.include_router(ops_router)
     app.include_router(partner_router)
     app.include_router(directory_router)
     app.include_router(intake_router)
@@ -772,6 +789,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             subject_id=principal.subject_id,
             roles=list(principal.roles),
             phone=phone,
+            tier=principal.tier,
         )
 
     @app.get("/v1/me/profile", response_model=PatientProfileResponse)

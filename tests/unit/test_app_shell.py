@@ -125,6 +125,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/auth/operator/login",
         # PHASE-5 review fix P1 (#272): operator MFA TOTP enrollment.
         "/v1/auth/operator/mfa/enroll",
+        # #768: the admin-only operator user list for user management.
+        "/v1/auth/operator/users",
         # T05 (#298): partner-scoped session issuance for registered partners.
         "/v1/auth/partner/session",
         # F014 T02 (#462): partner OTP login - sends a challenge only when the
@@ -222,6 +224,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/operator/observability/health",
         "/v1/operator/observability/alerts",
         "/v1/operator/observability/deeplinks",
+        # PHASE-14B Batch 2 (#782): the security summary read.
+        "/v1/operator/observability/security",
         # PHASE-14A B9 (#727): the per-minute request counter, which carries the
         # capture-liveness answer rather than only the numbers.
         "/v1/operator/observability/throughput",
@@ -257,6 +261,46 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-14A B5 (#735): the one operator WRITE in the module - the
         # acknowledgement that fills the alert row's acked_by/acked_at columns.
         "/v1/operator/observability/alerts/{alert_id}/acknowledge",
+        # MOD-014 ops (#771/#773): effective-settings read, settings write,
+        # feature-flag list/read and the runtime flag write.
+        "/v1/operator/settings",
+        "/v1/operator/settings/effective",
+        # #798: the append-only setting history the Settings AI section reads
+        # after every successful write.
+        "/v1/operator/settings/history",
+        "/v1/operator/feature-flags",
+        "/v1/operator/feature-flags/{flag_key}",
+        "/v1/auth/operator/users/{identity_id}/active",
+        "/v1/auth/operator/users/{identity_id}/tier",
+        "/v1/operator/feature-flags/history",
+        "/v1/operator/observability/alert-delivery",
+        "/v1/operator/observability/alert-delivery/test",
+        "/v1/operator/observability/alert-delivery/{delivery_id}/redeliver",
+        "/v1/operator/observability/evaluation",
+        "/v1/operator/observability/evaluation/agreement",
+        "/v1/operator/observability/evaluation/dataset/active",
+        "/v1/operator/observability/evaluation/datasets",
+        "/v1/operator/observability/evaluation/datasets/seed",
+        "/v1/operator/observability/evaluation/datasets/{name}/{version}",
+        "/v1/operator/observability/evaluation/datasets/{name}/{version}/activate",
+        "/v1/operator/observability/evaluation/datasets/{name}/{version}/clone",
+        "/v1/operator/observability/evaluation/datasets/{name}/{version}/retire",
+        "/v1/operator/observability/evaluation/golden-labels",
+        "/v1/operator/observability/evaluation/golden-labels/{example_ref}",
+        "/v1/operator/observability/evaluation/human-labels",
+        "/v1/operator/observability/evaluation/human-labels/{example_ref}",
+        "/v1/operator/observability/evaluation/labels",
+        "/v1/operator/observability/evaluation/labels/golden",
+        "/v1/operator/observability/evaluation/labels/human",
+        "/v1/operator/observability/evaluation/labels/{example_ref}",
+        "/v1/operator/observability/evaluation/labels/{example_ref}/label",
+        "/v1/operator/observability/evaluation/runs",
+        "/v1/operator/observability/evaluation/runs/latest",
+        "/v1/operator/observability/evaluation/scores",
+        "/v1/operator/observability/golden-labels",
+        "/v1/operator/observability/human-labels",
+        "/v1/operator/observability/labels",
+        "/v1/operator/observability/labels/{example_ref}",
     }
 
 
