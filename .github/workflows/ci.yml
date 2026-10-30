@@ -91,8 +91,8 @@ jobs:
           cache: npm
       - name: install frontend
         run: |
+          rm -f package-lock.json
           npm install --legacy-peer-deps --force
-          npm install --legacy-peer-deps --force --no-save vite postcss-selector-parser @testing-library/dom
       - name: tsc
         run: npm run typecheck:frontend
 
@@ -124,8 +124,8 @@ jobs:
           cache: npm
       - name: install frontend
         run: |
+          rm -f package-lock.json
           npm install --legacy-peer-deps --force
-          npm install --legacy-peer-deps --force --no-save vite postcss-selector-parser @testing-library/dom
       - name: vitest
         run: npm run test:unit:frontend
 
@@ -143,8 +143,8 @@ jobs:
           cache: npm
       - name: install frontend
         run: |
+          rm -f package-lock.json
           npm install --legacy-peer-deps --force
-          npm install --legacy-peer-deps --force --no-save vite postcss-selector-parser @testing-library/dom
       - name: build, serve, and measure channel payloads
         run: npm run check:pages
 
@@ -162,8 +162,8 @@ jobs:
           cache: npm
       - name: install frontend
         run: |
+          rm -f package-lock.json
           npm install --legacy-peer-deps --force
-          npm install --legacy-peer-deps --force --no-save vite postcss-selector-parser @testing-library/dom
       - uses: ./.github/actions/setup-playwright
       - name: install lighthouse cli
         # Kept out of the dependency graph (like k6/ZAP) so npm audit and npm
@@ -481,8 +481,8 @@ jobs:
           cache: npm
       - name: install frontend
         run: |
+          rm -f package-lock.json
           npm install --legacy-peer-deps --force
-          npm install --legacy-peer-deps --force --no-save vite postcss-selector-parser @testing-library/dom
       - uses: ./.github/actions/setup-playwright
       - name: run e2e
         run: npm run test:e2e
@@ -716,8 +716,8 @@ jobs:
           cache: npm
       - name: install frontend
         run: |
+          rm -f package-lock.json
           npm install --legacy-peer-deps --force
-          npm install --legacy-peer-deps --force --no-save vite postcss-selector-parser @testing-library/dom
       - name: npm audit
         # Runtime deps only. Build-time-only devDeps are excluded: their
         # advisories are unactionable when no patch exists (braces
@@ -759,8 +759,8 @@ jobs:
           cache: npm
       - name: install frontend
         run: |
+          rm -f package-lock.json
           npm install --legacy-peer-deps --force
-          npm install --legacy-peer-deps --force --no-save vite postcss-selector-parser @testing-library/dom
       - name: generate frontend sbom
         # Run from the workspace root: @cyclonedx/cyclonedx-npm needs the root
         # package-lock.json and hoisted node_modules (npm workspaces leave no
