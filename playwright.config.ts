@@ -37,7 +37,8 @@ export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  timeout: 120_000,
+  retries: process.env.CI ? 1 : 0,
   workers: process.env.CI ? 1 : undefined,
   reporter: process.env.CI ? "github" : "list",
   use: {
@@ -50,12 +51,16 @@ export default defineConfig({
       // Probed on / (public marketing homepage, no auth required).
       // Previously probed /patient, but the proxy now redirects unauthenticated
       // requests there to /login, which does not exist until T6 is merged.
-      command: "npm run dev -w @caresetu/frontend",
+      // In CI build once and serve the production bundle instead of the Next
+      // dev server: this removes first-route Turbopack compilation, which was
+      // what kept replaying the suite past the job timeout.
+      command: process.env.CI
+        ? "npm run build -w @caresetu/frontend && npm run start -w @caresetu/frontend"
+        : "npm run dev -w @caresetu/frontend",
       url: "http://localhost:3000/",
       reuseExistingServer: !process.env.CI,
-      // Cold Turbopack first-compile on this network drive + the concurrently
-      // booting backend can exceed the 120 s default; give both servers room.
-      timeout: 240_000,
+      // Cold build (prod) or first Turbopack compile (dev) can both take time.
+      timeout: 540_000,
       env: {
         ...process.env,
         // PHASE-2.6 T14 (#205, spec decision 16): render the demo OTP banner

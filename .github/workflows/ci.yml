@@ -442,7 +442,7 @@ jobs:
     # specs. On the phase-8 doctor-console branch that pushed the run past the
     # old 15-minute cap and GitHub cancelled it mid-flight. 25 minutes leaves
     # room for one full retry pass without masking a genuine failure.
-    timeout-minutes: 25
+    timeout-minutes: 45
     needs: [changes]
     if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.backend == 'true'
     services:
