@@ -272,7 +272,10 @@ async function partnerLogin(
 async function expectNoAxeViolations(page: Page, label: string): Promise<void> {
   const results = await new AxeBuilder({ page }).analyze();
   const failures = results.violations.map(
-    (v) => `${v.id} (${v.impact}): ${v.help}`,
+    (v) =>
+      `${v.id} (${v.impact}): ${v.help} :: ${v.nodes
+        .map((n) => n.target + " " + n.html)
+        .join(" || ")}`,
   );
   expect(
     failures,
