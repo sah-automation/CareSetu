@@ -400,7 +400,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install postgres client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client-16
       - name: seed a throwaway source database
         run: |
           createdb -h localhost -U caresetu caresetu_backup_src
@@ -408,7 +408,9 @@ jobs:
             "CREATE TABLE smoke_test (id integer PRIMARY KEY, note text); \
              INSERT INTO smoke_test VALUES (1, 'daily');"
       - name: run the committed backup script
-        run: bash deploy/cron/backup.sh
+        run: |
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          bash deploy/cron/backup.sh
         env:
           PGHOST: localhost
           PGPORT: "5432"
@@ -426,6 +428,7 @@ jobs:
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BACKUP_PASSPHRASE \
             -in "$DUMP" -out "$DUMP.plain"
           createdb -h localhost -U caresetu caresetu_backup_restore
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
           pg_restore -h localhost -U caresetu -d caresetu_backup_restore "$DUMP.plain"
           COUNT="$(psql -h localhost -U caresetu -d caresetu_backup_restore -tAc \
             'SELECT count(*) FROM smoke_test')"
