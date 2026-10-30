@@ -400,7 +400,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install postgres client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client-16
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: seed a throwaway source database
         run: |
           createdb -h localhost -U caresetu caresetu_backup_src
