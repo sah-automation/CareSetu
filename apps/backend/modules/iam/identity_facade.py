@@ -69,7 +69,7 @@ _PROFILE_NOT_SET_MARKER = {_PROFILE_NOT_SET_MARKER_KEY: True}
 _PROFILE_CACHE_NAMESPACE = "profile"
 
 
-def _profile_cache_ttl(self: Any) -> int:
+def _profile_cache_ttl(self: object) -> int:
     ttl = getattr(self, "_profile_cache_ttl_seconds", None)
     if ttl is None:
         try:
@@ -286,7 +286,6 @@ class IdentityFacade:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
         profile_cache_ttl_seconds: int | None = None,
-        **_cache_kwargs: Any,
     ) -> None:
         self._engine = engine
         self._otp_sender = otp_sender
@@ -301,12 +300,8 @@ class IdentityFacade:
         # state the photo methods refuse loudly.
         self._media_store = media_store
         self._sleep = sleep
-        # Resolve the profile cache TTL (ARCH-P1 #817). ``None`` falls back to settings.
-        _ttl = profile_cache_ttl_seconds
-        for _k in ("profile_ttl_seconds", "profile_cache_ttl", "cache_ttl_seconds", "ttl_seconds"):
-            if _ttl is None:
-                _ttl = _cache_kwargs.get(_k)
-        self._profile_cache_ttl_seconds = _ttl
+        # Profile cache TTL (ARCH-P1 #817). ``None`` falls back to settings.
+        self._profile_cache_ttl_seconds = profile_cache_ttl_seconds
 
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         """Begin-or-resume: create the identity on first use, else resolve it.
@@ -933,8 +928,6 @@ class IdentityFacade:
             elif cached is not None:
                 # Unexpected typed payload: fall through to SQL.
                 cached = None
-            if cached is not None:
-                return None
 
         if connection is not None:
             result = await _read(connection)
