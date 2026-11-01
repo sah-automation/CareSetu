@@ -325,6 +325,7 @@ class CaseConsoleFacade:
             _client = get_redis_client()
             if _client is not None:
                 await invalidate(_client, _CARE_CACHE_NAMESPACE, key=doctor_id)
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:all")
                 await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:{case_id}")
         return view
 
@@ -407,6 +408,7 @@ class CaseConsoleFacade:
             _client = get_redis_client()
             if _client is not None:
                 await invalidate(_client, _CARE_CACHE_NAMESPACE, key=doctor_id)
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:all")
                 await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:{case_id}")
         return view
 
@@ -770,6 +772,7 @@ class CaseConsoleFacade:
             _client = get_redis_client()
             if _client is not None:
                 await invalidate(_client, _CARE_CACHE_NAMESPACE, key=doctor_id)
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:all")
                 await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:{case_id}")
         return DoctorInputResult(
             input_id=input_id,
