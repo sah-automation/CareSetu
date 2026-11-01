@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -145,6 +145,8 @@ class IamFacade:
         operator_mfa_lockout_seconds: int = DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
         media_store: ProfileMediaStore | None = None,
         photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
+        profile_cache_ttl_seconds: int | None = None,
+        **_cache_kwargs: Any,
     ) -> None:
         self._engine = engine
         self.delivery_queue = SmsDeliveryQueue(
@@ -161,12 +163,17 @@ class IamFacade:
 
         self._otp_sender: OtpSender = _otp_sender
         self._clock = clock
+        _ttl = profile_cache_ttl_seconds
+        for _k in ("profile_ttl_seconds", "profile_cache_ttl", "cache_ttl_seconds", "ttl_seconds"):
+            if _ttl is None:
+                _ttl = _cache_kwargs.get(_k)
         self._identity = IdentityFacade(
             engine,
             self._otp_sender,
             clock,
             media_store=media_store,
             photo_max_bytes=photo_max_bytes,
+            profile_cache_ttl_seconds=_ttl,
         )
         self._otp = OtpFacade(engine, clock, self._otp_sender)
         self._mfa = MfaFacade(engine, clock, mfa_secret_key=mfa_secret_key)

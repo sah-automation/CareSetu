@@ -450,6 +450,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         operator_mfa_lockout_seconds=resolved_settings.iam_operator_mfa_lockout_seconds,
         media_store=profile_media_store,
         photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
+        profile_cache_ttl_seconds=resolved_settings.profile_cache_ttl_seconds,
     )
     app.state.iam_facade = facade
     # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
