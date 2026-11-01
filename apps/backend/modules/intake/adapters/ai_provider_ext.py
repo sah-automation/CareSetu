@@ -187,6 +187,9 @@ def build_ai_gateway(settings: Settings) -> AiGateway:
       ``FallbackAiGateway`` that engages the secondary only on genuine outages.
     """
     provider = settings.ai_provider.strip().lower()
+    if settings.degraded_mode:
+        logger.warning("degraded mode enabled; forcing AI gateway to mock provider")
+        return build_mock_ai_gateway()
     if provider == "mock":
         return build_mock_ai_gateway()
     primary = CircuitBreakerAiGateway(
