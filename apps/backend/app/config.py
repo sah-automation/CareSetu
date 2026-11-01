@@ -1145,10 +1145,16 @@ class Settings:
                 f"unsupported dispatcher_mode {self.dispatcher_mode!r}; "
                 "expected 'inprocess', 'standalone', or 'coordinated'"
             )
-        if self.dispatcher_claim_timeout_seconds <= 0:
-            raise ValueError("dispatcher_claim_timeout_seconds must be positive")
-        if self.dispatcher_poll_interval_seconds <= 0:
-            raise ValueError("dispatcher_poll_interval_seconds must be positive")
+        if (
+            not math.isfinite(self.dispatcher_claim_timeout_seconds)
+            or self.dispatcher_claim_timeout_seconds <= 0
+        ):
+            raise ValueError("dispatcher_claim_timeout_seconds must be finite and positive")
+        if (
+            not math.isfinite(self.dispatcher_poll_interval_seconds)
+            or self.dispatcher_poll_interval_seconds <= 0
+        ):
+            raise ValueError("dispatcher_poll_interval_seconds must be finite and positive")
         if self.dispatcher_batch_size < 1:
             raise ValueError("dispatcher_batch_size must be >= 1")
         if self.shard_count < 1:
