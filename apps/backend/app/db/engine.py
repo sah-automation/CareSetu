@@ -58,6 +58,37 @@ def create_primary_engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(settings.database_url, poolclass=NullPool)
 
 
+def create_read_replica_engines(settings: Settings) -> list[AsyncEngine]:
+    """Build one engine per configured read-replica URL (#814).
+
+    Returns an empty list when read replicas are disabled or no URLs are
+    configured, so the default posture keeps all traffic on the primary.
+    """
+    urls = getattr(settings, "database_read_urls", ()) or ()
+    if not getattr(settings, "read_replica_enabled", False) or not urls:
+        return []
+
+    if isinstance(urls, str):
+        urls = tuple(part.strip() for part in urls.split(",") if part.strip())
+
+    engines: list[AsyncEngine] = []
+    for url in urls:
+        if getattr(settings, "db_pool_enabled", False):
+            engines.append(
+                create_async_engine(
+                    url,
+                    pool_size=settings.db_pool_size,
+                    max_overflow=settings.db_max_overflow,
+                    pool_timeout=settings.db_pool_timeout,
+                    pool_recycle=settings.db_pool_recycle,
+                    pool_pre_ping=True,
+                )
+            )
+        else:
+            engines.append(create_async_engine(url, poolclass=NullPool))
+    return engines
+
+
 async def dispose_engine(engine: AsyncEngine) -> None:
     """Dispose the engine and its pool.
 
@@ -65,6 +96,11 @@ async def dispose_engine(engine: AsyncEngine) -> None:
     points keep constructing raw engines and manage their own disposal.
     """
     await engine.dispose()
+
+
+async def dispose_engines(engines: list[AsyncEngine]) -> None:
+    for engine in engines or []:
+        await engine.dispose()
 
 
 # Backward-compatible aliases kept for plausible ARCH-P1 naming.

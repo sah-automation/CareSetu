@@ -27,6 +27,10 @@ DEFAULT_DB_POOL_SIZE = 10
 DEFAULT_DB_MAX_OVERFLOW = 20
 DEFAULT_DB_POOL_TIMEOUT = 30.0
 DEFAULT_DB_POOL_RECYCLE = 1800
+DEFAULT_DATABASE_READ_URLS: tuple[str, ...] = ()
+DEFAULT_READ_REPLICA_ENABLED = False
+DEFAULT_READ_REPLICA_LAG_TOLERANCE_MS = 1000
+DEFAULT_READ_REPLICA_RETRY_COOLDOWN_SECONDS = 30.0
 DEFAULT_APP_ENVIRONMENT = "production"
 # The app's human-maintained version (PHASE-14A A4, #696): the default Sentry
 # ``release`` when ``OTEL_SERVICE_VERSION`` is unset, also handed to FastAPI.
@@ -326,6 +330,10 @@ class Settings:
     db_max_overflow: int = DEFAULT_DB_MAX_OVERFLOW
     db_pool_timeout: float = DEFAULT_DB_POOL_TIMEOUT
     db_pool_recycle: int = DEFAULT_DB_POOL_RECYCLE
+    database_read_urls: tuple[str, ...] = DEFAULT_DATABASE_READ_URLS
+    read_replica_enabled: bool = DEFAULT_READ_REPLICA_ENABLED
+    read_replica_lag_tolerance_ms: int = DEFAULT_READ_REPLICA_LAG_TOLERANCE_MS
+    read_replica_retry_cooldown_seconds: float = DEFAULT_READ_REPLICA_RETRY_COOLDOWN_SECONDS
     app_environment: str = DEFAULT_APP_ENVIRONMENT
     gateway_jwt_verify_enabled: bool = False
     gateway_rate_limit_enabled: bool = False
@@ -677,6 +685,10 @@ class Settings:
         if self.db_pool_recycle < 0:
             raise ValueError("db_pool_recycle must be >= 0")
 
+        if self.read_replica_lag_tolerance_ms < 0:
+            raise ValueError("read_replica_lag_tolerance_ms must be >= 0")
+        if self.read_replica_retry_cooldown_seconds < 0:
+            raise ValueError("read_replica_retry_cooldown_seconds must be >= 0")
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
             raise ValueError(
                 "gateway_jwt_verify_enabled=True requires GATEWAY_JWT_SIGNING_KEY; "
@@ -1123,6 +1135,15 @@ def get_settings() -> Settings:
         db_max_overflow=_env_int("DB_MAX_OVERFLOW", DEFAULT_DB_MAX_OVERFLOW),
         db_pool_timeout=_env_float("DB_POOL_TIMEOUT", DEFAULT_DB_POOL_TIMEOUT),
         db_pool_recycle=_env_int("DB_POOL_RECYCLE", DEFAULT_DB_POOL_RECYCLE),
+        database_read_urls=_env_csv("DATABASE_READ_URLS"),
+        read_replica_enabled=_env_bool("READ_REPLICA_ENABLED", DEFAULT_READ_REPLICA_ENABLED),
+        read_replica_lag_tolerance_ms=_env_int(
+            "READ_REPLICA_LAG_TOLERANCE_MS", DEFAULT_READ_REPLICA_LAG_TOLERANCE_MS
+        ),
+        read_replica_retry_cooldown_seconds=_env_float(
+            "READ_REPLICA_RETRY_COOLDOWN_SECONDS",
+            DEFAULT_READ_REPLICA_RETRY_COOLDOWN_SECONDS,
+        ),
         app_environment=os.environ.get("APP_ENVIRONMENT", DEFAULT_APP_ENVIRONMENT),
         gateway_jwt_verify_enabled=_env_bool("GATEWAY_JWT_VERIFY_ENABLED", False),
         gateway_rate_limit_enabled=_env_bool("GATEWAY_RATE_LIMIT_ENABLED", False),

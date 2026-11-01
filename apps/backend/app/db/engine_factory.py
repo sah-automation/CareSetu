@@ -6,6 +6,7 @@ from app.db.engine import (
     EngineLike,
     create_engine,
     create_primary_engine,
+    create_read_replica_engines,
     dispose_engine,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "EngineLike",
     "create_engine",
     "create_primary_engine",
+    "create_read_replica_engines",
     "dispose_engine",
 ]

@@ -12,14 +12,24 @@ from app.db.engine import (
     EngineLike,
     create_engine,
     create_primary_engine,
+    create_read_replica_engines,
     dispose_engine,
+)
+from app.db.read_replica import (
+    ReadReplicaMiddleware,
+    ReadReplicaRouter,
+    is_read_replica_eligible,
 )
 
 __all__ = [
     "AsyncEngineLike",
     "AsyncEngineProtocol",
     "EngineLike",
+    "ReadReplicaMiddleware",
+    "ReadReplicaRouter",
     "create_engine",
     "create_primary_engine",
+    "create_read_replica_engines",
     "dispose_engine",
+    "is_read_replica_eligible",
 ]
