@@ -30,6 +30,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+import app.redis as shared_redis
 from app.config import Settings
 from bus import dispatcher as bus_dispatcher
 from bus.dispatcher import OutboxRow, OutboxTable
@@ -156,11 +157,9 @@ def otel_worker_state(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(otel, "_metrics_enabled", False)
     monkeypatch.setattr(otel, "_meter_provider", None)
     monkeypatch.setattr(otel, "_instruments", {})
-    consent_cache._REDIS_CLIENT = None
-    directory_cache._REDIS_CLIENT = None
+    shared_redis._REDIS_CLIENT = None
     yield
-    consent_cache._REDIS_CLIENT = None
-    directory_cache._REDIS_CLIENT = None
+    shared_redis._REDIS_CLIENT = None
 
 
 # --- vendor gate: METRICS_ENABLED off = inert ------------------------------
@@ -315,7 +314,7 @@ async def test_consent_cache_hit_increments_hit_counter(
 ) -> None:
     meter = _RecordingMeter()
     monkeypatch.setattr(otel, "get_meter", lambda name=METER_NAME: meter)
-    consent_cache._REDIS_CLIENT = _ConsentRedis(["1", "5", "2", "consultations"])
+    shared_redis._REDIS_CLIENT = _ConsentRedis(["1", "5", "2", "consultations"])
 
     decision = await consent_cache.get_cached_decision(42, "doctor", "doc-1", "prescriptions")
 
@@ -332,7 +331,7 @@ async def test_consent_cache_miss_increments_miss_counter(
 ) -> None:
     meter = _RecordingMeter()
     monkeypatch.setattr(otel, "get_meter", lambda name=METER_NAME: meter)
-    consent_cache._REDIS_CLIENT = _ConsentRedis([None, None, None, None])
+    shared_redis._REDIS_CLIENT = _ConsentRedis([None, None, None, None])
 
     assert await consent_cache.get_cached_decision(42, "doctor", "doc-1", "prescriptions") is None
 
@@ -348,7 +347,7 @@ async def test_directory_cache_hit_and_miss_increment_counters(
 ) -> None:
     meter = _RecordingMeter()
     monkeypatch.setattr(otel, "get_meter", lambda name=METER_NAME: meter)
-    directory_cache._REDIS_CLIENT = _DirectoryRedis('{"items": [], "fell_back": false}')
+    shared_redis._REDIS_CLIENT = _DirectoryRedis('{"items": [], "fell_back": false}')
 
     hit = await directory_cache.get_cached_search(
         query=None,
@@ -363,7 +362,7 @@ async def test_directory_cache_hit_and_miss_increment_counters(
     assert len(hits) == 1
     assert hits[0].attributes == {"cache": "directory"}
 
-    directory_cache._REDIS_CLIENT = _DirectoryRedis(None)
+    shared_redis._REDIS_CLIENT = _DirectoryRedis(None)
     assert (
         await directory_cache.get_cached_search(
             query=None,
@@ -385,7 +384,7 @@ async def test_directory_cache_malformed_payload_counts_as_miss(
 ) -> None:
     meter = _RecordingMeter()
     monkeypatch.setattr(otel, "get_meter", lambda name=METER_NAME: meter)
-    directory_cache._REDIS_CLIENT = _DirectoryRedis("not json")
+    shared_redis._REDIS_CLIENT = _DirectoryRedis("not json")
 
     assert (
         await directory_cache.get_cached_search(
@@ -408,8 +407,7 @@ async def test_cache_miss_counters_noop_safely_when_redis_absent(
 ) -> None:
     meter = _RecordingMeter()
     monkeypatch.setattr(otel, "get_meter", lambda name=METER_NAME: meter)
-    consent_cache._REDIS_CLIENT = None
-    directory_cache._REDIS_CLIENT = None
+    shared_redis._REDIS_CLIENT = None
 
     # No raise, SQL-fallback miss on both caches, and each miss is counted.
     assert await consent_cache.get_cached_decision(1, "doctor", "d", "prescriptions") is None

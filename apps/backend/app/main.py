@@ -39,6 +39,7 @@ from app.gateway.rate_limit import RateLimitMiddleware
 from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
+from app.redis import close_redis_client, init_redis_client
 from modules.audit.adapters.routes import router as audit_router
 from modules.audit.facade import AuditFacade
 from modules.care.adapters.routes import (
@@ -52,7 +53,6 @@ from modules.consent.adapters.routes import (
 )
 from modules.consent.adapters.routes import router as consent_router
 from modules.consent.facade import ConsentFacade, CounterpartyDisplayNameResolver
-from modules.consent.redis_cache import close_redis_client, init_redis_client
 from modules.doctor.adapters.routes import (
     register_error_handlers as register_doctor_error_handlers,
 )
@@ -86,10 +86,6 @@ from modules.partner.adapters.routes import (
     register_error_handlers as register_partner_error_handlers,
 )
 from modules.partner.adapters.routes import router as partner_router
-from modules.partner.directory_cache import (
-    close_directory_redis_client,
-    init_directory_redis_client,
-)
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
 from modules.profile_media.facade import ProfileMediaRetryPolicy
@@ -311,10 +307,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resolved_settings.langfuse_secret_key,
             resolved_settings.langfuse_host,
         )
-        # Initialize Redis clients for the consent-status and directory-search
+        # Initialize shared Redis client for consent-status and directory-search
         # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)
-        await init_directory_redis_client(resolved_settings)
         # PHASE-14A B8 (#726): size the in-process error-capture buffer here, at the
         # WEB composition root - not only in worker/main.py. This is the process
         # that captures: a route that raises calls ``capture_server_error`` before
@@ -366,8 +361,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # (ADR-0002 §2, worker-outbox-runbook Rule 1).
                 dispatcher_stop.set()
                 await dispatcher_task
-            # Close Redis clients on shutdown
-            await close_directory_redis_client()
+            # Close shared Redis client on shutdown
             await close_redis_client()
             # PHASE-14A A4 (#696): flush queued Sentry events on shutdown so a
             # Render spin-down does not drop them; no-op when Sentry is off.

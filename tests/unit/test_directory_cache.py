@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 from redis.asyncio import Redis
 
-import modules.partner.directory_cache as directory_cache
+import app.redis as shared_redis
 from modules.partner.directory_cache import (
     _cache_key,
     get_cached_search,
@@ -65,7 +65,7 @@ class _FakeRedis:
 
 
 def _install(client: Redis | None) -> None:
-    directory_cache._REDIS_CLIENT = client
+    shared_redis._REDIS_CLIENT = client
 
 
 @pytest.fixture(autouse=True)
