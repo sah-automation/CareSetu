@@ -14,6 +14,7 @@ from app.db.engine import (
     create_primary_engine,
     create_read_replica_engines,
     dispose_engine,
+    dispose_engines,
 )
 from app.db.read_replica import (
     ReadReplicaMiddleware,
@@ -31,5 +32,6 @@ __all__ = [
     "create_primary_engine",
     "create_read_replica_engines",
     "dispose_engine",
+    "dispose_engines",
     "is_read_replica_eligible",
 ]
