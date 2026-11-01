@@ -992,6 +992,12 @@ class Settings:
             raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.redis_directory_ttl_seconds <= 0:
             raise ValueError("redis_directory_ttl_seconds must be positive")
+        if self.redis_max_connections < 1:
+            raise ValueError("redis_max_connections must be >= 1")
+        if self.redis_socket_connect_timeout_seconds <= 0:
+            raise ValueError("redis_socket_connect_timeout_seconds must be > 0")
+        if self.redis_socket_timeout_seconds <= 0:
+            raise ValueError("redis_socket_timeout_seconds must be > 0")
         # Read-cache foundation (ARCH-P1 #816).
         if self.profile_cache_ttl_seconds <= 0:
             raise ValueError("profile_cache_ttl_seconds must be positive")
@@ -1373,6 +1379,14 @@ def get_settings() -> Settings:
         ),
         redis_directory_ttl_seconds=_env_int(
             "REDIS_DIRECTORY_TTL_SECONDS", DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
+        ),
+        redis_max_connections=_env_int("REDIS_MAX_CONNECTIONS", DEFAULT_REDIS_MAX_CONNECTIONS),
+        redis_socket_connect_timeout_seconds=_env_float(
+            "REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS",
+            DEFAULT_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS,
+        ),
+        redis_socket_timeout_seconds=_env_float(
+            "REDIS_SOCKET_TIMEOUT_SECONDS", DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS
         ),
         phi_cache_enabled=_env_bool("PHI_CACHE_ENABLED", False),
         profile_cache_ttl_seconds=_env_int(
