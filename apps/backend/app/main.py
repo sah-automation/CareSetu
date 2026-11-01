@@ -35,7 +35,7 @@ from app.gateway.http_counter import HttpCounterMiddleware
 from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
-from app.gateway.rate_limit import RateLimitMiddleware
+from app.gateway.rate_limit import RateLimitMiddleware, RedisRateLimitMiddleware
 from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
@@ -659,13 +659,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         enabled=resolved_settings.gateway_jwt_verify_enabled,
         validate_token=facade.validate_token,
     )
+    # ARCH-P1 #815: selectable rate-limit backend. The middleware keeps its
+    # in-memory constructor behaviour; under settings.rate_limit_backend="redis"
+    # the shared Redis client is resolved lazily via the gateway accessor so
+    # the middleware stack built at app construction still sees the client once
+    # the lifespan has initialised it.
+    _RateLimitMiddleware = (
+        RedisRateLimitMiddleware
+        if resolved_settings.rate_limit_backend == "redis"
+        else RateLimitMiddleware
+    )
     app.add_middleware(
-        RateLimitMiddleware,
+        _RateLimitMiddleware,
         enabled=resolved_settings.gateway_rate_limit_enabled,
         max_requests=resolved_settings.gateway_rate_limit_auth_max_requests,
         window_seconds=resolved_settings.gateway_rate_limit_auth_window_seconds,
         intake_max_requests=resolved_settings.gateway_rate_limit_intake_max_requests,
         intake_window_seconds=resolved_settings.gateway_rate_limit_intake_window_seconds,
+        rate_limit_backend=resolved_settings.rate_limit_backend,
+        redis_rate_limit_key_prefix=resolved_settings.redis_rate_limit_key_prefix,
     )
     # CORS for the local-dev PWA origin (added so the allow-origin header
     # reaches every response, including 401/403 from the gateway stack). The

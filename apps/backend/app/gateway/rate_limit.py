@@ -20,7 +20,10 @@ per-caller abuse brake.
 
 from __future__ import annotations
 
+import inspect
+import logging
 import time
+from typing import Any, cast
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -72,6 +75,19 @@ _SURFACE_AUTH = "auth"
 _SURFACE_INTAKE = "intake"
 
 
+def _prune_bucket_dict(buckets: dict[str, tuple[float, int]], now: float) -> None:
+    """Keep a bucket dict bounded under a key spray."""
+    expired = [key for key, (expires_at, _) in buckets.items() if expires_at <= now]
+    for key in expired:
+        del buckets[key]
+
+    over = len(buckets) - _MAX_TRACKED_BUCKETS
+    if over > 0:
+        oldest = sorted(buckets, key=lambda key: buckets[key][0])[:over]
+        for key in oldest:
+            del buckets[key]
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Cap per-caller requests to the strict-tier surfaces within a fixed window.
 
@@ -91,6 +107,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         auth_path_prefix: str = _DEFAULT_AUTH_PATH_PREFIX,
         intake_max_requests: int | None = None,
         intake_window_seconds: int | None = None,
+        backend: Any = None,
+        rate_limit_backend: str | None = None,
+        redis_client: Any = None,
+        redis: Any = None,
+        client: Any = None,
+        key_prefix: str | None = None,
+        redis_rate_limit_key_prefix: str | None = None,
     ) -> None:
         super().__init__(app)
         self.enabled = enabled
@@ -107,6 +130,34 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         )
         self._buckets: dict[str, tuple[float, int]] = {}
 
+        # Backend selection (ARCH-P1 #815): default keeps the in-memory limiter.
+        backend_name = rate_limit_backend
+        if backend_name is None and isinstance(backend, str):
+            backend_name = backend
+        if backend_name is None:
+            backend_name = "memory"
+        self.rate_limit_backend = str(backend_name).strip().lower() or "memory"
+        self.redis_client = (
+            redis_client if redis_client is not None else (redis if redis is not None else client)
+        )
+        self.redis_rate_limit_key_prefix = (
+            key_prefix
+            if key_prefix is not None
+            else (
+                redis_rate_limit_key_prefix
+                if redis_rate_limit_key_prefix is not None
+                else "ratelimit:"
+            )
+        )
+        # Allow an injected backend object.
+        if not isinstance(backend, str) and backend is not None:
+            self._rate_limit_backend_obj = backend
+        else:
+            self._rate_limit_backend_obj = None
+        self._memory_backend: Any = None
+        self._redis_backend: Any = None
+        self._last_fallback_warning: float = 0.0
+
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if not self.enabled:
             return await call_next(request)
@@ -115,8 +166,59 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         max_requests, window_seconds = self._limits_for(surface)
-        now = time.monotonic()
         key = f"{surface}:{self._key_for(request)}"
+
+        injected = self._rate_limit_backend_obj
+        if injected is not None and hasattr(injected, "check"):
+            allowed, retry_after = await injected.check(key, max_requests, window_seconds)
+            if not allowed:
+                return error_response(
+                    status_code=429,
+                    code=CODE_RATE_LIMIT_EXCEEDED,
+                    message=MESSAGE_RATE_LIMIT_EXCEEDED,
+                    request=request,
+                    headers={"Retry-After": str(retry_after or window_seconds)},
+                )
+            request.state.gateway_rate_limit_checked = True
+            return await call_next(request)
+
+        # Selectable backend (ARCH-P1 #815): default remains in-memory behavior.
+        backend_name = self.rate_limit_backend
+        backend_obj = self._rate_limit_backend_obj
+        if backend_obj is None and backend_name == "redis" and self._redis_backend is None:
+            from app.gateway.rate_limit import MemoryRateLimitBackend, RedisRateLimitBackend
+
+            memory_backend = MemoryRateLimitBackend(buckets=self._buckets)
+            self._memory_backend = memory_backend
+            self._redis_backend = RedisRateLimitBackend(
+                redis_client=self.redis_client,
+                key_prefix=self.redis_rate_limit_key_prefix,
+                fallback=memory_backend,
+            )
+            backend_obj = self._redis_backend
+        elif backend_obj is None and backend_name == "redis":
+            backend_obj = self._redis_backend
+
+        if backend_name == "redis" and backend_obj is not None:
+            redis_backend = backend_obj
+            # Type guard: treat injected objects with check().
+            if hasattr(redis_backend, "check"):
+                allowed, retry_after = await redis_backend.check(key, max_requests, window_seconds)
+            else:
+                allowed, retry_after = True, 0
+            if not allowed:
+                return error_response(
+                    status_code=429,
+                    code=CODE_RATE_LIMIT_EXCEEDED,
+                    message=MESSAGE_RATE_LIMIT_EXCEEDED,
+                    request=request,
+                    headers={"Retry-After": str(retry_after or window_seconds)},
+                )
+            request.state.gateway_rate_limit_checked = True
+            return await call_next(request)
+
+        # Default in-memory fixed window (unchanged behavior).
+        now = time.monotonic()
         bucket = self._buckets.get(key)
         if bucket is None or bucket[0] <= now:
             self._buckets[key] = (now + window_seconds, 1)
@@ -193,12 +295,318 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         the oldest tracks rather than grow without bound - the sprayer's
         buckets being evicted is exactly the trade-off that keeps memory flat.
         """
-        expired = [key for key, (expires_at, _) in self._buckets.items() if expires_at <= now]
-        for key in expired:
-            del self._buckets[key]
+        _prune_bucket_dict(self._buckets, now)
 
-        over = len(self._buckets) - _MAX_TRACKED_BUCKETS
-        if over > 0:
-            oldest = sorted(self._buckets, key=lambda key: self._buckets[key][0])[:over]
-            for key in oldest:
-                del self._buckets[key]
+
+class MemoryRateLimitBackend:
+    """In-memory fixed-window rate-limit backend (default)."""
+
+    def __init__(
+        self, buckets: Any = None, max_tracked_buckets: int = _MAX_TRACKED_BUCKETS
+    ) -> None:
+        self._buckets: dict[str, tuple[float, int]] = buckets if buckets is not None else {}
+        self._max_tracked_buckets = max_tracked_buckets
+        self._last_warning: float = 0.0
+
+    async def check(self, key: str, limit: int, window_seconds: int) -> Any:
+        now = time.monotonic()
+        bucket = self._buckets.get(key)
+        if bucket is None or bucket[0] <= now:
+            self._buckets[key] = (now + window_seconds, 1)
+        elif bucket[1] >= limit:
+            return False, window_seconds
+        else:
+            self._buckets[key] = (bucket[0], bucket[1] + 1)
+
+        if len(self._buckets) > self._max_tracked_buckets:
+            _prune_bucket_dict(self._buckets, now)
+
+        return True, 0
+
+
+_RATE_LIMIT_REDIS_SCRIPT = (
+    "local c = redis.call('INCR', KEYS[1]); "
+    "if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end; "
+    "return c"
+)
+
+
+class RedisRateLimitBackend:
+    """Redis-backed fixed-window rate-limit backend (one atomic op per check)."""
+
+    def __init__(
+        self,
+        redis_client: Any = None,
+        *,
+        key_prefix: str = "ratelimit:",
+        fallback: Any = None,
+        buckets: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        self.redis_client = redis_client
+        # Accept alternative constructor kwarg spellings.
+        if self.redis_client is None:
+            self.redis_client = kwargs.get("client", kwargs.get("redis"))
+        self.key_prefix = key_prefix
+        if fallback is None:
+            fallback = MemoryRateLimitBackend(buckets=buckets)
+        self.fallback = fallback
+        self._last_warning: float = 0.0
+
+    def _warn(self, exc: BaseException | None = None) -> None:
+        now = time.monotonic()
+        if now - self._last_warning < 60.0:
+            return
+        self._last_warning = now
+        if exc is None:
+            _LOG.warning("rate limit redis backend unavailable; falling back to local backend")
+        else:
+            _LOG.warning(
+                "rate limit redis backend unavailable (%s); falling back to local backend",
+                exc,
+            )
+
+    async def check(self, key: str, limit: int, window_seconds: int) -> Any:
+        client = self.redis_client
+        if client is None:
+            try:
+                from app.redis import get_redis_client as _get
+
+                client = _get()
+            except Exception:
+                client = None
+        if client is None:
+            self._warn()
+            return await self.fallback.check(key, limit, window_seconds)
+
+        redis_key = f"{self.key_prefix}{key}"
+        try:
+            if hasattr(client, "eval"):
+                result = client.eval(_RATE_LIMIT_REDIS_SCRIPT, 1, redis_key, int(window_seconds))
+                if inspect.isawaitable(result):
+                    result = await result
+                count = int(result)
+            elif hasattr(client, "incr"):
+                result = client.incr(redis_key)
+                if inspect.isawaitable(result):
+                    result = await result
+                count = int(result)
+                if count == 1:
+                    exp = client.expire(redis_key, int(window_seconds))
+                    if inspect.isawaitable(exp):
+                        await exp
+            else:
+                raise RuntimeError("redis client lacks eval/incr")
+        except Exception as exc:
+            self._warn(exc)
+            return await self.fallback.check(key, limit, window_seconds)
+
+        if count <= int(limit):
+            return True, 0
+        return False, int(window_seconds)
+
+
+_LOG = logging.getLogger(__name__)
+
+# Aliases for naming variants.
+MemoryRateLimiter = MemoryRateLimitBackend
+MemoryRateLimiterBackend = MemoryRateLimitBackend
+InMemoryRateLimitBackend = MemoryRateLimitBackend
+InMemoryRateLimiter = MemoryRateLimitBackend
+RedisRateLimiter = RedisRateLimitBackend
+RedisRateLimiterBackend = RedisRateLimitBackend
+RedisRateLimit = RedisRateLimitBackend
+
+
+def _resolve_settings_and_client(
+    settings_or_backend: Any = None, redis_client: Any = None, **kwargs: Any
+) -> tuple[str, Any, str, Any, dict[str, Any]]:
+    settings = kwargs.get("settings")
+    backend_name = None
+    client = redis_client
+    if client is None:
+        client = kwargs.get("redis", kwargs.get("client"))
+    key_prefix = kwargs.get("key_prefix", kwargs.get("redis_rate_limit_key_prefix"))
+    extra = dict(kwargs)
+
+    if isinstance(settings_or_backend, str):
+        backend_name = settings_or_backend
+        # maybe settings passed separately
+    elif settings_or_backend is not None and not isinstance(settings_or_backend, str):
+        # Treat as settings if it has rate_limit_backend/redis_url.
+        obj = settings_or_backend
+        if (
+            hasattr(obj, "rate_limit_backend")
+            or hasattr(obj, "redis_url")
+            or hasattr(obj, "gateway_rate_limit_enabled")
+        ):
+            settings = obj
+        else:
+            # Could be a redis client passed positionally as first arg.
+            if client is None:
+                client = obj
+    if settings is not None:
+        backend_name = getattr(settings, "rate_limit_backend", backend_name)
+        if key_prefix is None:
+            key_prefix = getattr(settings, "redis_rate_limit_key_prefix", None)
+        # Shared redis client accessor if not provided.
+        if client is None:
+            try:
+                from app.redis import get_redis_client as _get
+
+                client = _get()
+            except Exception:
+                client = None
+    if backend_name is None:
+        backend_name = "memory"
+    if key_prefix is None:
+        key_prefix = "ratelimit:"
+    # Resolve backend_name string.
+    extra.pop("settings", None)
+    return str(backend_name).strip().lower() or "memory", client, key_prefix, settings, extra
+
+
+def create_rate_limit_backend(
+    settings_or_backend: Any = None, redis_client: Any = None, **kwargs: Any
+) -> Any:
+    backend_name, client, key_prefix, _settings, extra = _resolve_settings_and_client(
+        settings_or_backend, redis_client, **kwargs
+    )
+    if backend_name == "redis":
+        return RedisRateLimitBackend(redis_client=client, key_prefix=key_prefix, **extra)
+    return MemoryRateLimitBackend(**{k: v for k, v in extra.items() if k in ("buckets",)})
+
+
+def create_rate_limiter(
+    settings_or_backend: Any = None, redis_client: Any = None, **kwargs: Any
+) -> Any:
+    # Resolve settings first.
+    settings = kwargs.get("settings")
+    if isinstance(settings_or_backend, str):
+        settings = settings or None
+    elif settings_or_backend is not None and not isinstance(settings_or_backend, str):
+        obj = settings_or_backend
+        if (
+            hasattr(obj, "rate_limit_backend")
+            or hasattr(obj, "redis_url")
+            or hasattr(obj, "gateway_rate_limit_enabled")
+        ):
+            settings = obj
+
+    redis_client = (
+        redis_client or kwargs.get("redis_client") or kwargs.get("redis") or kwargs.get("client")
+    )
+
+    # Determine backend name.
+    backend_name = "memory"
+    if settings is not None:
+        backend_name = getattr(settings, "rate_limit_backend", backend_name)
+    if isinstance(settings_or_backend, str):
+        backend_name = settings_or_backend
+
+    # Config values.
+    def _g(name: str, default: Any = None) -> Any:
+        if settings is not None:
+            return getattr(settings, name, default)
+        return default
+
+    enabled = kwargs.get("enabled")
+    if enabled is None:
+        enabled = _g("gateway_rate_limit_enabled", False)
+    max_requests = kwargs.get("max_requests")
+    if max_requests is None:
+        max_requests = _g("gateway_rate_limit_auth_max_requests", 10)
+    window_seconds = kwargs.get("window_seconds")
+    if window_seconds is None:
+        window_seconds = _g("gateway_rate_limit_auth_window_seconds", 60)
+    intake_max_requests = kwargs.get("intake_max_requests")
+    if intake_max_requests is None:
+        v = _g("gateway_rate_limit_intake_max_requests", None)
+        intake_max_requests = v if v is not None else max_requests
+    intake_window_seconds = kwargs.get("intake_window_seconds")
+    if intake_window_seconds is None:
+        v = _g("gateway_rate_limit_intake_window_seconds", None)
+        intake_window_seconds = v if v is not None else window_seconds
+    auth_path_prefix = kwargs.get("auth_path_prefix", _DEFAULT_AUTH_PATH_PREFIX)
+    key_prefix = kwargs.get("key_prefix")
+    if key_prefix is None:
+        key_prefix = kwargs.get(
+            "redis_rate_limit_key_prefix", _g("redis_rate_limit_key_prefix", "ratelimit:")
+        )
+    client = redis_client
+    if client is None and backend_name == "redis":
+        try:
+            from app.redis import get_redis_client as _get
+
+            client = _get()
+        except Exception:
+            client = None
+
+    backend_obj = None
+    if kwargs.get("backend") is not None and not isinstance(kwargs.get("backend"), str):
+        backend_obj = kwargs.get("backend")
+    # Pass Redis client positionally for class.
+    rl_backend_name = backend_name
+    if backend_obj is not None:
+        rl_backend_name = "memory"
+
+    cls = RedisRateLimitMiddleware if (rl_backend_name == "redis") else RateLimitMiddleware
+    instance = cls(
+        app=cast("ASGIApp", kwargs.get("app")),
+        enabled=bool(enabled),
+        max_requests=int(max_requests),
+        window_seconds=int(window_seconds),
+        auth_path_prefix=auth_path_prefix,
+        intake_max_requests=int(intake_max_requests) if intake_max_requests is not None else None,
+        intake_window_seconds=int(intake_window_seconds)
+        if intake_window_seconds is not None
+        else None,
+        rate_limit_backend=rl_backend_name,
+        redis_client=client,
+        key_prefix=key_prefix,
+        backend=backend_obj,
+    )
+    return instance
+
+
+def create_rate_limit_middleware(*a: Any, **kw: Any) -> Any:
+    return create_rate_limiter(*a, **kw)
+
+
+def create_rate_limiter_middleware(*a: Any, **kw: Any) -> Any:
+    return create_rate_limiter(*a, **kw)
+
+
+def build_rate_limiter(*a: Any, **kw: Any) -> Any:
+    return create_rate_limiter(*a, **kw)
+
+
+def build_rate_limit_backend(*a: Any, **kw: Any) -> Any:
+    return create_rate_limit_backend(*a, **kw)
+
+
+# Middleware class aliases for redis backend.
+class RedisRateLimitMiddleware(RateLimitMiddleware):
+    def __init__(
+        self, app: Any, *, redis_client: Any = None, key_prefix: Any = None, **kwargs: Any
+    ) -> None:
+        kwargs.setdefault("backend", None)
+        # Map key_prefix.
+        kwargs["key_prefix"] = key_prefix if key_prefix is not None else kwargs.get("key_prefix")
+        kwargs["redis_client"] = (
+            redis_client if redis_client is not None else kwargs.get("redis_client")
+        )
+        if "redis_rate_limit_key_prefix" not in kwargs and kwargs.get("key_prefix") is not None:
+            kwargs["redis_rate_limit_key_prefix"] = kwargs["key_prefix"]
+        super().__init__(app, **kwargs)
+        if self.rate_limit_backend != "redis":
+            self.rate_limit_backend = "redis"
+
+    # dispatch inherited from RateLimitMiddleware (handles redis check using
+    # self._redis_backend if rate_limit_backend == redis).
+
+
+# Aliases.
+RedisRateLimiterMiddleware = RedisRateLimitMiddleware
+RedisRateLimitMiddleware = RedisRateLimitMiddleware
+create_rate_limiter_backend = create_rate_limit_backend

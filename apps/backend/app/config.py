@@ -5,10 +5,12 @@ and gateway (#29) next. Plain frozen dataclass over ``os.environ`` - no extra
 dependency beyond the declared stack (cost floor ``NFR-001``).
 """
 
+import json
 import math
 import os
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from modules.iam.domain.mfa_lockout import (
     DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
@@ -71,6 +73,15 @@ DEFAULT_DIRECTORY_MAX_RESULTS = 50
 # resend) while still stopping bursts.
 DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS = 10
 DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
+# Rate-limit backend selection (ARCH-P1 #815): "memory" (default) keeps the
+# in-process fixed window; "redis" performs one atomic server-side
+# increment-and-expire so two web processes share a window. The Redis prefix
+# namespaces every limiter key; tiers are parsed/validated but not applied.
+DEFAULT_RATE_LIMIT_BACKEND = "memory"
+DEFAULT_REDIS_RATE_LIMIT_KEY_PREFIX = "ratelimit:"
+DEFAULT_RATE_LIMIT_TIERS = (
+    '{"default": {"auth": 10, "intake": 10}, "premium": {"auth": 100, "intake": 50}}'
+)
 # Mirrors ``modules.iam.domain.jwt.ACCESS_TOKEN_TTL_SECONDS``; config stays
 # import-free so it reads as one plain dataclass over the environment.
 DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 900
@@ -348,6 +359,12 @@ class Settings:
     # so a burst on one can never exhaust the other's budget.
     gateway_rate_limit_intake_max_requests: int = DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
     gateway_rate_limit_intake_window_seconds: int = DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
+    # Rate-limit backend selection (ARCH-P1 #815): "memory" (default) or
+    # "redis"; the prefix namespaces every Redis key; tiers is a JSON string
+    # parsed and validated but never applied.
+    rate_limit_backend: str = DEFAULT_RATE_LIMIT_BACKEND
+    redis_rate_limit_key_prefix: str = DEFAULT_REDIS_RATE_LIMIT_KEY_PREFIX
+    rate_limit_tiers: str = DEFAULT_RATE_LIMIT_TIERS
     sms_provider: str = DEFAULT_SMS_PROVIDER
     sms_api_key: str = ""
     sms_base_url: str = ""
@@ -698,6 +715,18 @@ class Settings:
             raise ValueError("gateway_rate_limit_auth_max_requests must be positive")
         if self.gateway_rate_limit_auth_window_seconds <= 0:
             raise ValueError("gateway_rate_limit_auth_window_seconds must be positive")
+        # Rate-limit backend selection (ARCH-P1 #815).
+        _backend = self.rate_limit_backend.strip().lower()
+        if _backend not in {"memory", "redis"}:
+            raise ValueError(
+                f"unsupported rate_limit_backend {self.rate_limit_backend!r}; "
+                "expected 'memory' or 'redis'"
+            )
+        if _backend == "redis" and not self.redis_url.strip():
+            raise ValueError("rate_limit_backend='redis' requires a non-empty REDIS_URL")
+        if not isinstance(self.redis_rate_limit_key_prefix, str):
+            raise ValueError("redis_rate_limit_key_prefix must be a string")
+        parse_rate_limit_tiers(self.rate_limit_tiers)
         provider = self.sms_provider.strip().lower()
         if provider not in {"mock", "provider"}:
             raise ValueError(
@@ -1118,6 +1147,35 @@ def parse_ai_pricing_table(raw: str) -> dict[str, tuple[Decimal, Decimal]]:
     return table
 
 
+def parse_rate_limit_tiers(raw: str) -> dict[str, Any]:
+    """Parse a ``RATE_LIMIT_TIERS`` JSON value into per-tier limit maps.
+
+    The tiers are parsed and validated at boot but are not applied to the
+    existing auth and intake limits (ARCH-P1 #815).
+    """
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"RATE_LIMIT_TIERS must be valid JSON; got {raw!r}") from exc
+    if not isinstance(data, dict) or not data:
+        raise ValueError("RATE_LIMIT_TIERS must be a non-empty JSON object")
+    parsed: dict[str, Any] = {}
+    for tier, limits in data.items():
+        if not isinstance(tier, str) or not tier.strip():
+            raise ValueError("RATE_LIMIT_TIERS tier names must be non-empty strings")
+        if not isinstance(limits, dict) or not limits:
+            raise ValueError(f"RATE_LIMIT_TIERS tier {tier!r} must be a non-empty object")
+        normalised: dict[str, int] = {}
+        for name, value in limits.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"RATE_LIMIT_TIERS tier {tier!r} limit {name!r} must be a positive integer"
+                )
+            normalised[str(name)] = value
+        parsed[tier] = normalised
+    return parsed
+
+
 def get_settings() -> Settings:
     """Build ``Settings`` from environment variables.
 
@@ -1415,4 +1473,9 @@ def get_settings() -> Settings:
         alert_delivery_base_backoff_seconds=_env_int("ALERT_DELIVERY_BASE_BACKOFF_SECONDS", 30),
         alert_delivery_max_backoff_seconds=_env_int("ALERT_DELIVERY_MAX_BACKOFF_SECONDS", 3600),
         alert_delivery_console_base_url=os.environ.get("ALERT_DELIVERY_CONSOLE_BASE_URL", ""),
+        rate_limit_backend=os.environ.get("RATE_LIMIT_BACKEND", DEFAULT_RATE_LIMIT_BACKEND),
+        redis_rate_limit_key_prefix=os.environ.get(
+            "REDIS_RATE_LIMIT_KEY_PREFIX", DEFAULT_REDIS_RATE_LIMIT_KEY_PREFIX
+        ),
+        rate_limit_tiers=os.environ.get("RATE_LIMIT_TIERS", DEFAULT_RATE_LIMIT_TIERS),
     )
