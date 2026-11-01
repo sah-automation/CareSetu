@@ -20,18 +20,21 @@ local transaction, so a later AI failure never rolls back the intake
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from cryptography.exceptions import InvalidTag
 from pydantic import ValidationError
 from sqlalchemy import case, func, select
 
+from app.cache import get_cached, invalidate, set_cached
 from app.config import get_settings
 from app.db import AsyncEngineLike
+from app.redis import get_redis_client
 from bus.outbox_writer import write_outbox
 from modules.intake.adapters import build_ai_gateway
 from modules.intake.adapters.ai_gateway import (
@@ -155,6 +158,22 @@ def _validate_audio_duration(media_ref: MediaUploadRef) -> None:
 #: chief-complaint list never floods the triage view.
 REVIEW_QUEUE_SNIPPET_MAX_CHARS: int = 120
 
+# Patient intake cache (ARCH-P1 #818) namespace.
+_INTAKE_CACHE_NAMESPACE = "intake"
+
+
+def _intake_cache_ttl(self: Any) -> int:
+    ttl = getattr(self, "_intake_cache_ttl_seconds", None)
+    if ttl is None:
+        try:
+            ttl = int(get_settings().intake_cache_ttl_seconds)
+        except Exception:
+            ttl = 0
+    try:
+        return int(ttl or 0)
+    except (TypeError, ValueError):
+        return 0
+
 
 def _review_queue_snippet(structured_fields: dict[str, object] | None) -> str | None:
     """A short introspect excerpt from the intake's structured content (#489).
@@ -209,6 +228,8 @@ class IntakeFacade:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         consent_facade: ConsentFacade | None = None,
         iam_facade: IamFacade | None = None,
+        intake_cache_ttl_seconds: int | None = None,
+        **_cache_kwargs: Any,
     ) -> None:
         self._engine = engine
         self._media_store = media_store
@@ -216,6 +237,16 @@ class IntakeFacade:
         self._sleep = sleep
         self._consent_facade = consent_facade
         self._iam_facade = iam_facade
+        _ttl = intake_cache_ttl_seconds
+        for _k in (
+            "intake_cache_ttl",
+            "intake_ttl_seconds",
+            "cache_ttl_seconds",
+            "ttl_seconds",
+        ):
+            if _ttl is None:
+                _ttl = _cache_kwargs.get(_k)
+        self._intake_cache_ttl_seconds = _ttl
 
     async def record_composer_opened(self, *, patient_id: int, trace_id: str) -> None:
         """Record one ``intake.composer_opened`` funnel-entry event.
@@ -362,6 +393,10 @@ class IntakeFacade:
                 envelope,
             )
 
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _INTAKE_CACHE_NAMESPACE, key=f"{patient_id}:{intake_id}")
         return IntakeSubmitResult(
             intake_id=intake_id,
             status=state.status.value,
@@ -553,6 +588,12 @@ class IntakeFacade:
                         forced_text=next_state.forced_text,
                     )
                 )
+                with contextlib.suppress(Exception):
+                    _client = get_redis_client()
+                    if _client is not None:
+                        await invalidate(
+                            _client, _INTAKE_CACHE_NAMESPACE, key=f"{patient_id}:{intake_id}"
+                        )
                 return ReRecordResult(
                     intake_id=intake_id,
                     accepted=False,
@@ -599,6 +640,10 @@ class IntakeFacade:
                 envelope,
             )
 
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _INTAKE_CACHE_NAMESPACE, key=f"{patient_id}:{intake_id}")
         return ReRecordResult(
             intake_id=intake_id,
             accepted=True,
@@ -620,6 +665,39 @@ class IntakeFacade:
         intake. Raises :class:`IntakeNotFoundError` when no row matches
         the given intake_id + patient_id pair.
         """
+        _ttl = _intake_cache_ttl(self)
+        _client = None
+        _settings = None
+        if _ttl > 0:
+            try:
+                _client = get_redis_client()
+                _settings = get_settings()
+            except Exception:
+                _client = None
+                _settings = None
+
+        _cache_key = f"{patient_id}:{intake_id}"
+
+        # Cache read.
+        if _client is not None:
+            try:
+                cached = await get_cached(
+                    _client,
+                    _INTAKE_CACHE_NAMESPACE,
+                    key=_cache_key,
+                    settings=_settings,
+                    phi=True,
+                )
+            except Exception:
+                cached = None
+            if isinstance(cached, dict):
+                try:
+                    return IntakeDetailView(**cached)
+                except Exception:
+                    cached = None
+            elif cached is not None:
+                cached = None
+
         async with self._engine.begin() as connection:
             row = (
                 await connection.execute(
@@ -652,7 +730,7 @@ class IntakeFacade:
             for m in media_rows
         ]
 
-        return IntakeDetailView(
+        result = IntakeDetailView(
             intake_id=int(row.id),
             patient_id=int(row.patient_id),
             mode=row.mode,
@@ -667,6 +745,20 @@ class IntakeFacade:
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
+
+        # Cache write.
+        if _client is not None:
+            with contextlib.suppress(Exception):
+                await set_cached(
+                    _client,
+                    _INTAKE_CACHE_NAMESPACE,
+                    key=_cache_key,
+                    value=result.model_dump(mode="json"),
+                    settings=_settings,
+                    phi=True,
+                    ttl_seconds=_ttl,
+                )
+        return result
 
     async def get_doctor_intake_detail(
         self,
@@ -846,6 +938,39 @@ class IntakeFacade:
         Raises :class:`IntakeNotFoundError` when no intake or pre-summary
         exists for the given pair.
         """
+        _ttl = _intake_cache_ttl(self)
+        _client = None
+        _settings = None
+        if _ttl > 0:
+            try:
+                _client = get_redis_client()
+                _settings = get_settings()
+            except Exception:
+                _client = None
+                _settings = None
+
+        _cache_key = f"{patient_id}:{intake_id}"
+
+        # Cache read (cache hit for the patient+intake read).
+        if _client is not None:
+            try:
+                cached = await get_cached(
+                    _client,
+                    _INTAKE_CACHE_NAMESPACE,
+                    key=_cache_key + ":pre_summary",
+                    settings=_settings,
+                    phi=True,
+                )
+            except Exception:
+                cached = None
+            if isinstance(cached, dict):
+                try:
+                    return PreSummaryView(**cached)
+                except Exception:
+                    cached = None
+            elif cached is not None:
+                cached = None
+
         async with self._engine.begin() as connection:
             intake_row = (
                 await connection.execute(
@@ -868,7 +993,7 @@ class IntakeFacade:
             if row is None:
                 raise IntakeNotFoundError(f"pre-summary not found for intake {intake_id}")
 
-        return PreSummaryView(
+        result = PreSummaryView(
             pre_summary_id=int(row.id),
             intake_id=int(row.intake_id),
             structured_fields=StructuredFields.model_validate(row.structured_fields or {}),
@@ -883,6 +1008,21 @@ class IntakeFacade:
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
+
+        # Cache key must distinguish pre-summary read from intake detail read.
+        # Keep a distinct cache entry: using a separate suffix.
+        if _client is not None:
+            with contextlib.suppress(Exception):
+                await set_cached(
+                    _client,
+                    _INTAKE_CACHE_NAMESPACE,
+                    key=_cache_key + ":pre_summary",
+                    value=result.model_dump(mode="json"),
+                    settings=_settings,
+                    phi=True,
+                    ttl_seconds=_ttl,
+                )
+        return result
 
     async def get_finalized_pre_summary(
         self,
@@ -1032,6 +1172,12 @@ class IntakeFacade:
                 )
             )
 
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(
+                    _client, _INTAKE_CACHE_NAMESPACE, key=f"{patient_id}:{intake_id}:pre_summary"
+                )
         return PatientEditsResult(
             intake_id=intake_id,
             pre_summary_id=int(row.id),
@@ -1267,6 +1413,19 @@ class IntakeFacade:
             if row is None:
                 raise IntakeNotFoundError(f"pre-summary not found for intake {intake_id}")
 
+            _patient_id_for_cache = None
+            try:
+                if get_redis_client() is not None:
+                    _patient_id_for_cache = (
+                        await connection.execute(
+                            select(intake_intakes.c.patient_id).where(
+                                intake_intakes.c.id == intake_id,
+                            )
+                        )
+                    ).scalar_one_or_none()
+            except Exception:
+                _patient_id_for_cache = None
+
             current = PreSummaryState(
                 status=PreSummaryStatus(row.review_state),
                 structuring_confidence=row.structuring_confidence,
@@ -1328,6 +1487,14 @@ class IntakeFacade:
                     ),
                 )
 
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None and _patient_id_for_cache is not None:
+                await invalidate(
+                    _client,
+                    _INTAKE_CACHE_NAMESPACE,
+                    key=f"{int(_patient_id_for_cache)}:{intake_id}:pre_summary",
+                )
         return PreSummaryReviewResult(
             intake_id=intake_id,
             pre_summary_id=int(row.id),
