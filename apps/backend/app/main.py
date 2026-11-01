@@ -536,7 +536,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # no other module's facade. Stored on state so the four operator read routes
     # read one resolved object and their tests stub it wholesale, like the audit
     # instance above.
-    app.state.observability_facade = ObservabilityFacade(engine=engine)
+    app.state.observability_facade = ObservabilityFacade(
+        engine=engine,
+        settings=resolved_settings,
+        provider_health_cache_ttl_seconds=resolved_settings.provider_health_cache_ttl_seconds,
+    )
     # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings facade
     # reads this module's own ``ops_settings`` table for database overrides and
     # falls back to the settled Settings (environment then default). Its 30s
