@@ -39,6 +39,11 @@ DEFAULT_REDIS_CONSENT_TTL_SECONDS = 300
 # Redis directory-search result cache (PHASE-6 T02b, #314): optional, same SQL
 # fallback + accelerator-only discipline (ADR-0011). p95 < 250 ms cached target.
 DEFAULT_REDIS_DIRECTORY_TTL_SECONDS = 300
+# Redis connection pool settings (ARCH-P1 #812): shared by all cache callers.
+# Timeouts honour third-party-integration-standards §1 (outbound call ceilings).
+DEFAULT_REDIS_MAX_CONNECTIONS = 10
+DEFAULT_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS = 1.0
+DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS = 1.0
 # Boundary directory result cap (PHASE-6 T2, #324): directory search never
 # returns an unbounded nearest-first list - the facade caps the returned items
 # at this top-N after distance ordering, on both the in-scope and the wider-area
@@ -336,6 +341,10 @@ class Settings:
     redis_url: str = DEFAULT_REDIS_URL
     redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
     redis_directory_ttl_seconds: int = DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
+    # Redis connection pool settings (ARCH-P1 #812): shared by all cache callers.
+    redis_max_connections: int = DEFAULT_REDIS_MAX_CONNECTIONS
+    redis_socket_connect_timeout_seconds: float = DEFAULT_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS
+    redis_socket_timeout_seconds: float = DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS
     # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
     # distance ordering in ``search_directory`` (both the in-scope and fallback
     # paths), so a patient's list tops out at the meaningful nearest matches.

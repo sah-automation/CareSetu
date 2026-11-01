@@ -36,9 +36,9 @@ async def init_redis_client(settings: Settings) -> None:
             url,
             encoding="utf-8",
             decode_responses=True,
-            max_connections=10,
-            socket_connect_timeout=1.0,
-            socket_timeout=1.0,
+            max_connections=settings.redis_max_connections,
+            socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+            socket_timeout=settings.redis_socket_timeout_seconds,
         )
         # Verify connectivity with a lightweight ping
         await _REDIS_CLIENT.ping()
