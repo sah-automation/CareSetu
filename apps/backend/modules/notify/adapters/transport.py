@@ -241,14 +241,21 @@ class CircuitBreaker:
         threshold: int,
         cooldown_seconds: float,
         clock: Callable[[], float] = time.monotonic,
+        enabled: bool = True,
     ) -> None:
         self._integration = integration
         self._threshold = threshold
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
+        self._enabled = enabled
         self._state = CircuitBreakerState.CLOSED
         self._consecutive_failures = 0
         self._opened_at: float | None = None
+
+    @property
+    def enabled(self) -> bool:
+        """Whether this breaker is active (when false, calls pass through)."""
+        return self._enabled
 
     @property
     def state(self) -> CircuitBreakerState:
@@ -267,6 +274,8 @@ class CircuitBreaker:
         and lets the probe through; earlier calls are refused without touching
         the wrapped adapter.
         """
+        if not self._enabled:
+            return True
         if self._state is CircuitBreakerState.OPEN:
             if self._opened_at is not None and (
                 self._clock() - self._opened_at >= self._cooldown_seconds
@@ -278,6 +287,8 @@ class CircuitBreaker:
 
     def record_success(self) -> None:
         """Record a successful send; a half-open probe success closes the breaker."""
+        if not self._enabled:
+            return
         if self._state is CircuitBreakerState.HALF_OPEN:
             logger.info(
                 "%s circuit breaker recovered; the provider accepts sends again",
@@ -288,6 +299,8 @@ class CircuitBreaker:
 
     def record_failure(self) -> None:
         """Record an outage failure; enough consecutive failures trip the breaker."""
+        if not self._enabled:
+            return
         if self._state is CircuitBreakerState.HALF_OPEN:
             self._state = CircuitBreakerState.OPEN
             self._opened_at = self._clock()
@@ -323,12 +336,21 @@ class CircuitBreakerChannel:
     concurrent provider calls.
     """
 
-    def __init__(self, adapter: ChannelAdapter, breaker: CircuitBreaker) -> None:
+    def __init__(
+        self, adapter: ChannelAdapter, breaker: CircuitBreaker, enabled: bool = True
+    ) -> None:
         self._adapter = adapter
         self._breaker = breaker
+        self._enabled = bool(enabled) and getattr(breaker, "enabled", True)
         self._probe_in_flight = False
 
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
     async def send(self, request: DeliveryRequest) -> DeliveryResult:
+        if not self._enabled:
+            return await self._adapter.send(request)
         if not self._breaker.allow_request():
             raise NotificationDeliveryError(
                 f"{self._breaker.integration_name} circuit breaker is open; "

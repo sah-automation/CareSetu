@@ -103,7 +103,9 @@ def build_notify_sms_channel(settings: Settings) -> ChannelAdapter:
             integration="EXT-001",
             threshold=settings.sms_circuit_breaker_threshold,
             cooldown_seconds=settings.sms_circuit_breaker_cooldown_seconds,
+            enabled=settings.circuit_breaker_enabled,
         ),
+        enabled=settings.circuit_breaker_enabled,
     )
 
 

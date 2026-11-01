@@ -98,7 +98,9 @@ def build_whatsapp_channel(settings: Settings) -> ChannelAdapter:
             integration="EXT-003",
             threshold=settings.whatsapp_circuit_breaker_threshold,
             cooldown_seconds=settings.whatsapp_circuit_breaker_cooldown_seconds,
+            enabled=settings.circuit_breaker_enabled,
         ),
+        enabled=settings.circuit_breaker_enabled,
     )
 
 

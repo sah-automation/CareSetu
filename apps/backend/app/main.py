@@ -291,6 +291,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # root, before any route/middleware can emit a line. Never raises - a
     # logging setup failure degrades to stdlib defaults instead of blocking boot.
     configure_logging(resolved_settings, service=SERVICE_API)
+    if not resolved_settings.circuit_breaker_enabled:
+        logger.warning("circuit breakers disabled (CIRCUIT_BREAKER_ENABLED=false); failing open")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -436,6 +438,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         ),
         timeout_seconds=resolved_settings.profile_media_timeout_seconds,
+        enabled=resolved_settings.circuit_breaker_enabled,
     )
     app.state.profile_media_store = profile_media_store
     app.state.profile_media_max_upload_bytes = resolved_settings.profile_media_max_upload_bytes

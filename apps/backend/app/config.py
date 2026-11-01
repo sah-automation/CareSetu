@@ -406,6 +406,9 @@ class Settings:
     provider_health_cache_ttl_seconds: int = DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS
     degraded_mode: bool = False
     degraded_cache_ttl_seconds: int = DEFAULT_DEGRADED_CACHE_TTL_SECONDS
+    # Global circuit-breaker bypass (ARCH-P1 #822): when false every breaker
+    # wrapper delegates directly to its inner callable and no breaker opens.
+    circuit_breaker_enabled: bool = True
     # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
     # distance ordering in ``search_directory`` (both the in-scope and fallback
     # paths), so a patient's list tops out at the meaningful nearest matches.
@@ -1304,6 +1307,7 @@ def get_settings() -> Settings:
             DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS,
         ),
         degraded_mode=_env_bool("DEGRADED_MODE", False),
+        circuit_breaker_enabled=_env_bool("CIRCUIT_BREAKER_ENABLED", True),
         degraded_cache_ttl_seconds=_env_int(
             "DEGRADED_CACHE_TTL_SECONDS", DEFAULT_DEGRADED_CACHE_TTL_SECONDS
         ),
