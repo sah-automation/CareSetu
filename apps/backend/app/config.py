@@ -409,6 +409,23 @@ class Settings:
     # Global circuit-breaker bypass (ARCH-P1 #822): when false every breaker
     # wrapper delegates directly to its inner callable and no breaker opens.
     circuit_breaker_enabled: bool = True
+    # Module router flags (ARCH-P1 #823): gate HTTP router inclusion at the
+    # composition root (app/main.py). Only the six ACTIVE flags below map to a
+    # real HTTP router today; the four RESERVED flags are accepted and validated
+    # but have no matching HTTP router - they are inert and have no runtime
+    # effect (no route inclusion, no outbox/worker/facade gating).
+    # Active:
+    module_intake_enabled: bool = True
+    module_care_enabled: bool = True
+    module_partner_enabled: bool = True
+    module_audit_enabled: bool = True
+    module_observability_enabled: bool = True
+    module_ops_enabled: bool = True
+    # Reserved (inert): validated, no runtime effect today.
+    module_notify_enabled: bool = True
+    module_settlement_enabled: bool = True
+    module_fulfillment_enabled: bool = True
+    module_diagnostics_enabled: bool = True
     # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
     # distance ordering in ``search_directory`` (both the in-scope and fallback
     # paths), so a patient's list tops out at the meaningful nearest matches.
@@ -1308,6 +1325,16 @@ def get_settings() -> Settings:
         ),
         degraded_mode=_env_bool("DEGRADED_MODE", False),
         circuit_breaker_enabled=_env_bool("CIRCUIT_BREAKER_ENABLED", True),
+        module_intake_enabled=_env_bool("MODULE_INTAKE_ENABLED", True),
+        module_care_enabled=_env_bool("MODULE_CARE_ENABLED", True),
+        module_partner_enabled=_env_bool("MODULE_PARTNER_ENABLED", True),
+        module_audit_enabled=_env_bool("MODULE_AUDIT_ENABLED", True),
+        module_observability_enabled=_env_bool("MODULE_OBSERVABILITY_ENABLED", True),
+        module_ops_enabled=_env_bool("MODULE_OPS_ENABLED", True),
+        module_notify_enabled=_env_bool("MODULE_NOTIFY_ENABLED", True),
+        module_settlement_enabled=_env_bool("MODULE_SETTLEMENT_ENABLED", True),
+        module_fulfillment_enabled=_env_bool("MODULE_FULFILLMENT_ENABLED", True),
+        module_diagnostics_enabled=_env_bool("MODULE_DIAGNOSTICS_ENABLED", True),
         degraded_cache_ttl_seconds=_env_int(
             "DEGRADED_CACHE_TTL_SECONDS", DEFAULT_DEGRADED_CACHE_TTL_SECONDS
         ),

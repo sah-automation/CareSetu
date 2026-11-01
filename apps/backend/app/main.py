@@ -740,14 +740,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(iam_router)
     app.include_router(health_router)
     app.include_router(consent_router)
-    app.include_router(audit_router)
-    app.include_router(observability_router)
-    app.include_router(csp_collector_router)
-    app.include_router(ops_router)
-    app.include_router(partner_router)
+    if resolved_settings.module_audit_enabled:
+        app.include_router(audit_router)
+    if resolved_settings.module_observability_enabled:
+        app.include_router(observability_router)
+        app.include_router(csp_collector_router)
+    if resolved_settings.module_ops_enabled:
+        app.include_router(ops_router)
+    if resolved_settings.module_partner_enabled:
+        app.include_router(partner_router)
     app.include_router(directory_router)
-    app.include_router(intake_router)
-    app.include_router(care_router)
+    if resolved_settings.module_intake_enabled:
+        app.include_router(intake_router)
+    if resolved_settings.module_care_enabled:
+        app.include_router(care_router)
     app.include_router(doctor_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
