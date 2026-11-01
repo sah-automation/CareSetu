@@ -12,6 +12,7 @@ protected route that proves the edge admit/deny.
 import asyncio
 import contextlib
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal, cast
@@ -287,10 +288,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     worker (#30) can read the same resolved config from the app instance.
     """
     resolved_settings = settings if settings is not None else get_settings()
+    # ARCH-P1 #824: process identity. Generate a UUID when INSTANCE_ID is empty,
+    # store it on application state below, and log it once with environment and
+    # region. Never put it in responses.
+    resolved_instance_id = resolved_settings.instance_id.strip() or str(uuid.uuid4())
     # PHASE-14A A1 (#694): configure structured logging once at the composition
     # root, before any route/middleware can emit a line. Never raises - a
     # logging setup failure degrades to stdlib defaults instead of blocking boot.
     configure_logging(resolved_settings, service=SERVICE_API)
+    logger.info(
+        "process_instance_id instance_id=%s environment=%s region=%s",
+        resolved_instance_id,
+        resolved_settings.app_environment,
+        resolved_settings.region,
+    )
     if not resolved_settings.circuit_breaker_enabled:
         logger.warning("circuit breakers disabled (CIRCUIT_BREAKER_ENABLED=false); failing open")
 
@@ -385,6 +396,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="CareSetu API", version=APP_VERSION, lifespan=lifespan)
     app.state.settings = resolved_settings
+    app.state.instance_id = resolved_instance_id
 
     # MOD-001 (PHASE-2 T3, #54): one resolved iam facade instance behind the
     # gateway stack. The engine is lazy - no connection is opened at boot. It

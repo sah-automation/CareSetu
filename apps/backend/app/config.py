@@ -337,6 +337,19 @@ DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED = False
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
 
+DEFAULT_UVICORN_WORKERS = 1
+# ARCH-P1 #824: process identity, worker count, and reserved scale settings.
+DEFAULT_DISPATCHER_MODE = "inprocess"
+DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS = 60.0
+DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS = 1.0
+DEFAULT_DISPATCHER_BATCH_SIZE = 100
+DEFAULT_SHARDING_ENABLED = False
+DEFAULT_SHARD_KEY = ""
+DEFAULT_SHARD_COUNT = 1
+DEFAULT_MULTI_REGION_ENABLED = False
+DEFAULT_REGION = ""
+DEFAULT_CROSS_REGION_REPLICATION = False
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -450,6 +463,23 @@ class Settings:
     # the Render web service's env vars (free compute covers web services
     # only - background workers require a paid instance).
     dispatcher_in_process_enabled: bool = False
+    # ARCH-P1 #824: process identity, worker count, and reserved scale. The
+    # dispatcher, sharding, and multi-region settings are present and validated
+    # here but stay inert in this phase (no behaviour change).
+    instance_id: str = ""
+    uvicorn_workers: int = DEFAULT_UVICORN_WORKERS
+    dispatcher_mode: str = DEFAULT_DISPATCHER_MODE
+    dispatcher_claim_timeout_seconds: float = DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS
+    dispatcher_poll_interval_seconds: float = DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS
+    dispatcher_batch_size: int = DEFAULT_DISPATCHER_BATCH_SIZE
+    # Reserved scale settings (inert, validated only): no routing/query-replica/
+    # region-selection behaviour in this phase.
+    sharding_enabled: bool = DEFAULT_SHARDING_ENABLED
+    shard_key: str = DEFAULT_SHARD_KEY
+    shard_count: int = DEFAULT_SHARD_COUNT
+    multi_region_enabled: bool = DEFAULT_MULTI_REGION_ENABLED
+    region: str = DEFAULT_REGION
+    cross_region_replication: bool = DEFAULT_CROSS_REGION_REPLICATION
     # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings read
     # caches resolved values in-process for this many seconds so a polling
     # operator surface does not re-query ``ops_settings`` on every call. Reflects
@@ -1100,6 +1130,35 @@ class Settings:
                 "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
                 "environment (fail-closed)."
             )
+        # ARCH-P1 #824: worker count and reserved scale settings.
+        if self.uvicorn_workers < 1:
+            raise ValueError("uvicorn_workers must be >= 1")
+        if self.dispatcher_in_process_enabled and self.uvicorn_workers > 1:
+            raise ValueError(
+                "dispatcher_in_process_enabled requires uvicorn_workers == 1 "
+                "(in-process dispatcher plus multiple workers would create more "
+                "than one poll loop)"
+            )
+        _dispatcher_mode = self.dispatcher_mode.strip().lower()
+        if _dispatcher_mode not in {"inprocess", "standalone", "coordinated"}:
+            raise ValueError(
+                f"unsupported dispatcher_mode {self.dispatcher_mode!r}; "
+                "expected 'inprocess', 'standalone', or 'coordinated'"
+            )
+        if self.dispatcher_claim_timeout_seconds <= 0:
+            raise ValueError("dispatcher_claim_timeout_seconds must be positive")
+        if self.dispatcher_poll_interval_seconds <= 0:
+            raise ValueError("dispatcher_poll_interval_seconds must be positive")
+        if self.dispatcher_batch_size < 1:
+            raise ValueError("dispatcher_batch_size must be >= 1")
+        if self.shard_count < 1:
+            raise ValueError("shard_count must be >= 1")
+        if self.sharding_enabled and not self.shard_key.strip():
+            raise ValueError("shard_key is required when sharding is enabled")
+        if (self.multi_region_enabled or self.cross_region_replication) and not self.region.strip():
+            raise ValueError(
+                "region is required when multi-region or cross-region replication is enabled"
+            )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -1343,6 +1402,24 @@ def get_settings() -> Settings:
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
         dispatcher_in_process_enabled=_env_bool("DISPATCHER_IN_PROCESS_ENABLED", False),
+        instance_id=os.environ.get("INSTANCE_ID", ""),
+        uvicorn_workers=_env_int("UVICORN_WORKERS", DEFAULT_UVICORN_WORKERS),
+        dispatcher_mode=os.environ.get("DISPATCHER_MODE", DEFAULT_DISPATCHER_MODE),
+        dispatcher_claim_timeout_seconds=_env_float(
+            "DISPATCHER_CLAIM_TIMEOUT_SECONDS", DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS
+        ),
+        dispatcher_poll_interval_seconds=_env_float(
+            "DISPATCHER_POLL_INTERVAL_SECONDS", DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS
+        ),
+        dispatcher_batch_size=_env_int("DISPATCHER_BATCH_SIZE", DEFAULT_DISPATCHER_BATCH_SIZE),
+        sharding_enabled=_env_bool("SHARDING_ENABLED", DEFAULT_SHARDING_ENABLED),
+        shard_key=os.environ.get("SHARD_KEY", DEFAULT_SHARD_KEY),
+        shard_count=_env_int("SHARD_COUNT", DEFAULT_SHARD_COUNT),
+        multi_region_enabled=_env_bool("MULTI_REGION_ENABLED", DEFAULT_MULTI_REGION_ENABLED),
+        region=os.environ.get("REGION", DEFAULT_REGION),
+        cross_region_replication=_env_bool(
+            "CROSS_REGION_REPLICATION", DEFAULT_CROSS_REGION_REPLICATION
+        ),
         settings_cache_ttl_seconds=_env_int("SETTINGS_CACHE_TTL_SECONDS", 30),
         partner_artifact_root=os.environ.get(
             "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
