@@ -170,7 +170,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         injected = self._rate_limit_backend_obj
         if injected is not None and hasattr(injected, "check"):
-            allowed, retry_after = await injected.check(key, max_requests, window_seconds)
+            try:
+                allowed, retry_after = await injected.check(key, max_requests, window_seconds)
+            except Exception as exc:
+                _LOG.warning(
+                    "rate limit backend unavailable (%s); falling back to local backend", exc
+                )
+                memory_backend = globals()["MemoryRateLimitBackend"](buckets=self._buckets)
+                allowed, retry_after = await memory_backend.check(key, max_requests, window_seconds)
             if not allowed:
                 return error_response(
                     status_code=429,
