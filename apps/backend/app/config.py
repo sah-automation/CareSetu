@@ -56,6 +56,15 @@ DEFAULT_REDIS_CONSENT_TTL_SECONDS = 300
 # Redis directory-search result cache (PHASE-6 T02b, #314): optional, same SQL
 # fallback + accelerator-only discipline (ADR-0011). p95 < 250 ms cached target.
 DEFAULT_REDIS_DIRECTORY_TTL_SECONDS = 300
+# Read-cache foundation TTLs (ARCH-P1 #816): per-cache default TTLs for the
+# shared read-cache helper. Positive seconds; validated in ``Settings.__post_init__``.
+DEFAULT_PROFILE_CACHE_TTL_SECONDS = 300
+DEFAULT_INTAKE_CACHE_TTL_SECONDS = 300
+DEFAULT_CARE_CASES_CACHE_TTL_SECONDS = 300
+DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS = 300
+# Degraded-mode cache cap (ARCH-P1 #816): when ``DEGRADED_MODE`` is on every
+# cache write is capped to this TTL and long-lived entries are not served.
+DEFAULT_DEGRADED_CACHE_TTL_SECONDS = 60
 # Redis connection pool settings (ARCH-P1 #812): shared by all cache callers.
 # Timeouts honour third-party-integration-standards §1 (outbound call ceilings).
 DEFAULT_REDIS_MAX_CONNECTIONS = 10
@@ -388,6 +397,15 @@ class Settings:
     redis_max_connections: int = DEFAULT_REDIS_MAX_CONNECTIONS
     redis_socket_connect_timeout_seconds: float = DEFAULT_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS
     redis_socket_timeout_seconds: float = DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS
+    # Read-cache foundation (ARCH-P1 #816): per-cache TTLs, PHI gate flag,
+    # and degraded-mode cap. Only profile and intake caches honour the PHI gate.
+    phi_cache_enabled: bool = False
+    profile_cache_ttl_seconds: int = DEFAULT_PROFILE_CACHE_TTL_SECONDS
+    intake_cache_ttl_seconds: int = DEFAULT_INTAKE_CACHE_TTL_SECONDS
+    care_cases_cache_ttl_seconds: int = DEFAULT_CARE_CASES_CACHE_TTL_SECONDS
+    provider_health_cache_ttl_seconds: int = DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS
+    degraded_mode: bool = False
+    degraded_cache_ttl_seconds: int = DEFAULT_DEGRADED_CACHE_TTL_SECONDS
     # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
     # distance ordering in ``search_directory`` (both the in-scope and fallback
     # paths), so a patient's list tops out at the meaningful nearest matches.
@@ -924,6 +942,19 @@ class Settings:
             raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.redis_directory_ttl_seconds <= 0:
             raise ValueError("redis_directory_ttl_seconds must be positive")
+        # Read-cache foundation (ARCH-P1 #816).
+        if self.profile_cache_ttl_seconds <= 0:
+            raise ValueError("profile_cache_ttl_seconds must be positive")
+        if self.intake_cache_ttl_seconds <= 0:
+            raise ValueError("intake_cache_ttl_seconds must be positive")
+        if self.care_cases_cache_ttl_seconds <= 0:
+            raise ValueError("care_cases_cache_ttl_seconds must be positive")
+        if self.provider_health_cache_ttl_seconds <= 0:
+            raise ValueError("provider_health_cache_ttl_seconds must be positive")
+        if self.degraded_cache_ttl_seconds <= 0:
+            raise ValueError("degraded_cache_ttl_seconds must be positive")
+        if self.phi_cache_enabled and not self.redis_url.strip():
+            raise ValueError("PHI_CACHE_ENABLED=True requires a Redis URL (non-empty REDIS_URL)")
         if self.directory_max_results <= 0:
             raise ValueError("directory_max_results must be positive")
         if self.audit_retention_days < 0:
@@ -1257,6 +1288,24 @@ def get_settings() -> Settings:
         ),
         redis_directory_ttl_seconds=_env_int(
             "REDIS_DIRECTORY_TTL_SECONDS", DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
+        ),
+        phi_cache_enabled=_env_bool("PHI_CACHE_ENABLED", False),
+        profile_cache_ttl_seconds=_env_int(
+            "PROFILE_CACHE_TTL_SECONDS", DEFAULT_PROFILE_CACHE_TTL_SECONDS
+        ),
+        intake_cache_ttl_seconds=_env_int(
+            "INTAKE_CACHE_TTL_SECONDS", DEFAULT_INTAKE_CACHE_TTL_SECONDS
+        ),
+        care_cases_cache_ttl_seconds=_env_int(
+            "CARE_CASES_CACHE_TTL_SECONDS", DEFAULT_CARE_CASES_CACHE_TTL_SECONDS
+        ),
+        provider_health_cache_ttl_seconds=_env_int(
+            "PROVIDER_HEALTH_CACHE_TTL_SECONDS",
+            DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS,
+        ),
+        degraded_mode=_env_bool("DEGRADED_MODE", False),
+        degraded_cache_ttl_seconds=_env_int(
+            "DEGRADED_CACHE_TTL_SECONDS", DEFAULT_DEGRADED_CACHE_TTL_SECONDS
         ),
         directory_max_results=_env_int("DIRECTORY_MAX_RESULTS", DEFAULT_DIRECTORY_MAX_RESULTS),
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
