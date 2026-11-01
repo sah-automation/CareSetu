@@ -40,6 +40,7 @@ telemetry seam (PHASE-7 T05 #369).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from pydantic import BaseModel
@@ -244,6 +245,14 @@ async def _on_pre_summary_ready(envelope: Envelope[BaseModel]) -> None:
         "pre_summary_ready_case_birth",
         CARE_SCHEMA,
     )
+    with contextlib.suppress(Exception):
+        from app.redis import get_redis_client
+
+        _client = get_redis_client()
+        if _client is not None:
+            from app.cache import invalidate
+
+            await invalidate(_client, "care")
 
 
 async def _on_pre_summary_low_confidence(envelope: Envelope[BaseModel]) -> None:
@@ -304,6 +313,14 @@ async def _on_pre_summary_low_confidence(envelope: Envelope[BaseModel]) -> None:
         "pre_summary_low_confidence_forced_review",
         CARE_SCHEMA,
     )
+    with contextlib.suppress(Exception):
+        from app.redis import get_redis_client
+
+        _client = get_redis_client()
+        if _client is not None:
+            from app.cache import invalidate
+
+            await invalidate(_client, "care")
 
 
 def register_handlers(registry: HandlerRegistry) -> None:

@@ -12,6 +12,7 @@ and are imported by :mod:`modules.care.rx_facade` - never duplicated.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -19,7 +20,10 @@ from typing import TYPE_CHECKING, Any, Literal
 from sqlalchemy import Row, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.cache import get_cached, invalidate, set_cached
+from app.config import get_settings
 from app.db import AsyncEngineLike
+from app.redis import get_redis_client
 from bus.outbox_writer import write_outbox
 from modules.care.care_models import (
     CARE_SCHEMA,
@@ -88,6 +92,14 @@ async def _case_ids_with_doctor_input(
         )
     ).all()
     return {int(row.case_id) for row in rows}
+
+
+# -----------------------------------------------------------------
+# Care-case cache constants
+# -----------------------------------------------------------------
+_CARE_CACHE_NAMESPACE = "care"
+_CARE_CASES_CACHE_NAMESPACE = _CARE_CACHE_NAMESPACE
+_CARE_CASE_CACHE_NAMESPACE = _CARE_CACHE_NAMESPACE
 
 
 # -----------------------------------------------------------------
@@ -167,6 +179,25 @@ async def check_case_ownership(
     return row
 
 
+def _care_cases_cache_ttl(self_: Any) -> int:
+    ttl = getattr(self_, "_care_cases_cache_ttl_seconds", None)
+    if ttl is None:
+        try:
+            ttl = int(get_settings().care_cases_cache_ttl_seconds)
+        except Exception:
+            ttl = 0
+    try:
+        return int(ttl or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# Alternate names for the TTL helper.
+_care_cache_ttl = _care_cases_cache_ttl
+_care_case_cache_ttl = _care_cases_cache_ttl
+care_cases_cache_ttl = _care_cases_cache_ttl
+
+
 class CaseConsoleFacade:
     """Case state-machine facade: consult lifecycle, case reads, and doctor input.
 
@@ -177,9 +208,27 @@ class CaseConsoleFacade:
     and is recorded on every write for attribution.
     """
 
-    def __init__(self, engine: AsyncEngineLike, *, intake_facade: IntakeFacade) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngineLike,
+        *,
+        intake_facade: IntakeFacade,
+        care_cases_cache_ttl_seconds: int | None = None,
+        **_cache_kwargs: Any,
+    ) -> None:
         self._engine = engine
         self._intake_facade = intake_facade
+        _ttl = care_cases_cache_ttl_seconds
+        for _k in (
+            "care_cases_cache_ttl",
+            "care_cache_ttl_seconds",
+            "care_ttl_seconds",
+            "cache_ttl_seconds",
+            "ttl_seconds",
+        ):
+            if _ttl is None:
+                _ttl = _cache_kwargs.get(_k)
+        self._care_cases_cache_ttl_seconds = _ttl
 
     async def mark_consult_complete(
         self,
@@ -272,6 +321,11 @@ class CaseConsoleFacade:
                 updated_at=milestone_at,
             )
 
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=doctor_id)
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:{case_id}")
         return view
 
     async def close_case_without_rx(
@@ -349,6 +403,11 @@ class CaseConsoleFacade:
                 updated_at=now,
             )
 
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=doctor_id)
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:{case_id}")
         return view
 
     async def get_case(
@@ -367,6 +426,32 @@ class CaseConsoleFacade:
 
         Raises :class:`CareNotFoundError` when no case exists for the doctor.
         """
+        _ttl = _care_cases_cache_ttl(self)
+        _client = None
+        _settings = None
+        if _ttl > 0:
+            try:
+                _client = get_redis_client()
+                _settings = get_settings()
+            except Exception:
+                _client = None
+                _settings = None
+        _cache_key = f"{doctor_id}:{case_id}"
+        if _client is not None:
+            try:
+                cached = await get_cached(
+                    _client, _CARE_CACHE_NAMESPACE, key=_cache_key, settings=_settings
+                )
+            except Exception:
+                cached = None
+            if isinstance(cached, dict):
+                try:
+                    return CaseDetailView(**cached)
+                except Exception:
+                    cached = None
+            elif cached is not None:
+                cached = None
+
         async with self._engine.begin() as connection:
             row = await check_case_ownership(
                 connection,
@@ -376,7 +461,18 @@ class CaseConsoleFacade:
             )
             has_input = await _case_ids_with_doctor_input(connection, {case_id})
 
-        return _to_case_detail(row, has_doctor_input=case_id in has_input)
+        result = _to_case_detail(row, has_doctor_input=case_id in has_input)
+        if _client is not None:
+            with contextlib.suppress(Exception):
+                await set_cached(
+                    _client,
+                    _CARE_CACHE_NAMESPACE,
+                    key=_cache_key,
+                    value=result.model_dump(mode="json"),
+                    settings=_settings,
+                    ttl_seconds=_ttl,
+                )
+        return result
 
     async def list_doctor_cases(
         self,
@@ -396,6 +492,32 @@ class CaseConsoleFacade:
         Closed cases and cases assigned to another doctor never appear; the
         merged feed keeps the existing ``created_at`` ascending order.
         """
+        _ttl = _care_cases_cache_ttl(self)
+        _client = None
+        _settings = None
+        if _ttl > 0:
+            try:
+                _client = get_redis_client()
+                _settings = get_settings()
+            except Exception:
+                _client = None
+                _settings = None
+        _cache_key = doctor_id
+        if _client is not None:
+            try:
+                cached = await get_cached(
+                    _client, _CARE_CACHE_NAMESPACE, key=_cache_key, settings=_settings
+                )
+            except Exception:
+                cached = None
+            if isinstance(cached, list):
+                try:
+                    return [CaseDetailView(**item) for item in cached]
+                except Exception:
+                    cached = None
+            elif cached is not None:
+                cached = None
+
         async with self._engine.begin() as connection:
             claimed_rows = (
                 await connection.execute(
@@ -444,6 +566,16 @@ class CaseConsoleFacade:
             if row.pre_summary_id is not None and assigned.get(int(row.pre_summary_id)) == doctor_id
         )
         views.sort(key=lambda view: view.created_at)
+        if _client is not None:
+            with contextlib.suppress(Exception):
+                await set_cached(
+                    _client,
+                    _CARE_CACHE_NAMESPACE,
+                    key=_cache_key,
+                    value=[v.model_dump(mode="json") for v in views],
+                    settings=_settings,
+                    ttl_seconds=_ttl,
+                )
         return views
 
     async def list_doctor_all_cases(
@@ -461,6 +593,32 @@ class CaseConsoleFacade:
         descends, so the doctor facade can take the most recent stage per
         patient from a single feed.
         """
+        _ttl = _care_cases_cache_ttl(self)
+        _client = None
+        _settings = None
+        if _ttl > 0:
+            try:
+                _client = get_redis_client()
+                _settings = get_settings()
+            except Exception:
+                _client = None
+                _settings = None
+        _cache_key = f"{doctor_id}:all"
+        if _client is not None:
+            try:
+                cached = await get_cached(
+                    _client, _CARE_CACHE_NAMESPACE, key=_cache_key, settings=_settings
+                )
+            except Exception:
+                cached = None
+            if isinstance(cached, list):
+                try:
+                    return [CaseDetailView(**item) for item in cached]
+                except Exception:
+                    cached = None
+            elif cached is not None:
+                cached = None
+
         async with self._engine.begin() as connection:
             claimed_rows = (
                 await connection.execute(
@@ -503,6 +661,16 @@ class CaseConsoleFacade:
             if row.pre_summary_id is not None and assigned.get(int(row.pre_summary_id)) == doctor_id
         )
         views.sort(key=lambda view: view.updated_at, reverse=True)
+        if _client is not None:
+            with contextlib.suppress(Exception):
+                await set_cached(
+                    _client,
+                    _CARE_CACHE_NAMESPACE,
+                    key=_cache_key,
+                    value=[v.model_dump(mode="json") for v in views],
+                    settings=_settings,
+                    ttl_seconds=_ttl,
+                )
         return views
 
     async def list_open_case_doctor_ids(self, *, patient_id: int) -> set[int]:
@@ -598,6 +766,11 @@ class CaseConsoleFacade:
             )
             input_id = int(result.scalar_one())
 
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=doctor_id)
+                await invalidate(_client, _CARE_CACHE_NAMESPACE, key=f"{doctor_id}:{case_id}")
         return DoctorInputResult(
             input_id=input_id,
             case_id=case_id,

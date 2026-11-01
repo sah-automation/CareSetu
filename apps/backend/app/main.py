@@ -505,6 +505,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.care_console_facade = CaseConsoleFacade(
         engine=engine,
         intake_facade=app.state.intake_facade,
+        care_cases_cache_ttl_seconds=resolved_settings.care_cases_cache_ttl_seconds,
     )
     # MOD-003 (PHASE-3 T2, #211): the record facade shares the one settled
     # engine - no connection opens at boot - and is stored like the iam
