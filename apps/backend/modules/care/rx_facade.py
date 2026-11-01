@@ -25,8 +25,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy import Row, delete, func, select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.care.care_models import (
     CARE_SCHEMA,
@@ -184,7 +185,7 @@ class PrescriptionFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         *,
         intake_facade: IntakeFacade,
         health_facade: HealthFacade | None = None,

@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.engine import RowMapping
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain import events, jwt, refresh
 from modules.iam.domain.exceptions import (
@@ -109,7 +110,7 @@ class SessionFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         clock: Callable[[], datetime] = _default_clock,
         *,
         access_token_signing_key: str = "",

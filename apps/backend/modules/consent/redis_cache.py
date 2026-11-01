@@ -10,7 +10,17 @@ from __future__ import annotations
 import contextlib
 import logging
 
-from app.redis import get_redis_client
+from app.redis import close_redis_client, get_redis_client, init_redis_client
+
+__all__ = [
+    "close_redis_client",
+    "get_cached_decision",
+    "get_redis_client",
+    "init_redis_client",
+    "invalidate_all_for_patient",
+    "invalidate_cached_decision",
+    "set_cached_decision",
+]
 from observability.otel import record_cache_hit, record_cache_miss
 
 _LOG = logging.getLogger(__name__)

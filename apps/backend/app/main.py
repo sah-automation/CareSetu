@@ -20,10 +20,9 @@ from fastapi import Depends, FastAPI, File, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
 from app.config import APP_VERSION, Settings, get_settings
+from app.db import create_engine, dispose_engine
 from app.gateway.errors import (
     CODE_INTERNAL_SERVER_ERROR,
     MESSAGE_INTERNAL_SERVER_ERROR,
@@ -372,6 +371,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # PHASE-14A B2 (#700): force-flush buffered Langfuse AI spans on
             # shutdown; no-op when Langfuse is unconfigured.
             flush_langfuse()
+            # ARCH-P1 #813: dispose the primary database engine on shutdown.
+            # Worker, script, and test entry points keep constructing raw engines
+            # and manage their own disposal.
+            primary_engine = getattr(app.state, "primary_engine", None)
+            if primary_engine is not None:
+                await dispose_engine(primary_engine)
 
     app = FastAPI(title="CareSetu API", version=APP_VERSION, lifespan=lifespan)
     app.state.settings = resolved_settings
@@ -384,7 +389,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # OTP read-back route (the E2E suite and the deployed demo) - the real
     # provider is gated out of dev/test by Settings, so the adapter is a
     # MockSmsAdapter whenever it is stored.
-    engine = create_async_engine(resolved_settings.database_url, poolclass=NullPool)
+    engine = create_engine(resolved_settings)
+    app.state.primary_engine = engine
     sms_adapter = build_sms_adapter(resolved_settings)
     # Profile photos (#529, ADR-0020, #532): the private ``profile-media``
     # object-storage surface holds patient/doctor profile photos, encrypted at
@@ -1057,7 +1063,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         )
 
-        engine = create_async_engine(settings.database_url, poolclass=NullPool)
+        engine = create_engine(settings)
         try:
             async with engine.begin() as connection:
                 await write_outbox(connection, "health", HEALTH_OUTBOX_TABLE, report_envelope)

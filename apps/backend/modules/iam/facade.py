@@ -16,8 +16,9 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import (
     SmsAdapter,
@@ -132,7 +133,7 @@ class IamFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         sms_adapter: SmsAdapter,
         clock: Callable[[], datetime] = _default_clock,
         *,

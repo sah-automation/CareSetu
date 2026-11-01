@@ -127,6 +127,7 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.config import Settings
+from app.db import AsyncEngineLike
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
@@ -6239,7 +6240,7 @@ class ObservabilityFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         settings: Settings | None = None,
         ops_facade: OpsFacade | None = None,
     ) -> None:

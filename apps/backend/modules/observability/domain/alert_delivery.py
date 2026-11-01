@@ -20,8 +20,9 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from sqlalchemy import insert, select, update
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from modules.observability.schema.models import (
     observability_alert_delivery,
     observability_alert_events,
@@ -332,7 +333,7 @@ async def get_console_url(alert: AlertRow, config: AlertDeliveryConfig) -> str:
 
 
 async def route_new_alerts(
-    engine: AsyncEngine,
+    engine: AsyncEngineLike,
     ops_facade: OpsFacade,
     batch_size: int = 100,
 ) -> int:
@@ -515,7 +516,7 @@ async def _raise_delivery_failure_alert(
 
 
 async def drain_deliveries(
-    engine: AsyncEngine,
+    engine: AsyncEngineLike,
     ops_facade: OpsFacade,
     adapters: dict[str, ChannelAdapter],
     batch_size: int = 50,
@@ -563,7 +564,7 @@ async def drain_deliveries(
 
 
 async def redeliver_alert(
-    engine: AsyncEngine,
+    engine: AsyncEngineLike,
     delivery_id: int,
 ) -> bool:
     """Admin redelivery: reset a dead_letter or failed delivery to pending."""
@@ -595,7 +596,7 @@ async def redeliver_alert(
 
 
 async def test_delivery(
-    engine: AsyncEngine,
+    engine: AsyncEngineLike,
     channel: str,
     adapters: dict[str, ChannelAdapter],
     test_alert: AlertRow | None = None,
@@ -627,7 +628,7 @@ async def test_delivery(
 
 
 async def run_alert_router_job(
-    engine: AsyncEngine,
+    engine: AsyncEngineLike,
     ops_facade: OpsFacade,
 ) -> None:
     """Router job entry point - scheduled periodically."""
@@ -638,7 +639,7 @@ async def run_alert_router_job(
 
 
 async def run_alert_drainer_job(
-    engine: AsyncEngine,
+    engine: AsyncEngineLike,
     ops_facade: OpsFacade,
     adapters: dict[str, ChannelAdapter],
     config: AlertDeliveryConfig | None = None,

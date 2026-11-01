@@ -29,9 +29,9 @@ from typing import TYPE_CHECKING, Literal
 from cryptography.exceptions import InvalidTag
 from pydantic import ValidationError
 from sqlalchemy import case, func, select
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import get_settings
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.intake.adapters import build_ai_gateway
 from modules.intake.adapters.ai_gateway import (
@@ -202,7 +202,7 @@ class IntakeFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         *,
         media_store: IntakeMediaStore | None = None,
         ai_gateway: AiGateway | None = None,

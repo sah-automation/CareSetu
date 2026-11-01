@@ -38,9 +38,10 @@ from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Row
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import Settings
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.consent.domain.events import (
     ConsentAuditAction,
@@ -493,7 +494,7 @@ class ConsentFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         *,
         counterparty_display_name_resolver: CounterpartyDisplayNameResolver | None = None,
     ) -> None:

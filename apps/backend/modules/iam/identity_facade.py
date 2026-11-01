@@ -19,9 +19,10 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain import events
@@ -257,7 +258,7 @@ class IdentityFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         otp_sender: OtpSender,
         clock: Callable[[], datetime] = _default_clock,
         *,

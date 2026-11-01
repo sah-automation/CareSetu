@@ -101,8 +101,9 @@ from uuid import UUID
 from cryptography.exceptions import InvalidTag
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from modules.audit.facade import AuditFacade
 from modules.iam.facade import IamFacade, PhotoContent
 from modules.partner import credential_validity as credential_validity_module
@@ -593,7 +594,7 @@ class PartnerFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         iam_facade: IamFacade | None = None,
         artifact_store: CredentialArtifactStore | None = None,
         audit_facade: AuditFacade | None = None,

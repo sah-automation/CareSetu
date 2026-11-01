@@ -17,8 +17,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy import Row, select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.care.care_models import (
     CARE_SCHEMA,
@@ -176,7 +177,7 @@ class CaseConsoleFacade:
     and is recorded on every write for attribution.
     """
 
-    def __init__(self, engine: AsyncEngine, *, intake_facade: IntakeFacade) -> None:
+    def __init__(self, engine: AsyncEngineLike, *, intake_facade: IntakeFacade) -> None:
         self._engine = engine
         self._intake_facade = intake_facade
 

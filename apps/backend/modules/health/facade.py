@@ -33,9 +33,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, func, not_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Row
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import Settings
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.health.domain.events import record_accessed_envelope, record_denied_envelope
 from modules.health.domain.exceptions import (
@@ -559,7 +560,7 @@ class HealthFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         consent_facade: ConsentFacade | None = None,
         care_facade: CaseConsoleFacade | None = None,
         counterparty_display_name_resolver: CounterpartyDisplayNameResolver | None = None,

@@ -20,9 +20,9 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
+from app.db import AsyncEngineLike
 from modules.observability.domain.evaluation import (
     DATA_TYPE_NUMERIC,
     OBSERVATION_KIND_GOLDEN,
@@ -409,7 +409,7 @@ async def _record_judge_scores(
 
 
 async def run_judge_job(
-    engine: AsyncEngine,
+    engine: AsyncEngineLike,
     settings: Settings,
     *,
     ai_gateway: Any | None = None,

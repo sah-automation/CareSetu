@@ -16,6 +16,17 @@ from modules.iam.domain.mfa_lockout import (
 )
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
+# Database connection pool settings (ARCH-P1 #813): the web app builds its primary
+# engine through the factory and disposes it on shutdown. Worker, script, and
+# test entry points keep constructing raw engines. Default path stays
+# poolclass=NullPool so local development and the free-tier deployment do not
+# change. Pooled path uses the four pool settings, pre-ping, and the configured
+# recycle time. Validation: size >= 1, overflow/recycle >= 0, timeout > 0.
+DEFAULT_DB_POOL_ENABLED = False
+DEFAULT_DB_POOL_SIZE = 10
+DEFAULT_DB_MAX_OVERFLOW = 20
+DEFAULT_DB_POOL_TIMEOUT = 30.0
+DEFAULT_DB_POOL_RECYCLE = 1800
 DEFAULT_APP_ENVIRONMENT = "production"
 # The app's human-maintained version (PHASE-14A A4, #696): the default Sentry
 # ``release`` when ``OTEL_SERVICE_VERSION`` is unset, also handed to FastAPI.
@@ -308,6 +319,13 @@ class Settings:
     """Runtime settings resolved from the environment at load time."""
 
     database_url: str = DEFAULT_DATABASE_URL
+    # Database connection pool settings (ARCH-P1 #813): see DEFAULT_DB_POOL_*
+    # constants for defaults and validation rules.
+    db_pool_enabled: bool = DEFAULT_DB_POOL_ENABLED
+    db_pool_size: int = DEFAULT_DB_POOL_SIZE
+    db_max_overflow: int = DEFAULT_DB_MAX_OVERFLOW
+    db_pool_timeout: float = DEFAULT_DB_POOL_TIMEOUT
+    db_pool_recycle: int = DEFAULT_DB_POOL_RECYCLE
     app_environment: str = DEFAULT_APP_ENVIRONMENT
     gateway_jwt_verify_enabled: bool = False
     gateway_rate_limit_enabled: bool = False
@@ -649,6 +667,16 @@ class Settings:
     llm_judge_prompt_version: str = DEFAULT_LLM_JUDGE_PROMPT_VERSION
 
     def __post_init__(self) -> None:
+        # Database connection pool validation (ARCH-P1 #813)
+        if self.db_pool_size < 1:
+            raise ValueError("db_pool_size must be >= 1")
+        if self.db_max_overflow < 0:
+            raise ValueError("db_max_overflow must be >= 0")
+        if self.db_pool_timeout <= 0:
+            raise ValueError("db_pool_timeout must be > 0")
+        if self.db_pool_recycle < 0:
+            raise ValueError("db_pool_recycle must be >= 0")
+
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
             raise ValueError(
                 "gateway_jwt_verify_enabled=True requires GATEWAY_JWT_SIGNING_KEY; "
@@ -1090,6 +1118,11 @@ def get_settings() -> Settings:
     """
     return Settings(
         database_url=os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL),
+        db_pool_enabled=_env_bool("DB_POOL_ENABLED", DEFAULT_DB_POOL_ENABLED),
+        db_pool_size=_env_int("DB_POOL_SIZE", DEFAULT_DB_POOL_SIZE),
+        db_max_overflow=_env_int("DB_MAX_OVERFLOW", DEFAULT_DB_MAX_OVERFLOW),
+        db_pool_timeout=_env_float("DB_POOL_TIMEOUT", DEFAULT_DB_POOL_TIMEOUT),
+        db_pool_recycle=_env_int("DB_POOL_RECYCLE", DEFAULT_DB_POOL_RECYCLE),
         app_environment=os.environ.get("APP_ENVIRONMENT", DEFAULT_APP_ENVIRONMENT),
         gateway_jwt_verify_enabled=_env_bool("GATEWAY_JWT_VERIFY_ENABLED", False),
         gateway_rate_limit_enabled=_env_bool("GATEWAY_RATE_LIMIT_ENABLED", False),

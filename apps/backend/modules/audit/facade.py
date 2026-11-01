@@ -14,9 +14,10 @@ from uuid import UUID
 
 from pydantic import BaseModel
 from sqlalchemy import func, insert, select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.orm import aliased
 
+from app.db import AsyncEngineLike
 from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
 from modules.audit.domain.consumer import (
     AuditEventPayload,
@@ -386,7 +387,7 @@ class AuditFacade:
     and the DB read stays inside the module.
     """
 
-    def __init__(self, engine: AsyncEngine, health_facade: HealthFacade | None = None) -> None:
+    def __init__(self, engine: AsyncEngineLike, health_facade: HealthFacade | None = None) -> None:
         self._engine = engine
         self._health_facade = health_facade
 
