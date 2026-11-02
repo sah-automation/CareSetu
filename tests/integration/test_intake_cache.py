@@ -18,7 +18,9 @@ unreachable.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 import pytest
@@ -34,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from modules.intake.facade import IntakeFacade
-from modules.intake.intake_models import MediaUploadRef, PreSummaryView
+from modules.intake.intake_models import IntakeDetailView, MediaUploadRef, PreSummaryView
 from modules.intake.schema.models import intake_intakes, intake_pre_summaries
 
 _PATIENT_ID = 990_001
@@ -194,6 +196,62 @@ async def _assert_pre_summary_sql_read(
 
 
 @pytest.mark.asyncio
+async def test_submit_intake_invalidates_a_stale_cached_detail_key(
+    database_url: str, phi_enabled: None, fake_redis: FakeRedis
+) -> None:
+    engine, facade = _build_intake(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("TRUNCATE TABLE " + ", ".join(_INTAKE_TABLES) + " RESTART IDENTITY CASCADE")
+            )
+
+        # Stale, mutated entry left in the cache for the id about to be assigned:
+        # a detail row claiming "voice" mode. submit_intake must evict it so the
+        # post-submit read resolves from SQL instead of serving the stale row.
+        stale = IntakeDetailView(
+            intake_id=1,
+            patient_id=_PATIENT_ID,
+            mode="voice",
+            language="hi",
+            status="captured",
+            record_attempts=1,
+            text=None,
+            transcript=None,
+            transcript_usability=None,
+            forced_text=False,
+            media_refs=[],
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        ).model_dump(mode="json")
+        fake_redis.store[_detail_key(_PATIENT_ID, 1)] = json.dumps(stale)
+
+        submitted = await facade.submit_intake(
+            patient_id=_PATIENT_ID,
+            mode="text",
+            language="hi",
+            text="sir dard hai aur bukhar bhi",
+        )
+        assert submitted.intake_id == 1
+
+        # The invalidated cache falls back to SQL on the very first post-submit
+        # read, and the row served is the freshly submitted one (text mode).
+        result, selects = await _count_selects(engine, _read_detail(facade, submitted.intake_id))
+        assert selects >= 1
+        assert result.mode == "text"
+        assert result.text == "sir dard hai aur bukhar bhi"
+
+        # Having re-populated the cache, a fresh second read is a hit again.
+        second, second_selects = await _count_selects(
+            engine, _read_detail(facade, submitted.intake_id)
+        )
+        assert second.mode == "text"
+        assert second_selects == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_detail_first_read_executes_sql_and_fresh_second_read_hits(
     database_url: str, phi_enabled: None
 ) -> None:
@@ -251,6 +309,13 @@ async def test_re_record_invalidates_the_detail_key(database_url: str, phi_enabl
         _, warm_selects = await _count_selects(engine, _read_detail(facade, intake_id))
         assert warm_selects == 0
 
+        # Warm the pre-summary key as well so its survival of the detail
+        # invalidation is observable alongside the detail (affected-key-only).
+        await _seed_pre_summary(engine, intake_id)
+        await _assert_pre_summary_sql_read(facade, engine, intake_id)
+        _, pre_summary_warm = await _count_selects(engine, _read_pre_summary(facade, intake_id))
+        assert pre_summary_warm == 0
+
         # Put the intake into the re-record state out of band: the cached detail
         # still says "captured", so a served hit would be stale.
         await _set_status(engine, intake_id, "re_record")
@@ -273,6 +338,10 @@ async def test_re_record_invalidates_the_detail_key(database_url: str, phi_enabl
         assert selects >= 1
         assert result.status == "structuring"
         assert result.record_attempts == 2
+
+        # The pre-summary key was not affected by the detail invalidation.
+        _, pre_summary_selects = await _count_selects(engine, _read_pre_summary(facade, intake_id))
+        assert pre_summary_selects == 0
     finally:
         await engine.dispose()
 
