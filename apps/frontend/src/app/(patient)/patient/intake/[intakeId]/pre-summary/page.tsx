@@ -25,7 +25,14 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -33,6 +40,9 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { useAuth } from "@/lib/auth/AuthContext";
+import { QueryClientContext } from "@tanstack/react-query";
+import { makeQueryClient } from "@/lib/queryClient";
 import {
   fetchIntake,
   fetchPreSummary,
@@ -79,6 +89,11 @@ export default function PreSummaryReviewPage() {
   const params = useParams<{ intakeId: string }>();
   const intakeId = Number(params.intakeId);
   const { lang } = useLang();
+  const { user } = useAuth();
+  const identityId = user?.id;
+  const queryClientContext = useContext(QueryClientContext);
+  const [fallbackQueryClient] = useState(() => makeQueryClient());
+  const queryClient = queryClientContext ?? fallbackQueryClient;
   const dict = STRINGS[lang].intake;
   const t = dict.preSummary;
   const nav = STRINGS[lang].nav;
@@ -349,6 +364,12 @@ export default function PreSummaryReviewPage() {
       );
       setCorrections(result.patient_edits ?? {});
       setEditing(false);
+      void queryClient.invalidateQueries({
+        queryKey: ["intake", identityId, intakeId, "pre-summary"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["intake", identityId, intakeId],
+      });
     } catch (error) {
       setSaveError({
         title: t.saveFailedTitle,
@@ -358,7 +379,16 @@ export default function PreSummaryReviewPage() {
     } finally {
       setSaveStage("idle");
     }
-  }, [summary, fieldKeys, drafts, displayValueFor, intakeId, t]);
+  }, [
+    summary,
+    fieldKeys,
+    drafts,
+    displayValueFor,
+    intakeId,
+    t,
+    identityId,
+    queryClient,
+  ]);
 
   const handleConfirm = useCallback(() => {
     setConfirmed(true);
