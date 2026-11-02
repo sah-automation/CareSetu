@@ -13,7 +13,7 @@
 // state per §9.1 (never a full-page spinner), then advances to the pre-summary
 // review link once the intake reaches ready_for_review.
 
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Mic, Pause, Play, RotateCcw, Square } from "lucide-react";
 
@@ -24,8 +24,11 @@ import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useAuth } from "@/lib/auth/AuthContext";
-import { QueryClientContext } from "@tanstack/react-query";
-import { makeQueryClient } from "@/lib/queryClient";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  intakePreSummaryQueryKey,
+  intakeStatusQueryKey,
+} from "@/app/(patient)/patient/intake/[intakeId]/status/page";
 import {
   fetchIntake,
   reRecordIntake,
@@ -58,9 +61,22 @@ export default function VoiceIntakePage() {
   const { lang } = useLang();
   const { user } = useAuth();
   const identityId = user?.id;
-  const queryClientContext = useContext(QueryClientContext);
-  const [fallbackQueryClient] = useState(() => makeQueryClient());
-  const queryClient = queryClientContext ?? fallbackQueryClient;
+  const queryClient = useQueryClient();
+  const invalidateIntake = useCallback(
+    (targetIntakeId: number) => {
+      if (identityId !== undefined) {
+        void queryClient.invalidateQueries({
+          queryKey: intakeStatusQueryKey(identityId, targetIntakeId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: intakePreSummaryQueryKey(identityId, targetIntakeId),
+        });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["intake"] });
+      }
+    },
+    [identityId, queryClient],
+  );
   const dict = STRINGS[lang].intake;
   const nav = STRINGS[lang].nav;
   const t = dict.voice;
@@ -285,21 +301,11 @@ export default function VoiceIntakePage() {
         submittedIntakeId = submitted.intake_id;
         setIntakeId(submitted.intake_id);
         setAttemptsUsed(1);
-        void queryClient.invalidateQueries({
-          queryKey: ["intake", identityId, submitted.intake_id],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["intake", identityId, submitted.intake_id, "pre-summary"],
-        });
+        invalidateIntake(submitted.intake_id);
       } else {
         const rerecorded = await reRecordIntake(intakeId, mediaRef);
         setAttemptsUsed(rerecorded.record_attempts);
-        void queryClient.invalidateQueries({
-          queryKey: ["intake", identityId, intakeId],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["intake", identityId, intakeId, "pre-summary"],
-        });
+        invalidateIntake(rerecorded.intake_id);
         if (rerecorded.forced_text) {
           // The server capped voice attempts and routed the intake to text.
           setStage("poor");
@@ -318,7 +324,7 @@ export default function VoiceIntakePage() {
         error instanceof ApiError ? error.traceId : undefined,
       );
     }
-  }, [intakeId, lang, failWith, revokeAudioUrl, identityId, queryClient]);
+  }, [intakeId, lang, failWith, revokeAudioUrl, invalidateIntake]);
 
   // Poll the server detail while Structuring (in-button pending, §9.1):
   // ready_for_review -> done (pre-summary link), re_record / unusable ->

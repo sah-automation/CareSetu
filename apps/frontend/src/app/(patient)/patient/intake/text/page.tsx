@@ -13,7 +13,7 @@
 // Structuring pending state per §9.1 (never a page spinner), then advances to
 // the pre-summary review link once the intake reaches ready_for_review.
 
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Mic, Square, X } from "lucide-react";
 
@@ -24,8 +24,11 @@ import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useAuth } from "@/lib/auth/AuthContext";
-import { QueryClientContext } from "@tanstack/react-query";
-import { makeQueryClient } from "@/lib/queryClient";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  intakePreSummaryQueryKey,
+  intakeStatusQueryKey,
+} from "@/app/(patient)/patient/intake/[intakeId]/status/page";
 import {
   fetchIntake,
   recordComposerOpened,
@@ -55,9 +58,22 @@ export default function TextIntakePage() {
   const { lang } = useLang();
   const { user } = useAuth();
   const identityId = user?.id;
-  const queryClientContext = useContext(QueryClientContext);
-  const [fallbackQueryClient] = useState(() => makeQueryClient());
-  const queryClient = queryClientContext ?? fallbackQueryClient;
+  const queryClient = useQueryClient();
+  const invalidateIntake = useCallback(
+    (targetIntakeId: number) => {
+      if (identityId !== undefined) {
+        void queryClient.invalidateQueries({
+          queryKey: intakeStatusQueryKey(identityId, targetIntakeId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: intakePreSummaryQueryKey(identityId, targetIntakeId),
+        });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["intake"] });
+      }
+    },
+    [identityId, queryClient],
+  );
   const dict = STRINGS[lang].intake;
   const nav = STRINGS[lang].nav;
   const t = dict.text;
@@ -208,12 +224,7 @@ export default function TextIntakePage() {
       });
       setIntakeId(submitted.intake_id);
       setStructuringId(submitted.intake_id);
-      void queryClient.invalidateQueries({
-        queryKey: ["intake", identityId, submitted.intake_id],
-      });
-      void queryClient.invalidateQueries({
-        queryKey: ["intake", identityId, submitted.intake_id, "pre-summary"],
-      });
+      invalidateIntake(submitted.intake_id);
     } catch (error) {
       // Upload or submit failed after the retry ladder: the text and any
       // recorded note stay in memory and the page returns to the form - the
@@ -225,7 +236,7 @@ export default function TextIntakePage() {
         error instanceof ApiError ? error.traceId : undefined,
       );
     }
-  }, [text, lang, t, failWith, identityId, queryClient]);
+  }, [text, lang, t, failWith, invalidateIntake]);
 
   // Poll the server detail while Structuring (in-button pending, §9.1):
   // ready_for_review -> done (pre-summary link), failed -> error with the

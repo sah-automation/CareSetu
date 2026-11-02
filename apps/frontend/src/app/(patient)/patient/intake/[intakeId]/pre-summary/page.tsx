@@ -25,14 +25,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import {
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -41,8 +34,11 @@ import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useAuth } from "@/lib/auth/AuthContext";
-import { QueryClientContext } from "@tanstack/react-query";
-import { makeQueryClient } from "@/lib/queryClient";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  intakePreSummaryQueryKey,
+  intakeStatusQueryKey,
+} from "@/app/(patient)/patient/intake/[intakeId]/status/page";
 import {
   fetchIntake,
   fetchPreSummary,
@@ -91,9 +87,22 @@ export default function PreSummaryReviewPage() {
   const { lang } = useLang();
   const { user } = useAuth();
   const identityId = user?.id;
-  const queryClientContext = useContext(QueryClientContext);
-  const [fallbackQueryClient] = useState(() => makeQueryClient());
-  const queryClient = queryClientContext ?? fallbackQueryClient;
+  const queryClient = useQueryClient();
+  const invalidateIntake = useCallback(
+    (targetIntakeId: number) => {
+      if (identityId !== undefined) {
+        void queryClient.invalidateQueries({
+          queryKey: intakePreSummaryQueryKey(identityId, targetIntakeId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: intakeStatusQueryKey(identityId, targetIntakeId),
+        });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["intake"] });
+      }
+    },
+    [identityId, queryClient],
+  );
   const dict = STRINGS[lang].intake;
   const t = dict.preSummary;
   const nav = STRINGS[lang].nav;
@@ -364,12 +373,7 @@ export default function PreSummaryReviewPage() {
       );
       setCorrections(result.patient_edits ?? {});
       setEditing(false);
-      void queryClient.invalidateQueries({
-        queryKey: ["intake", identityId, intakeId, "pre-summary"],
-      });
-      void queryClient.invalidateQueries({
-        queryKey: ["intake", identityId, intakeId],
-      });
+      invalidateIntake(intakeId);
     } catch (error) {
       setSaveError({
         title: t.saveFailedTitle,
@@ -386,8 +390,7 @@ export default function PreSummaryReviewPage() {
     displayValueFor,
     intakeId,
     t,
-    identityId,
-    queryClient,
+    invalidateIntake,
   ]);
 
   const handleConfirm = useCallback(() => {
