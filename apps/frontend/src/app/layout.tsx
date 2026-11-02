@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Mukta } from "next/font/google";
 import { AuthProvider } from "@/lib/auth/AuthContext";
 import { LangProvider } from "@/lib/i18n/LangContext";
+import { QueryProvider } from "@/lib/QueryProvider";
 import "./globals.css";
 
 // Single webfont, Latin + Devanagari (blueprint §1.3); self-hosted by
@@ -36,9 +37,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={mukta.variable}>
       <body>
-        <LangProvider>
-          <AuthProvider>{children}</AuthProvider>
-        </LangProvider>
+        <QueryProvider>
+          <LangProvider>
+            <AuthProvider>{children}</AuthProvider>
+          </LangProvider>
+        </QueryProvider>
       </body>
     </html>
   );
