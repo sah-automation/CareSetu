@@ -20,8 +20,9 @@
 // type-filter chip row is suppressed (the route *is* the type filter), and
 // commits stay on the variant route instead of /directory.
 
-import { useEffect, useState, type FormEvent } from "react";
+import { type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 
 import { EmptyState } from "@/components/layout/EmptyState";
 import { Button } from "@/components/ui/button";
@@ -110,37 +111,42 @@ export function DirectoryBrowser({
   const committedSpecialty = parseSpecialty(searchParams.get("specialty"));
   const committedQuery = searchParams.get("q") ?? "";
 
-  const [status, setStatus] = useState<LoadState>("loading");
-  const [view, setView] = useState<DirectorySearchView | null>(null);
-  const [retryNonce, setRetryNonce] = useState(0);
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: [
+      "directory",
+      "search",
+      {
+        q: committedQuery,
+        partnerType: committedType,
+        specialty: committedSpecialty,
+      },
+    ],
+    queryFn: async () => {
+      try {
+        return await searchDirectory({
+          q: committedQuery,
+          partnerType: committedType,
+          specialty: committedSpecialty,
+        });
+      } catch (err: unknown) {
+        // Operational failure (error-handling-observability §2: `error` for
+        // failures, `warn` reserved for degradations) - logged and surfaced
+        // as the retryable error state.
+        console.error("[directory] search failed:", err);
+        throw err;
+      }
+    },
+    staleTime: 60_000,
+    retry: false,
+  });
 
-  useEffect(() => {
-    let active = true;
-    searchDirectory({
-      q: committedQuery,
-      partnerType: committedType,
-      specialty: committedSpecialty,
-    })
-      .then((result) => {
-        if (active) {
-          setView(result);
-          setStatus("loaded");
-        }
-      })
-      .catch((err: unknown) => {
-        if (active) {
-          // Operational failure (error-handling-observability §2: `error` for
-          // failures, `warn` reserved for degradations) - logged and surfaced
-          // as the retryable error state.
-          console.error("[directory] search failed:", err);
-          setView(null);
-          setStatus("error");
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [committedQuery, committedType, committedSpecialty, retryNonce]);
+  const view: DirectorySearchView | null = data ?? null;
+  const status: LoadState =
+    isError && view === null
+      ? "error"
+      : isLoading && view === null
+        ? "loading"
+        : "loaded";
 
   /** Replace the committed filter params on the URL (history replace - chip
    * toggling must not spam the history stack). On a type-preset variant the
@@ -195,8 +201,7 @@ export function DirectoryBrowser({
   }
 
   function retry() {
-    setStatus("loading");
-    setRetryNonce((n) => n + 1);
+    void refetch();
   }
 
   function clearSearch() {

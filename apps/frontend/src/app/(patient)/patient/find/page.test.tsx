@@ -10,10 +10,12 @@ import {
   act,
   cleanup,
   fireEvent,
-  render,
+  render as rtlRender,
   screen,
   waitFor,
 } from "@testing-library/react";
+import { makeQueryClient } from "@/lib/queryClient";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import FindPage from "./page";
@@ -69,6 +71,17 @@ const t = STRINGS.en.findCare;
 const search = vi.mocked(state.searchDirectory);
 const replace = vi.mocked(state.mockReplace);
 
+const testQueryClientRef = { current: makeQueryClient() };
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={testQueryClientRef.current}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+const render: typeof rtlRender = (ui, options) =>
+  rtlRender(ui, { wrapper: QueryWrapper, ...options });
+
 function doctor(
   id: number,
   name: string,
@@ -98,6 +111,7 @@ async function renderPage() {
 
 beforeEach(() => {
   __resetLangForTests();
+  testQueryClientRef.current = makeQueryClient();
   state.params = new URLSearchParams();
   state.profileArea = null;
   state.searchDirectory.mockReset();
