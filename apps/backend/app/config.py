@@ -59,12 +59,12 @@ DEFAULT_REDIS_DIRECTORY_TTL_SECONDS = 300
 # Read-cache foundation TTLs (ARCH-P1 #816): per-cache default TTLs for the
 # shared read-cache helper. Positive seconds; validated in ``Settings.__post_init__``.
 DEFAULT_PROFILE_CACHE_TTL_SECONDS = 300
-DEFAULT_INTAKE_CACHE_TTL_SECONDS = 300
-DEFAULT_CARE_CASES_CACHE_TTL_SECONDS = 300
-DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS = 300
+DEFAULT_INTAKE_CACHE_TTL_SECONDS = 120
+DEFAULT_CARE_CASES_CACHE_TTL_SECONDS = 60
+DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS = 30
 # Degraded-mode cache cap (ARCH-P1 #816): when ``DEGRADED_MODE`` is on every
 # cache write is capped to this TTL and long-lived entries are not served.
-DEFAULT_DEGRADED_CACHE_TTL_SECONDS = 60
+DEFAULT_DEGRADED_CACHE_TTL_SECONDS = 30
 # Redis connection pool settings (ARCH-P1 #812): shared by all cache callers.
 # Timeouts honour third-party-integration-standards §1 (outbound call ceilings).
 DEFAULT_REDIS_MAX_CONNECTIONS = 10
@@ -774,6 +774,13 @@ class Settings:
             raise ValueError("read_replica_lag_tolerance_ms must be >= 0")
         if self.read_replica_retry_cooldown_seconds < 0:
             raise ValueError("read_replica_retry_cooldown_seconds must be >= 0")
+        if self.read_replica_enabled and not tuple(self.database_read_urls):
+            raise ValueError(
+                "READ_REPLICA_ENABLED=True requires at least one URL in DATABASE_READ_URLS"
+            )
+        for url in self.database_read_urls:
+            if "+asyncpg" not in str(url):
+                raise ValueError(f"DATABASE_READ_URLS entry must use the asyncpg driver: {url!r}")
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
             raise ValueError(
                 "gateway_jwt_verify_enabled=True requires GATEWAY_JWT_SIGNING_KEY; "
@@ -1281,14 +1288,22 @@ def parse_rate_limit_tiers(raw: str) -> dict[str, Any]:
         raise ValueError(f"RATE_LIMIT_TIERS must be valid JSON; got {raw!r}") from exc
     if not isinstance(data, dict) or not data:
         raise ValueError("RATE_LIMIT_TIERS must be a non-empty JSON object")
+    _KNOWN_TIERS = {"default", "premium"}
     parsed: dict[str, Any] = {}
     for tier, limits in data.items():
         if not isinstance(tier, str) or not tier.strip():
             raise ValueError("RATE_LIMIT_TIERS tier names must be non-empty strings")
+        if tier not in _KNOWN_TIERS:
+            raise ValueError(f"unknown RATE_LIMIT_TIERS tier name {tier!r}")
         if not isinstance(limits, dict) or not limits:
             raise ValueError(f"RATE_LIMIT_TIERS tier {tier!r} must be a non-empty object")
         normalised: dict[str, int] = {}
+        for name in ("auth", "intake"):
+            if name not in limits:
+                raise ValueError(f"RATE_LIMIT_TIERS tier {tier!r} missing required '{name}' entry")
         for name, value in limits.items():
+            if name not in {"auth", "intake"}:
+                raise ValueError(f"unknown RATE_LIMIT_TIERS limit name {name!r}")
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(
                     f"RATE_LIMIT_TIERS tier {tier!r} limit {name!r} must be a positive integer"

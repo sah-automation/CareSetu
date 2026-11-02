@@ -493,14 +493,15 @@ async def get_cached(*args: Any, **kwargs: Any) -> Any:
     if degraded:
         cap = _degraded_cap(rest, settings)
         if cap is not None:
+            rem: int | None = None
             remaining = await _client_ttl(client, full_key)
             if remaining is not None:
                 try:
                     rem = int(remaining)
                 except (TypeError, ValueError):
                     rem = None
-            if rem is not None and (rem == -1 or rem > int(cap)):
-                # -1 = no expiry -> outlives cap -> miss
+            if rem is None or rem == -1 or (rem is not None and rem > int(cap)):
+                # -1 / unknown = no usable expiry -> outlives cap -> miss
                 record_cache_miss(cache_name)
                 return None
 
@@ -548,14 +549,12 @@ async def set_cached(*args: Any, **kwargs: Any) -> None:
     degraded = _degraded_mode(rest, settings)
     ttl = _ttl_from(rest, namespace)
     cap = _degraded_cap(rest, settings)
-    _ = (
-        ttl is None
-        and not _had(rest, "ttl_seconds", "ttl")
-        and not (isinstance(namespace, CacheNamespace) and namespace.ttl_seconds)
-    )
-    if degraded and ttl is not None and cap is not None:
-        with contextlib.suppress(TypeError, ValueError):
-            ttl = min(int(ttl), int(cap))
+    if degraded and cap is not None:
+        if ttl is None:
+            ttl = cap
+        else:
+            with contextlib.suppress(TypeError, ValueError):
+                ttl = min(int(ttl), int(cap))
 
     payload = _encode(value)
     try:

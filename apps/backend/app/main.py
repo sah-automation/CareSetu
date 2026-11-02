@@ -304,6 +304,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     if not resolved_settings.circuit_breaker_enabled:
         logger.warning("circuit breakers disabled (CIRCUIT_BREAKER_ENABLED=false); failing open")
+    if resolved_settings.degraded_mode:
+        logger.warning(
+            "degraded mode enabled; forcing AI gateway to mock provider and trimming cache TTLs"
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -732,6 +736,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         primary_engine=primary_engine,
         replica_engines=replica_engines,
         enabled=resolved_settings.read_replica_enabled,
+        router=engine,
     )
     app.add_middleware(SecurityHeadersMiddleware)
     # PHASE-14A B9 (#727): count every ANSWERED request into the in-process

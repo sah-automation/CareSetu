@@ -46,7 +46,7 @@ def get_current_read_replica_engine() -> Any:
 
 
 _ALLOWLIST_EXACT = frozenset({"/v1/directory/search", "/v1/care/cases", "/v1/me/profile"})
-_ALLOWLIST_PREFIXES = ("/v1/directory/providers/",)
+_ALLOWLIST_PREFIXES = ("/v1/directory/providers/", "/v1/care/cases/")
 _CP_MARKERS = (
     "/auth",
     "/consent",
@@ -510,19 +510,20 @@ class ReadReplicaMiddleware(BaseHTTPMiddleware):
                 selected = router.select_engine(method, path)
                 token = _CURRENT_ENGINE.set(selected)
 
-        chosen = selected if selected is not None else getattr(router, "primary", None)
-        for attr in _REQUEST_STATE_ATTRS:
-            with contextlib.suppress(Exception):
-                setattr(request.state, attr, chosen)
+        if selected is not None:
+            for attr in _REQUEST_STATE_ATTRS:
+                with contextlib.suppress(Exception):
+                    setattr(request.state, attr, selected)
 
         try:
             response = await call_next(request)
         finally:
             if token is not None:
                 _CURRENT_ENGINE.reset(token)
-            for attr in _REQUEST_STATE_ATTRS:
-                with contextlib.suppress(Exception):
-                    delattr(request.state, attr)
+            if selected is not None:
+                for attr in _REQUEST_STATE_ATTRS:
+                    with contextlib.suppress(Exception):
+                        delattr(request.state, attr)
 
         with contextlib.suppress(Exception):
             response.headers["x-read-replica"] = "replica" if selected is not None else "primary"

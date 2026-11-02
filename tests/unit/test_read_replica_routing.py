@@ -34,7 +34,7 @@ from app.db.read_replica import (
         ("GET", "/v1/doctor/patients", False),
         ("GET", "/v1/doctor/cases", False),
         ("GET", "/v1/intake/review-queue", False),
-        ("GET", "/v1/care/cases/7", False),
+        ("GET", "/v1/care/cases/7", True),
     ],
 )
 def test_read_replica_eligibility(method: str, path: str, expected: bool) -> None:
@@ -135,7 +135,7 @@ def test_request_context_resets() -> None:
     app.state.primary_engine = primary
     app.state.replica_engines = [replica]
     app.state.settings = Settings(
-        database_read_urls=("postgresql://replica",), read_replica_enabled=True
+        database_read_urls=("postgresql+asyncpg://replica",), read_replica_enabled=True
     )
     app.add_middleware(ReadReplicaMiddleware)
 

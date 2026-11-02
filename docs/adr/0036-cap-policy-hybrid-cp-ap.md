@@ -36,11 +36,11 @@ CareSetu is a modular monolith on a single PostgreSQL instance, deployed split-o
 - AP caches, with their defaults from `Settings`:
   - Directory search and provider directory: 300 seconds (`REDIS_DIRECTORY_TTL_SECONDS` and `REDIS_CONSENT_TTL_SECONDS` for consent status).
   - Patient profile: 300 seconds (`PROFILE_CACHE_TTL_SECONDS`).
-  - Intake list: 300 seconds (`INTAKE_CACHE_TTL_SECONDS`).
-  - Care cases: 300 seconds (`CARE_CASES_CACHE_TTL_SECONDS`).
-  - Provider health: 300 seconds (`PROVIDER_HEALTH_CACHE_TTL_SECONDS`).
+  - Intake list: 120 seconds (`INTAKE_CACHE_TTL_SECONDS`).
+  - Care cases: 60 seconds (`CARE_CASES_CACHE_TTL_SECONDS`).
+  - Provider health: 30 seconds (`PROVIDER_HEALTH_CACHE_TTL_SECONDS`).
 - Invalidation is event-driven through the outbox consumers; a cache miss, Redis error, or malformed payload always resolves to a miss and the caller recomputes from SQL, so a cache problem never fails a request.
-- Degraded mode caps every cache write to `DEGRADED_CACHE_TTL_SECONDS` (default 60) and refuses to serve long-lived entries.
+- Degraded mode caps every cache write to `DEGRADED_CACHE_TTL_SECONDS` (default 30) and refuses to serve long-lived entries.
 - PHI cache rule: the profile and intake caches are off unless Redis is configured and `PHI_CACHE_ENABLED` is true. The managed Redis portfolio demo must keep `PHI_CACHE_ENABLED=false`. Care-cases, directory, consent-list, and provider-health caches are not PHI-gated. Even when the flag is true, no cache is populated if `REDIS_URL` is empty.
 
 ### D4 - Redis-backed rate limiter with local fallback
@@ -52,7 +52,7 @@ CareSetu is a modular monolith on a single PostgreSQL instance, deployed split-o
 
 ### D5 - Degraded mode
 
-- `DEGRADED_MODE` defaults to false and is a runtime toggle.
+- `DEGRADED_MODE` defaults to false and is a static boot setting in this phase.
 - When enabled, degraded mode disables AI structuring (the pipeline falls back to mock), trims cache TTLs to `DEGRADED_CACHE_TTL_SECONDS`, and skips non-critical background work, to keep the system available under load or budget pressure. The toggle is flag-driven and adds no code path when off.
 
 ### D6 - Circuit-breaker bypass is fail-open
