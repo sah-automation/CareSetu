@@ -22,7 +22,7 @@
 import type { FormEvent } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 
 import { ConsentedHistory } from "@/components/case/ConsentedHistory";
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
@@ -42,6 +42,9 @@ import {
   type CareCaseStage,
 } from "@/lib/care/api";
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
+import { QueryClientContext } from "@tanstack/react-query";
+
+import { makeQueryClient } from "@/lib/queryClient";
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -155,6 +158,9 @@ export default function ReviewWorkspacePage() {
   const t = STRINGS[lang].caseWorkspace;
   const consoleT = STRINGS[lang].doctorConsole;
 
+  const queryClientContext = useContext(QueryClientContext);
+  const [fallbackQueryClient] = useState(() => makeQueryClient());
+  const queryClient = queryClientContext ?? fallbackQueryClient;
   const [loadStatus, setLoadStatus] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -238,6 +244,8 @@ export default function ReviewWorkspacePage() {
         listOpenCases,
       );
       if (birthed) setCareCase(birthed);
+      void queryClient.invalidateQueries({ queryKey: ["doctor", "cases"] });
+      void queryClient.invalidateQueries({ queryKey: ["intake"] });
       setFinalizeSuccess(true);
     } catch {
       setFinalizeError(true);
@@ -254,6 +262,7 @@ export default function ReviewWorkspacePage() {
     try {
       const result = await markConsultComplete(careCase.case_id);
       setCareCase(result);
+      void queryClient.invalidateQueries({ queryKey: ["doctor", "cases"] });
       setHandshakeDone(true);
     } catch {
       setHandshakeError(true);

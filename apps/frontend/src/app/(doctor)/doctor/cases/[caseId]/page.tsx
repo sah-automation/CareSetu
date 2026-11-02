@@ -27,7 +27,7 @@
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 
 import { ConsentedHistory } from "@/components/case/ConsentedHistory";
 import { HealthBackgroundBlock } from "@/components/doctor/HealthBackgroundBlock";
@@ -64,6 +64,9 @@ import {
   type RxItemView,
 } from "@/lib/care/api";
 import { fetchPartnerMe, type PartnerMeView } from "@/lib/partner/api";
+
+import { QueryClientContext } from "@tanstack/react-query";
+import { makeQueryClient } from "@/lib/queryClient";
 import {
   fetchDoctorPatientDetail,
   type DoctorPatientDetailView,
@@ -600,6 +603,9 @@ export default function CaseWorkspacePage() {
   // and no new dictionary block is forked (REQ-006 parity holds as-is).
   const patientsT = STRINGS[lang].doctorPatients;
 
+  const queryClientContext = useContext(QueryClientContext);
+  const [fallbackQueryClient] = useState(() => makeQueryClient());
+  const queryClient = queryClientContext ?? fallbackQueryClient;
   const [loadStatus, setLoadStatus] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -865,6 +871,7 @@ export default function CaseWorkspacePage() {
     try {
       const result = await markConsultComplete(careCase.case_id);
       setCareCase(result);
+      void queryClient.invalidateQueries({ queryKey: ["doctor", "cases"] });
       setHandshakeDone(true);
       void loadWorkingRx();
     } catch {
@@ -1053,6 +1060,7 @@ export default function CaseWorkspacePage() {
         workingRx.prescription_id,
       );
       setWorkingRx(rx);
+      void queryClient.invalidateQueries({ queryKey: ["doctor", "cases"] });
       resetDecisionState();
     } catch {
       setApproveError(true);
@@ -1097,6 +1105,7 @@ export default function CaseWorkspacePage() {
         close_reason: closeReason,
       });
       setCareCase(updated);
+      void queryClient.invalidateQueries({ queryKey: ["doctor", "cases"] });
     } catch {
       setCloseError(true);
     } finally {
