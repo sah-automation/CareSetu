@@ -124,6 +124,35 @@ async function fetchRefresh(refreshToken: string): Promise<RefreshResponse> {
   return (await res.json()) as RefreshResponse;
 }
 
+const REFRESH_DELAYS_MS = [1000, 2000, 3000];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Attempt a token refresh with bounded retries. The refresh token is rotated on
+ * success and returned to the caller for persistence; on exhaustion the last
+ * error is rethrown so callers can decide how to handle the failed session.
+ */
+export async function attemptRefresh(
+  refreshToken: string,
+): Promise<RefreshResponse> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await fetchRefresh(refreshToken);
+    } catch (err) {
+      lastError = err;
+      await delay(REFRESH_DELAYS_MS[attempt - 1]);
+    }
+  }
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+  throw new Error("token refresh exhausted");
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
@@ -150,14 +179,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         applyMe(me, setUser, setSelectedRole);
       } catch (err) {
         if (cancelled) return;
-        console.error("[AuthContext] /v1/me failed, attempting refresh:", err);
 
-        // GET /v1/me failed - try refresh if the error suggests an expired JWT
         try {
-          const refreshed = await fetchRefresh(session.refresh_token);
+          const refreshed = await attemptRefresh(session.refresh_token);
           if (cancelled) return;
 
-          // Update localStorage with new tokens
           const updated: StoredSession = {
             ...session,
             jwt: refreshed.jwt,
@@ -170,19 +196,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             refreshed.refresh_token,
           );
 
-          // Retry /v1/me with the new JWT
           const me = await fetchMe(refreshed.jwt);
           if (cancelled) return;
 
           applyMe(me, setUser, setSelectedRole);
         } catch (refreshErr) {
           if (cancelled) return;
-          console.error(
-            "[AuthContext] refresh failed, clearing session:",
-            refreshErr,
-          );
 
-          // Refresh also failed - clear everything and redirect
           clearSession();
           clearCookie("caresetu.access_jwt");
           router.replace("/login");
@@ -221,16 +241,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const me = await fetchMe(session.jwt);
       applyMe(me, setUser, setSelectedRole);
     } catch (err) {
-      console.error(
-        "[AuthContext] resume /v1/me failed, attempting refresh:",
-        err,
-      );
-
       try {
-        const refreshed = await fetchRefresh(session.refresh_token);
+        const refreshed = await attemptRefresh(session.refresh_token);
 
-        // Update localStorage with the rotated tokens, matching the mount
-        // validation path exactly.
         const updated: StoredSession = {
           ...session,
           jwt: refreshed.jwt,
@@ -243,10 +256,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const me = await fetchMe(refreshed.jwt);
         applyMe(me, setUser, setSelectedRole);
       } catch (refreshErr) {
-        console.error(
-          "[AuthContext] resume resolution failed; identity stays unresolved:",
-          refreshErr,
-        );
+        // Best-effort: leave state untouched for a just-minted session.
       }
     }
   }, []);

@@ -158,14 +158,19 @@ describe("AuthProvider", () => {
   it("redirects to /login when refresh also fails", async () => {
     setStoredSession(VALID_SESSION);
 
+    vi.useFakeTimers();
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     // /v1/me fails
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
-    // refresh also fails
+    // refresh also fails all three attempts
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
 
     renderWithAuth();
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -178,12 +183,17 @@ describe("AuthProvider", () => {
   it("redirects to /login when GET /v1/me returns 500 and refresh fails", async () => {
     setStoredSession(VALID_SESSION);
 
+    vi.useFakeTimers();
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
 
     renderWithAuth();
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -240,14 +250,14 @@ describe("AuthProvider", () => {
   it("handles network errors on /v1/me gracefully by trying refresh", async () => {
     setStoredSession(VALID_SESSION);
 
+    vi.useFakeTimers();
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
-    // Network error on /v1/me
-    fetchSpy.mockRejectedValueOnce(new TypeError("Failed to fetch"));
-    // Refresh also fails with network error
-    fetchSpy.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    fetchSpy.mockRejectedValue(new TypeError("Failed to fetch"));
 
     renderWithAuth();
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -371,19 +381,22 @@ describe("AuthProvider resumeSession seam (#496)", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
 
     await waitFor(() => {
       screen.getByTestId("resume").click();
     });
 
+    await new Promise((r) => setTimeout(r, 6500));
+
     await waitFor(() => {
       expect(screen.getByTestId("is-authenticated").textContent).toBe("false");
     });
     expect(screen.getByTestId("user-id").textContent).toBe("null");
-    // A just-minted session is never cleared or redirected off on a transient miss.
     expect(mockReplace).not.toHaveBeenCalled();
     expect(localStorage.getItem("caresetu.session")).not.toBeNull();
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
