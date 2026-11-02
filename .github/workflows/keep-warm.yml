@@ -1,0 +1,53 @@
+name: Keep backend warm
+
+# ARCH-P2 (#832): keep Render's free-tier backend awake. GitHub Actions runs this
+# every ten minutes, independent of the web process, so the service no longer
+# sleeps after 15 minutes of idle. Harmless on always-on deployments: a 2xx
+# response from /health is all it needs.
+#
+# Carries no credentials: it reads only the public LIVE_BACKEND_URL repository
+# variable and pings the public health endpoint.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    name: Ping backend health
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      LIVE_BACKEND_URL: ${{ vars.LIVE_BACKEND_URL }}
+    steps:
+      - name: Ping /health with bounded retry
+        run: |
+          set -euo pipefail
+          if [ -z "${LIVE_BACKEND_URL:-}" ]; then
+            echo "keep-warm FAILED: LIVE_BACKEND_URL repository variable is not set" >&2
+            exit 1
+          fi
+          base="${LIVE_BACKEND_URL%/}"
+          last_status="000"
+          for attempt in $(seq 1 5); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "${base}/health" || true)"
+            last_status="${status:-000}"
+            echo "keep-warm attempt ${attempt}/5: HTTP ${last_status}"
+            if [ "${last_status}" -ge 200 ] 2>/dev/null && [ "${last_status}" -lt 300 ]; then
+              echo "keep-warm OK: HTTP ${last_status}"
+              exit 0
+            fi
+            if [ "${attempt}" -lt 5 ]; then
+              sleep 10
+            fi
+          done
+          echo "keep-warm FAILED: last HTTP status ${last_status} after 5 attempts" >&2
+          exit 1
