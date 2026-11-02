@@ -96,7 +96,7 @@ async def test_validate_token_resolves_scope_through_the_facade() -> None:
 async def test_validate_token_rejects_an_expired_token() -> None:
     clock = MutableClock(_NOW)
     token = _token()
-    clock.set(_NOW + timedelta(minutes=20))
+    clock.set(_NOW + timedelta(hours=3))
 
     with pytest.raises(AccessTokenExpiredError):
         await _facade(clock).validate_token(token)

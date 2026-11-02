@@ -54,6 +54,10 @@ services:
         generateValue: true
       - key: GATEWAY_RATE_LIMIT_ENABLED
         value: "true"
+      # Gateway access-token lifetime (seconds, default 7200 = 2 hours). Keep
+      # the JWT cookie max-age derived from this setting.
+      - key: GATEWAY_ACCESS_TOKEN_TTL_SECONDS
+        value: "7200"
       # Demo mode reads the OTP back into the UI, so SMS stays mocked.
       - key: SMS_PROVIDER
         value: mock

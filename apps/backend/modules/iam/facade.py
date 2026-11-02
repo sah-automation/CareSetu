@@ -29,7 +29,7 @@ from modules.iam.adapters.sms import (
 from modules.iam.adapters.sms import (
     build_sms_adapter as build_sms_adapter,
 )
-from modules.iam.domain import events
+from modules.iam.domain import events, jwt
 from modules.iam.domain.exceptions import (
     InvalidAccessTokenError as InvalidAccessTokenError,
 )
@@ -138,7 +138,7 @@ class IamFacade:
         clock: Callable[[], datetime] = _default_clock,
         *,
         access_token_signing_key: str = "",
-        access_token_ttl_seconds: int = 900,
+        access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
         refresh_token_ttl_seconds: int = 2_592_000,
         mfa_secret_key: str = "",
         operator_mfa_lockout_threshold: int = DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,

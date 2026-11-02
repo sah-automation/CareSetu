@@ -98,8 +98,8 @@ def test_issued_token_carries_the_expected_claims() -> None:
     )
 
 
-def test_access_token_ttl_defaults_to_about_fifteen_minutes() -> None:
-    assert ACCESS_TOKEN_TTL_SECONDS == 900
+def test_access_token_ttl_defaults_to_two_hours() -> None:
+    assert ACCESS_TOKEN_TTL_SECONDS == 7200
 
 
 def test_operator_token_carries_the_tier_claim() -> None:
@@ -150,7 +150,7 @@ def test_expired_token_is_rejected() -> None:
     token = _token()
 
     with pytest.raises(AccessTokenExpiredError):
-        verify_token(token, _KEY, _NOW + timedelta(minutes=20))
+        verify_token(token, _KEY, _NOW + timedelta(hours=3))
 
 
 def test_custom_ttl_is_honoured() -> None:

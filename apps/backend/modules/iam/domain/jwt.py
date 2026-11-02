@@ -34,7 +34,7 @@ from modules.iam.domain.exceptions import (
 _ALGORITHM = "HS256"
 _TOKEN_TYPE = "JWT"  # nosec B105 - the JWS ``typ`` header, not a credential
 
-ACCESS_TOKEN_TTL_SECONDS = 900
+ACCESS_TOKEN_TTL_SECONDS = 7200
 
 
 class AccessTokenClaims(BaseModel):
@@ -69,7 +69,7 @@ def issue_token(
 ) -> str:
     """Mint an HS256 access JWT carrying ``jti``, ``sub``, ``scope``, ``iat``, ``exp``.
 
-    ``exp`` is ``now + ttl_seconds`` (~15 minutes at the default) so a stolen
+    ``exp`` is ``now + ttl_seconds`` (~2 hours at the default) so a stolen
     access token has limited value (spec #51 §2.5). An empty ``signing_key``
     fails closed - a misconfigured deployment refuses to mint rather than sign
     with a blank key. ``tier`` is emitted only when given, so patient and

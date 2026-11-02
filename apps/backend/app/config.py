@@ -93,7 +93,7 @@ DEFAULT_RATE_LIMIT_TIERS = (
 )
 # Mirrors ``modules.iam.domain.jwt.ACCESS_TOKEN_TTL_SECONDS``; config stays
 # import-free so it reads as one plain dataclass over the environment.
-DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 900
+DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 7200
 # Mirrors ``modules.iam.domain.refresh.REFRESH_TOKEN_TTL_SECONDS`` (~30 days).
 DEFAULT_REFRESH_TOKEN_TTL_SECONDS = 2_592_000
 # Audit retention (PHASE-4, issue #234 storage item 21): 0 = no expiry, keep
