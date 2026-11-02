@@ -243,9 +243,11 @@ describe("ProfileGate", () => {
     renderGate(<Host action="intake" />);
 
     await waitFor(() =>
-      expect(screen.getByTestId("action-btn")).toBeInTheDocument(),
+      expect(
+        screen.queryByTestId("gate-trigger-intake"),
+      ).not.toBeInTheDocument(),
     );
-    expect(screen.queryByTestId("gate-trigger-intake")).not.toBeInTheDocument();
+    expect(screen.getByTestId("action-btn")).toBeInTheDocument();
   });
 
   it("shows the bilingual save error inline when the write fails", async () => {

@@ -7,25 +7,31 @@
 // in-flight edit buffer, and persists on wizard Finish through
 // PUT /v1/me/profile (backend #482). A saved profile short-circuits the
 // completion gate everywhere a consumer reads it (#488 AC 2). Hydration is
-// per identity: the stateful subtree is keyed by the signed-in identity, so
-// switching identities on one browser remounts the provider state atomically
-// and no render can ever show a previous identity's profile or draft
-// (#488 AC 5).
-// #496: Finish is never silent. Identity-absent and incomplete-basics paths
-// write `saveStatus` before resolving false, so the host's bilingual
-// save-error notice always surfaces a blocked or failed save.
+// per identity: the stateful subtree is keyed by the signed-in identity.
+// #496: Finish is never silent.
+// ARCH-P2 #834: the read now goes through useQuery (5 min stale time).
 
 import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 
+import { useQuery } from "@tanstack/react-query";
+import {
+  QueryClientContext,
+  QueryClientProvider,
+  useQueryClient,
+} from "@tanstack/react-query";
+
+import { makeQueryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth/AuthContext";
+
 import {
   getProfile,
   saveProfile,
@@ -45,33 +51,12 @@ import {
 export type ProfileSaveStatus = "idle" | "saving" | "saved" | "error";
 
 export interface ProfileContextValue {
-  /** True once the initial server hydration has settled for this identity. */
   hydrated: boolean;
-  /** The saved server profile when the backend answers set=true; null otherwise. */
   savedProfile: StoredPatientProfile | null;
-  /** The in-flight edit buffer (identity-scoped local draft). */
   draft: ProfileDraft;
-  /** Persist state for Finish surfaces; surfaces render bilingual copy from it. */
   saveStatus: ProfileSaveStatus;
-  /** Replace the buffer and write it through to the identity-scoped draft. */
   updateDraft: (next: ProfileDraft) => void;
-  /**
-   * Persist the buffer through PUT /v1/me/profile and adopt the saved profile.
-   * The never-silent-save invariant (#496): this resolves true on success
-   * (consumers may then route/close) and false on every other path - identity
-   * not yet resolved, incomplete basics, or a failed write - with `saveStatus`
-   * written first so the host's bilingual save-error notice is always shown.
-   */
   finishProfile: () => Promise<boolean>;
-  /**
-   * Adopt a photo-endpoint answer (#548) into the profile state. The photo
-   * surface is its own endpoint, not part of the profile form, but its ref
-   * still lives on the profile row - so the buffer must track it. Without this
-   * a save made after an upload would PUT the buffer's stale (or empty) ref
-   * and silently detach the stored photo. Deliberately does not touch
-   * `saveStatus`: the ref is already committed by the photo endpoint, so
-   * adopting it is not a pending identity edit.
-   */
   syncPhotoRef: (ref: string | null) => void;
 }
 
@@ -85,28 +70,29 @@ export function useProfile(): ProfileContextValue {
   return ctx;
 }
 
-/**
- * Like `useProfile`, but returns null instead of throwing when there is no
- * provider. Used by chrome shared across roles (the light top bar's location
- * chip) so it can render its beachhead fallback even where the patient profile
- * context is not mounted (full density, component tests).
- */
 export function useOptionalProfile(): ProfileContextValue | null {
   return useContext(ProfileContext);
 }
 
 export function ProfileProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
-  // Keying the stateful subtree by identity makes an identity switch remount
-  // the provider state atomically: the next commit already holds the pristine
-  // state of the new identity, so nothing transient ever shows the previous
-  // one's saved profile or draft (#488 AC 5).
+  const outerClient = useContext(QueryClientContext);
+  const [client] = useState(() => makeQueryClient());
+  const queryClient = outerClient ?? client;
   return (
-    <ProfileProviderInner key={user?.id ?? "anon"} identityId={user?.id}>
-      {children}
-    </ProfileProviderInner>
+    <QueryClientProvider client={queryClient}>
+      <ProfileProviderInner key={user?.id ?? "anon"} identityId={user?.id}>
+        {children}
+      </ProfileProviderInner>
+    </QueryClientProvider>
   );
 }
+
+export function patientProfileQueryKey(identityId?: number) {
+  return ["patient", "profile", identityId] as const;
+}
+
+const FIVE_MINUTES = 5 * 60 * 1000;
 
 function ProfileProviderInner({
   identityId,
@@ -115,53 +101,48 @@ function ProfileProviderInner({
   identityId: number | undefined;
   children: ReactNode;
 }) {
-  const [hydrated, setHydrated] = useState(false);
+  const queryClient = useQueryClient();
   const [savedProfile, setSavedProfile] = useState<StoredPatientProfile | null>(
     null,
   );
-  const [draft, setDraft] = useState<ProfileDraft>(initialDraft);
+  const [draft, setDraft] = useState<ProfileDraft>(initialDraft());
   const [saveStatus, setSaveStatus] = useState<ProfileSaveStatus>("idle");
+  const bufferRef = useRef<ProfileDraft>(initialDraft());
 
-  useEffect(() => {
-    // No signed-in identity: the patient surfaces are unreachable under the
-    // shell and this freshly-keyed subtree already holds pristine state, so
-    // there is nothing to hydrate. (The key guarantees identityId cannot
-    // change for the lifetime of this instance.)
-    if (identityId === undefined) return;
-    let cancelled = false;
-
-    // Hydration loads the identity-scoped buffer first (the PWA's offline
-    // fallback), then the server answer wins for the fields it models once it
-    // settles (#488 AC 2). If the patient edits during the round-trip, the
-    // buffer reference changes and the server seed is skipped, so in-progress
-    // input is never clobbered by a slower GET.
-    async function hydrate() {
-      const buffer = loadDraft(identityId);
-      setDraft(buffer);
-      let read: ProfileReadResult | null = null;
+  const profileQuery = useQuery({
+    queryKey: patientProfileQueryKey(identityId),
+    queryFn: async () => {
       try {
-        read = await getProfile();
+        return await getProfile();
       } catch (err) {
-        // Best-effort: surface the buffer and re-attempt on the next identity
-        // hydration rather than blocking patient flows.
         console.warn("[profile] hydration failed, using local draft:", err);
+        throw err;
       }
-      if (cancelled) return;
-      if (read?.set && read.profile) {
-        const stored = read.profile;
-        setSavedProfile(stored);
-        setDraft((current) =>
-          current === buffer ? seedDraftFromServer(stored, buffer) : current,
-        );
-      }
-      setHydrated(true);
-    }
+    },
+    enabled: identityId !== undefined,
+    staleTime: FIVE_MINUTES,
+    retry: false,
+  });
 
-    void hydrate();
-    return () => {
-      cancelled = true;
-    };
+  useLayoutEffect(() => {
+    if (identityId === undefined) return;
+    const buffer = loadDraft(identityId);
+    bufferRef.current = buffer;
+    setDraft(buffer);
   }, [identityId]);
+
+  useLayoutEffect(() => {
+    const read = profileQuery.data;
+    if (!read?.set || !read.profile) return;
+    setSavedProfile(read.profile);
+    setDraft((current) =>
+      current === bufferRef.current
+        ? seedDraftFromServer(read.profile as StoredPatientProfile, current)
+        : current,
+    );
+  }, [profileQuery.data]);
+
+  const hydrated = identityId === undefined ? false : !profileQuery.isPending;
 
   const updateDraft = useCallback(
     (next: ProfileDraft) => {
@@ -173,15 +154,10 @@ function ProfileProviderInner({
   );
 
   const finishProfile = useCallback(async (): Promise<boolean> => {
-    // Never-silent-save invariant (#496): every blocked path writes the save
-    // status before resolving false so Finish can never be a silent no-op.
     if (identityId === undefined) {
       setSaveStatus("error");
       return false;
     }
-    // The draft this render agreed on; surfaces block Finish until basics
-    // validate, but guard anyway so a stray call cannot emit a 422 against
-    // the profile surface. (Regressions on this branch were the dead click.)
     if (!basicsComplete(draft)) {
       setSaveStatus("error");
       return false;
@@ -190,6 +166,13 @@ function ProfileProviderInner({
     try {
       const saved = await saveProfile(draftToProfilePayload(draft));
       setSavedProfile(saved);
+      queryClient.setQueryData(patientProfileQueryKey(identityId), {
+        set: true,
+        profile: saved,
+      } as ProfileReadResult);
+      void queryClient.invalidateQueries({
+        queryKey: patientProfileQueryKey(identityId),
+      });
       setSaveStatus("saved");
       return true;
     } catch (err) {
@@ -197,21 +180,29 @@ function ProfileProviderInner({
       setSaveStatus("error");
       return false;
     }
-  }, [identityId, draft]);
+  }, [identityId, draft, queryClient]);
 
   const syncPhotoRef = useCallback(
     (ref: string | null) => {
       setSavedProfile((current) =>
         current === null ? current : { ...current, photo_ref: ref },
       );
-      // Persist outside the updater, like updateDraft above: an updater is a
-      // pure function of state and StrictMode invokes it twice, so a write
-      // inside it would land twice.
       const next = { ...draft, photoFileName: ref ?? "" };
       setDraft(next);
       saveDraft(next, identityId);
+      queryClient.setQueryData(
+        patientProfileQueryKey(identityId),
+        (old: unknown) => {
+          const result = old as ProfileReadResult | undefined;
+          if (!result?.set || !result.profile) return old;
+          return {
+            ...result,
+            profile: { ...result.profile, photo_ref: ref },
+          };
+        },
+      );
     },
-    [draft, identityId],
+    [draft, identityId, queryClient],
   );
 
   const value = useMemo(
