@@ -59,6 +59,7 @@ import { VerifiedBadge } from "@/components/doctor/profile/VerifiedBadge";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/lib/auth/AuthContext";
 import {
   fetchDoctorProfile,
   listDoctorCases,
@@ -79,10 +80,20 @@ import { PROFILE_ANCHORS } from "@/components/doctor/profile/ProfileSectionIndex
 import { STRINGS, type Dictionary } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { formatInrPaise } from "@/lib/money";
+import { useQuery } from "@tanstack/react-query";
 
 // ---- helpers ----
 
 type LoadStatus = "loading" | "ready" | "error";
+
+const ONE_MINUTE = 60 * 1000;
+
+export function doctorCasesQueryKey(
+  doctorId: number | undefined,
+  statusFilter: string = "all",
+) {
+  return ["doctor", "cases", doctorId, statusFilter] as const;
+}
 
 function waitingSince(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -965,10 +976,33 @@ function OpenCasesCard({
 // ---- main page ----
 
 export default function DoctorDashboardPage() {
+  const { user } = useAuth();
+  const doctorId = user?.id;
+
   const [queue, setQueue] = useState<ReviewQueueItem[]>([]);
   const [queueStatus, setQueueStatus] = useState<LoadStatus>("loading");
-  const [cases, setCases] = useState<DoctorCaseRow[]>([]);
-  const [casesStatus, setCasesStatus] = useState<LoadStatus>("loading");
+
+  const casesQuery = useQuery({
+    queryKey: doctorCasesQueryKey(doctorId, "all"),
+    queryFn: async () => {
+      try {
+        return await listDoctorCases();
+      } catch (err: unknown) {
+        console.warn("[doctor-console] open cases failed to load:", err);
+        throw err;
+      }
+    },
+    enabled: doctorId !== undefined,
+    staleTime: ONE_MINUTE,
+    retry: false,
+  });
+
+  const cases: DoctorCaseRow[] = casesQuery.data?.items ?? [];
+  const casesStatus: LoadStatus = casesQuery.isPending
+    ? "loading"
+    : casesQuery.isError && casesQuery.data === undefined
+      ? "error"
+      : "ready";
 
   // Fee summary state - isolated from the console feeds
   const [profile, setProfile] = useState<DoctorProfileView | null>(null);
@@ -1000,25 +1034,12 @@ export default function DoctorDashboardPage() {
   }, []);
 
   const loadCases = useCallback(() => {
-    setCasesStatus("loading");
-    listDoctorCases()
-      .then(({ items }) => {
-        setCases(items);
-        setCasesStatus("ready");
-      })
-      .catch((err: unknown) => {
-        setCasesStatus("error");
-        console.warn("[doctor-console] open cases failed to load:", err);
-      });
-  }, []);
+    void casesQuery.refetch();
+  }, [casesQuery]);
 
   useEffect(() => {
     loadQueue();
   }, [loadQueue]);
-
-  useEffect(() => {
-    loadCases();
-  }, [loadCases]);
 
   // Isolated profile read - does not affect console load status. The full
   // projection is kept (not just the fee) so the getting-started checklist can
