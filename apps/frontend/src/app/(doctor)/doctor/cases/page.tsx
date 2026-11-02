@@ -30,19 +30,17 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-errors";
 import { useAuth } from "@/lib/auth/AuthContext";
-import { listDoctorCases, type DoctorCaseRow } from "@/lib/doctor/api";
+import {
+  DOCTOR_CASES_STALE_TIME,
+  doctorCasesQueryKey,
+  listDoctorCases,
+  type DoctorCaseRow,
+} from "@/lib/doctor/api";
+
+export { doctorCasesQueryKey } from "@/lib/doctor/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { useQuery } from "@tanstack/react-query";
-
-const ONE_MINUTE = 60 * 1000;
-
-export function doctorCasesQueryKey(
-  doctorId: number | undefined,
-  statusFilter: string = "all",
-) {
-  return ["doctor", "cases", doctorId, statusFilter] as const;
-}
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -90,7 +88,7 @@ export default function DoctorCasesIndexPage() {
     queryKey: doctorCasesQueryKey(doctorId, "all"),
     queryFn: () => listDoctorCases(),
     enabled: doctorId !== undefined,
-    staleTime: ONE_MINUTE,
+    staleTime: DOCTOR_CASES_STALE_TIME,
     retry: false,
   });
 

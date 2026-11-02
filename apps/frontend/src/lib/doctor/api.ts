@@ -778,3 +778,12 @@ export async function deleteDoctorProfilePhoto(
     headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey) },
   });
 }
+
+export const DOCTOR_CASES_STALE_TIME = 60 * 1000;
+
+export function doctorCasesQueryKey(
+  doctorId: number | undefined,
+  statusFilter: string = "all",
+) {
+  return ["doctor", "cases", doctorId, statusFilter] as const;
+}

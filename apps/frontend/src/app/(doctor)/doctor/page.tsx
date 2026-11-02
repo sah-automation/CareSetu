@@ -61,12 +61,16 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth/AuthContext";
 import {
+  DOCTOR_CASES_STALE_TIME,
+  doctorCasesQueryKey,
   fetchDoctorProfile,
   listDoctorCases,
   listDoctorPatients,
   type DoctorCaseRow,
   type DoctorProfileView,
 } from "@/lib/doctor/api";
+
+export { doctorCasesQueryKey } from "@/lib/doctor/api";
 import {
   formatGreetingDate,
   greetingFirstName,
@@ -85,15 +89,6 @@ import { useQuery } from "@tanstack/react-query";
 // ---- helpers ----
 
 type LoadStatus = "loading" | "ready" | "error";
-
-const ONE_MINUTE = 60 * 1000;
-
-export function doctorCasesQueryKey(
-  doctorId: number | undefined,
-  statusFilter: string = "all",
-) {
-  return ["doctor", "cases", doctorId, statusFilter] as const;
-}
 
 function waitingSince(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -993,7 +988,7 @@ export default function DoctorDashboardPage() {
       }
     },
     enabled: doctorId !== undefined,
-    staleTime: ONE_MINUTE,
+    staleTime: DOCTOR_CASES_STALE_TIME,
     retry: false,
   });
 
