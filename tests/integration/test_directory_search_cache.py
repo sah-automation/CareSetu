@@ -27,6 +27,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from cache_fixtures import FakeRedis as _FakeRedis
 from conftest import seed_daltonganj_service_area
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -91,39 +92,6 @@ async def clean_partner(database_url: str, migration: None) -> Iterator[None]:
         await engine.dispose()
     yield
     shared_redis._REDIS_CLIENT = None
-
-
-class _FakeRedis:
-    """In-memory stand-in for the ``redis.asyncio.Redis`` surface the facade
-    touches through :mod:`modules.partner.directory_cache`."""
-
-    def __init__(self) -> None:
-        self.store: dict[str, str] = {}
-
-    async def get(self, key: str) -> str | None:
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.store[key] = value
-        self.last_ttl: int | None = ex
-
-    async def scan(
-        self, cursor: int, match: str | None = None, count: int | None = None
-    ) -> tuple[int, list[str]]:
-        keys = (
-            sorted(self.store)
-            if match is None
-            else [k for k in self.store if k.startswith(match.rstrip("*"))]
-        )
-        return 0, keys
-
-    async def delete(self, *keys: str) -> int:
-        removed = 0
-        for key in keys:
-            if key in self.store:
-                del self.store[key]
-                removed += 1
-        return removed
 
 
 def _facade(database_url: str, tmp_path: Path) -> tuple[IamFacade, PartnerFacade]:
