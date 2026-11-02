@@ -17,6 +17,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { useRouter } from "next/navigation";
@@ -28,6 +29,11 @@ import {
   clearSelectedRole,
   type StoredSession,
 } from "./session";
+
+import {
+  ACCESS_TOKEN_TTL_SECONDS,
+  PROACTIVE_REFRESH_RATIO,
+} from "@/lib/config";
 
 const API_BASE_URL: string =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -158,6 +164,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -221,6 +228,65 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [router]);
 
+  useEffect(() => {
+    if (!user) {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+
+    const clearTimer = (): void => {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+
+    const schedule = (): void => {
+      clearTimer();
+      const delayMs = ACCESS_TOKEN_TTL_SECONDS * 1000 * PROACTIVE_REFRESH_RATIO;
+      refreshTimerRef.current = setTimeout(() => {
+        void tick();
+      }, delayMs);
+    };
+
+    const tick = async (): Promise<void> => {
+      if (cancelled) return;
+      const session = readSession();
+      if (!session) {
+        clearTimer();
+        return;
+      }
+      try {
+        const refreshed = await attemptRefresh(session.refresh_token);
+        if (cancelled) return;
+        const updated: StoredSession = {
+          ...session,
+          jwt: refreshed.jwt,
+          refresh_token: refreshed.refresh_token,
+        };
+        localStorage.setItem("caresetu.session", JSON.stringify(updated));
+        localStorage.setItem("caresetu.access_jwt", refreshed.jwt);
+        localStorage.setItem("caresetu.refresh_token", refreshed.refresh_token);
+        if (cancelled) return;
+        schedule();
+      } catch {
+        // Benign: next request handles refresh; keep timer cleared.
+      }
+    };
+
+    schedule();
+
+    return () => {
+      cancelled = true;
+      clearTimer();
+    };
+  }, [user]);
+
   function switchRole(role: string) {
     setSelectedRole(role);
     saveSelectedRole(role);
@@ -265,6 +331,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearSession();
     clearSelectedRole();
     clearCookie("caresetu.access_jwt");
+    if (refreshTimerRef.current) {
+      clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
     setUser(null);
     setSelectedRole(null);
     router.replace("/");
