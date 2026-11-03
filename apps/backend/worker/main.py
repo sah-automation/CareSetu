@@ -523,6 +523,22 @@ async def _run_judge_job(engine: AsyncEngine | None = None) -> None:
         )
 
 
+# ARCH-P3 #855: explicit safety vs optional split. Optional jobs are the only
+# ones degraded mode may drop; all other scheduled jobs are safety/care work.
+SAFETY_SCHEDULER_JOBS: frozenset[str] = frozenset(
+    {
+        "credential-expiry-sweep",
+        "error-buffer-drain",
+        "security-detector-scan",
+        "alert-delivery-router",
+        "alert-delivery-drainer",
+    }
+)
+DEGRADED_MODE_OPTIONAL_JOBS: frozenset[str] = frozenset({"http-counter-fold", "llm-judge-run"})
+OPTIONAL_JOBS = DEGRADED_MODE_OPTIONAL_JOBS
+SAFETY_JOBS = SAFETY_SCHEDULER_JOBS
+
+
 def build_scheduler(
     settings: Settings,
     *,
@@ -603,7 +619,10 @@ def build_scheduler(
     # a deployment that has not opted into the counter has an always-empty map, so
     # the gate-off scheduler is the pre-#727 one (sweep, plus the error drain when
     # its own gate is on).
-    if settings.http_counter_enabled and not settings.degraded_mode:
+    # Optional work: dropped only in degraded mode (central safety/optional split).
+    if settings.http_counter_enabled and not (
+        settings.degraded_mode and "http-counter-fold" in DEGRADED_MODE_OPTIONAL_JOBS
+    ):
         scheduler.add_job(
             counter_drain_callback,
             IntervalTrigger(seconds=settings.http_counter_drain_interval_seconds),
@@ -631,7 +650,10 @@ def build_scheduler(
         # The drainer runs every 30 seconds to process pending deliveries
         pass  # Jobs are added in run_worker_until_stopped with proper adapters
     # #789: LLM judge run - gated behind llm_judge_enabled
-    if settings.llm_judge_enabled and not settings.degraded_mode:
+    # Optional work: dropped only in degraded mode (central safety/optional split).
+    if settings.llm_judge_enabled and not (
+        settings.degraded_mode and "llm-judge-run" in DEGRADED_MODE_OPTIONAL_JOBS
+    ):
         scheduler.add_job(
             judge_job_callback,
             CronTrigger.from_crontab("0 3 * * *", timezone="UTC"),  # Daily at 03:00 UTC

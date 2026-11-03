@@ -305,8 +305,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if not resolved_settings.circuit_breaker_enabled:
         logger.warning("circuit breakers disabled (CIRCUIT_BREAKER_ENABLED=false); failing open")
     if resolved_settings.degraded_mode:
+        # ARCH-P3 #855: exactly one structured warning listing the capabilities
+        # that are reduced. The list is the single source of truth for boot.
+        _reduced_capabilities = [
+            "ai_gateway (forced to mock provider)",
+            "cache_ttl (capped to degraded TTL)",
+            "http_counter_fold",
+            "llm_judge_run",
+            "evaluation_jobs",
+            "analytics_jobs",
+        ]
         logger.warning(
-            "degraded mode enabled; forcing AI gateway to mock provider and trimming cache TTLs"
+            "degraded mode enabled; reduced capabilities: %s",
+            ", ".join(_reduced_capabilities),
+            extra={"reduced_capabilities": _reduced_capabilities, "event": "degraded_mode"},
         )
 
     @asynccontextmanager

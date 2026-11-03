@@ -429,7 +429,9 @@ class Settings:
     # real HTTP router today; the four RESERVED flags are accepted and validated
     # but have no matching HTTP router - they are inert and have no runtime
     # effect (no route inclusion, no outbox/worker/facade gating).
-    # Active:
+    # Active: intake, care, partner (incl. directory), doctor, audit,
+    # observability, ops. Reserved/inert: notify, settlement, fulfillment,
+    # diagnostics. IAM, consent, and health are not independently disableable.
     module_intake_enabled: bool = True
     module_care_enabled: bool = True
     module_partner_enabled: bool = True
