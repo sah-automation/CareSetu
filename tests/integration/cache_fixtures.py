@@ -111,10 +111,6 @@ class FakeRedis:
         self.ttls.clear()
 
 
-# Alias for the legacy private name used by the directory cache test.
-_FakeRedis = FakeRedis
-
-
 def install_fake_redis(client: FakeRedis | None = None) -> FakeRedis:
     """Install ``client`` (or a fresh FakeRedis) as the shared Redis client."""
     import app.redis as shared_redis
@@ -124,28 +120,9 @@ def install_fake_redis(client: FakeRedis | None = None) -> FakeRedis:
     return chosen
 
 
-def reset_shared_redis() -> None:
-    """Clear the shared Redis client (restore in teardown)."""
-    import app.redis as shared_redis
-
-    shared_redis._REDIS_CLIENT = None
-
-
 @contextlib.contextmanager
 def fake_redis(client: FakeRedis | None = None) -> Iterator[FakeRedis]:
     """Context manager that installs a fake Redis and restores the previous client."""
-    import app.redis as shared_redis
-
-    previous = shared_redis._REDIS_CLIENT
-    chosen = install_fake_redis(client)
-    try:
-        yield chosen
-    finally:
-        shared_redis._REDIS_CLIENT = previous
-
-
-@contextlib.asynccontextmanager
-async def async_fake_redis(client: FakeRedis | None = None) -> Any:
     import app.redis as shared_redis
 
     previous = shared_redis._REDIS_CLIENT
@@ -193,13 +170,15 @@ class SqlCounter:
         if self._attached:
             self.detach()
         self.engine = engine
-        event.listen(engine.sync_engine, "before_cursor_execute", self._handler)
+        target = getattr(engine, "sync_engine", engine)
+        event.listen(target, "before_cursor_execute", self._handler)
         self._attached = True
 
     def detach(self) -> None:
         if self._attached and self.engine is not None:
             with contextlib.suppress(Exception):
-                event.remove(self.engine.sync_engine, "before_cursor_execute", self._handler)
+                target = getattr(self.engine, "sync_engine", self.engine)
+                event.remove(target, "before_cursor_execute", self._handler)
         self._attached = False
 
     def reset(self) -> None:
@@ -229,59 +208,6 @@ class SqlCounter:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         self.detach()
-
-
-# Aliases for the counter under likely names.
-SQLCounter = SqlCounter
-SelectCounter = SqlCounter
-QueryCounter = SqlCounter
-SqlStatementCounter = SqlCounter
-StatementCounter = SqlCounter
-Counter = SqlCounter
-
-
-@contextlib.contextmanager
-def sql_counter(engine: AsyncEngine | None = None) -> Iterator[SqlCounter]:
-    counter = SqlCounter(engine)
-    try:
-        yield counter
-    finally:
-        counter.detach()
-
-
-@contextlib.contextmanager
-def count_sql(engine: AsyncEngine | None = None) -> Iterator[SqlCounter]:
-    counter = SqlCounter(engine)
-    try:
-        yield counter
-    finally:
-        counter.detach()
-
-
-@contextlib.contextmanager
-def count_sql_statements(engine: AsyncEngine | None = None) -> Iterator[SqlCounter]:
-    counter = SqlCounter(engine)
-    try:
-        yield counter
-    finally:
-        counter.detach()
-
-
-@contextlib.asynccontextmanager
-async def async_sql_counter(engine: AsyncEngine | None = None) -> Any:
-    counter = SqlCounter(engine)
-    try:
-        yield counter
-    finally:
-        counter.detach()
-
-
-def sql_counter_for(engine: AsyncEngine) -> SqlCounter:
-    return SqlCounter(engine)
-
-
-def make_sql_counter(engine: AsyncEngine) -> SqlCounter:
-    return SqlCounter(engine)
 
 
 # --- Facade builders -------------------------------------------------------
@@ -351,13 +277,6 @@ def build_partner_facade(
     return iam, partner
 
 
-build_facade = build_partner_facade
-build_cached_facade = build_partner_facade
-make_partner_facade = build_partner_facade
-make_facade = build_partner_facade
-partner_facade_builder = build_partner_facade
-
-
 def build_iam_facade(
     database_url: str | None = None,
     engine: AsyncEngine | None = None,
@@ -382,11 +301,6 @@ def build_iam_facade(
     if return_engine:
         return eng, iam
     return iam
-
-
-build_profile_facade = build_iam_facade
-make_iam_facade = build_iam_facade
-make_profile_facade = build_iam_facade
 
 
 def build_intake_facade(
@@ -421,9 +335,6 @@ def build_intake_facade(
     return facade
 
 
-make_intake_facade = build_intake_facade
-
-
 def build_care_facade(
     database_url: str | None = None,
     engine: AsyncEngine | None = None,
@@ -453,10 +364,6 @@ def build_care_facade(
     return facade
 
 
-make_care_facade = build_care_facade
-build_case_facade = build_care_facade
-
-
 def build_observability_facade(
     database_url: str | None = None,
     engine: AsyncEngine | None = None,
@@ -483,33 +390,3 @@ def build_observability_facade(
     if return_engine:
         return eng, facade
     return facade
-
-
-make_observability_facade = build_observability_facade
-build_provider_health_facade = build_observability_facade
-
-
-def build_facade_for(module: str, *args: Any, **kwargs: Any) -> Any:
-    module = (module or "").lower()
-    if module in {"partner", "directory"}:
-        return build_partner_facade(*args, **kwargs)
-    if module in {"iam", "profile"}:
-        return build_iam_facade(*args, **kwargs)
-    if module in {"intake"}:
-        return build_intake_facade(*args, **kwargs)
-    if module in {"care", "case", "cases"}:
-        return build_care_facade(*args, **kwargs)
-    if module in {"observability", "provider_health", "provider-health"}:
-        return build_observability_facade(*args, **kwargs)
-    raise ValueError(f"unknown cache facade module: {module}")
-
-
-# Null helper for teardown.
-def dispose_engine(engine: AsyncEngine) -> None:
-    import asyncio
-
-    with contextlib.suppress(RuntimeError):
-        asyncio.run(engine.dispose())
-
-
-# Re-export convenience aliases.

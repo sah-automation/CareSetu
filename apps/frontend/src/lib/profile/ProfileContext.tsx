@@ -22,11 +22,11 @@ import {
   type ReactNode,
 } from "react";
 
-import { useQuery } from "@tanstack/react-query";
 import {
+  useQuery,
+  useQueryClient,
   QueryClientContext,
   QueryClientProvider,
-  useQueryClient,
 } from "@tanstack/react-query";
 
 import { makeQueryClient } from "@/lib/queryClient";
@@ -121,7 +121,6 @@ function ProfileProviderInner({
     },
     enabled: identityId !== undefined,
     staleTime: FIVE_MINUTES,
-    retry: false,
   });
 
   useLayoutEffect(() => {
@@ -142,7 +141,7 @@ function ProfileProviderInner({
     );
   }, [profileQuery.data]);
 
-  const hydrated = identityId === undefined ? false : !profileQuery.isPending;
+  const hydrated = identityId === undefined ? false : !profileQuery.isLoading;
 
   const updateDraft = useCallback(
     (next: ProfileDraft) => {

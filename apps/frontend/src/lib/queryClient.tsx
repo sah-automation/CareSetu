@@ -6,19 +6,34 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
+import { ApiError } from "@/lib/api-errors";
+
 export interface QueryClientDefaults {
   staleTime: number;
   gcTime: number;
   refetchOnWindowFocus: boolean;
-  retry: number;
+  retry: number | ((failureCount: number, error: unknown) => boolean);
   refetchOnReconnect: boolean;
+}
+
+/**
+ * Retry once, but only for transient failures (api-standards §5): a network
+ * error or a 5xx. A 4xx is a definite answer, so retrying it only delays the
+ * error the user needs to see.
+ */
+export function retryTransient(failureCount: number, error: unknown): boolean {
+  if (failureCount >= 1) return false;
+  if (error instanceof ApiError && error.status !== undefined) {
+    return error.status >= 500;
+  }
+  return true;
 }
 
 export const QUERY_CLIENT_DEFAULTS: QueryClientDefaults = {
   staleTime: 30_000,
   gcTime: 5 * 60_000,
   refetchOnWindowFocus: false,
-  retry: 1,
+  retry: retryTransient,
   refetchOnReconnect: true,
 };
 
@@ -34,10 +49,6 @@ export function makeQueryClient(): QueryClient {
       },
     },
   });
-}
-
-export function createQueryClient(): QueryClient {
-  return makeQueryClient();
 }
 
 let browserQueryClient: QueryClient | undefined;

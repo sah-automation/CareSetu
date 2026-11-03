@@ -117,6 +117,16 @@ async function fetchMe(jwt: string): Promise<MeResponse> {
   return (await res.json()) as MeResponse;
 }
 
+class RefreshError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`POST /v1/auth/refresh returned ${status}`);
+    this.name = "RefreshError";
+    this.status = status;
+  }
+}
+
 async function fetchRefresh(refreshToken: string): Promise<RefreshResponse> {
   const res = await fetch(`${API_BASE_URL}/v1/auth/refresh`, {
     method: "POST",
@@ -125,21 +135,27 @@ async function fetchRefresh(refreshToken: string): Promise<RefreshResponse> {
     credentials: "include",
   });
   if (!res.ok) {
-    throw new Error(`POST /v1/auth/refresh returned ${res.status}`);
+    throw new RefreshError(res.status);
   }
   return (await res.json()) as RefreshResponse;
 }
 
-const REFRESH_DELAYS_MS = [1000, 2000, 3000];
+const REFRESH_DELAYS_MS = [1000, 2000];
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableRefreshError(err: unknown): boolean {
+  return !(err instanceof RefreshError && err.status < 500);
 }
 
 /**
  * Attempt a token refresh with bounded retries. The refresh token is rotated on
  * success and returned to the caller for persistence; on exhaustion the last
  * error is rethrown so callers can decide how to handle the failed session.
+ *
+ * api-standards §5: retry only on network failures and 5xx, never on 4xx.
  */
 export async function attemptRefresh(
   refreshToken: string,
@@ -150,6 +166,9 @@ export async function attemptRefresh(
       return await fetchRefresh(refreshToken);
     } catch (err) {
       lastError = err;
+      if (!isRetryableRefreshError(err) || attempt === 3) {
+        break;
+      }
       await delay(REFRESH_DELAYS_MS[attempt - 1]);
     }
   }
@@ -210,6 +229,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch (refreshErr) {
           if (cancelled) return;
 
+          console.warn("[auth] session validation refresh failed", refreshErr);
           clearSession();
           clearCookie("caresetu.access_jwt");
           router.replace("/login");
@@ -274,8 +294,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem("caresetu.refresh_token", refreshed.refresh_token);
         if (cancelled) return;
         schedule();
-      } catch {
-        // Benign: next request handles refresh; keep timer cleared.
+      } catch (err) {
+        if (cancelled) return;
+
+        console.warn("[auth] proactive refresh failed, scheduling retry", err);
+        // Retry once with backoff before force logout
+        clearTimer();
+        refreshTimerRef.current = setTimeout(() => {
+          void tickRetry();
+        }, 5_000);
+      }
+    };
+
+    const tickRetry = async (): Promise<void> => {
+      if (cancelled) return;
+      const session = readSession();
+      if (!session) {
+        clearTimer();
+        return;
+      }
+      try {
+        const refreshed = await attemptRefresh(session.refresh_token);
+        if (cancelled) return;
+        const updated: StoredSession = {
+          ...session,
+          jwt: refreshed.jwt,
+          refresh_token: refreshed.refresh_token,
+        };
+        localStorage.setItem("caresetu.session", JSON.stringify(updated));
+        localStorage.setItem("caresetu.access_jwt", refreshed.jwt);
+        localStorage.setItem("caresetu.refresh_token", refreshed.refresh_token);
+        if (cancelled) return;
+        schedule();
+      } catch (err) {
+        if (cancelled) return;
+
+        console.warn(
+          "[auth] proactive refresh retry failed, forcing logout",
+          err,
+        );
+        clearTimer();
+        clearSession();
+        clearCookie("caresetu.access_jwt");
+        setUser(null);
+        setSelectedRole(null);
+        router.replace("/login");
       }
     };
 
@@ -285,7 +348,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
       clearTimer();
     };
-  }, [user]);
+  }, [user, router]);
 
   function switchRole(role: string) {
     setSelectedRole(role);
@@ -296,9 +359,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // persists a fresh login session. Deliberately reuses the same /v1/me (+
   // refresh retry) resolution path as mount validation instead of decoding the
   // stored JWT client-side, so identity and roles are sourced the same way
-  // across reloads and fresh logins. Best-effort: a resolution failure leaves
-  // state untouched and never force-logs-out a session the user just minted -
-  // the patient profile Finish invariant surfaces the unresolved window.
+  // across reloads and fresh logins. On refresh exhaustion the session is
+  // cleared and the user is sent to /login (#837): a token that cannot be
+  // refreshed must not leave the app half-authenticated.
   const resumeSession = useCallback(async (): Promise<void> => {
     const session: StoredSession | null = readSession();
     if (!session) return;
@@ -322,10 +385,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const me = await fetchMe(refreshed.jwt);
         applyMe(me, setUser, setSelectedRole);
       } catch (refreshErr) {
-        // Best-effort: leave state untouched for a just-minted session.
+        console.warn("[auth] session resume refresh failed", refreshErr);
+        clearSession();
+        clearCookie("caresetu.access_jwt");
+        setUser(null);
+        setSelectedRole(null);
+        router.replace("/login");
       }
     }
-  }, []);
+  }, [router]);
 
   function logout() {
     clearSession();

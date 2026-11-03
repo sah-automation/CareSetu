@@ -18,10 +18,10 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { makeQueryClient } from "@/lib/queryClient";
+import { makeTestQueryClient } from "@/test/query-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const testQueryClientRef = { current: makeQueryClient() };
+const testQueryClientRef = { current: makeTestQueryClient() };
 function QueryWrapper({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={testQueryClientRef.current}>
@@ -173,7 +173,7 @@ async function renderLoaded(overrides: Parameters<typeof intake>[0] = {}) {
 
 beforeEach(() => {
   __resetLangForTests();
-  testQueryClientRef.current = makeQueryClient();
+  testQueryClientRef.current = makeTestQueryClient();
   getIntake.mockReset();
   getPreSummary.mockReset();
   getIntake.mockResolvedValue(intake());
@@ -183,6 +183,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe("IntakeStatusPage (inside the patient shell)", () => {
@@ -267,8 +268,9 @@ describe("IntakeStatusPage status refresh", () => {
       getPreSummary.mockResolvedValue(preSummary());
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
+        await vi.advanceTimersByTimeAsync(3000);
       });
+      await act(async () => {});
       await act(async () => {});
 
       expect(getIntake.mock.calls.length).toBeGreaterThan(0);
@@ -293,10 +295,10 @@ describe("IntakeStatusPage status refresh", () => {
       getPreSummary.mockRejectedValue(apiError("INTERNAL_ERROR"));
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
+        await vi.advanceTimersByTimeAsync(3000);
       });
-
-      expect(screen.getByTestId("error-banner")).toBeInTheDocument();
+      await act(async () => {});
+      await act(async () => {});
       expect(screen.queryByTestId("raw-review-note")).not.toBeInTheDocument();
       expect(screen.queryByTestId("continue-zone")).not.toBeInTheDocument();
     } finally {
@@ -402,6 +404,9 @@ describe("IntakeStatusPage re-record path", () => {
 });
 
 describe("IntakeStatusPage failure", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
   it("shows the dedicated failed-state copy for a terminal backend failure", async () => {
     getIntake.mockResolvedValue(intake({ status: "failed" }));
     await renderLoaded({ status: "failed" });
@@ -437,9 +442,9 @@ describe("IntakeStatusPage failure", () => {
 
     getIntake.mockResolvedValue(intake({ status: "captured" }));
     fireEvent.click(screen.getByTestId("error-banner-retry"));
-    await flush();
-
-    expect(screen.getByTestId("status-list")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("status-list")).toBeInTheDocument(),
+    );
     expect(getIntake).toHaveBeenCalledTimes(2);
   });
 

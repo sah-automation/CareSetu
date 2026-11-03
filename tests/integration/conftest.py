@@ -250,7 +250,7 @@ async def engine(database_url: str, clean_tables: None) -> AsyncIterator[AsyncEn
 
 
 @pytest.fixture
-def fake_redis():
+def fake_redis() -> Iterator[FakeRedis]:
     import app.redis as shared_redis
 
     previous = shared_redis._REDIS_CLIENT
@@ -261,7 +261,7 @@ def fake_redis():
 
 
 @pytest.fixture
-def sql_counter(engine):
+def sql_counter(engine: AsyncEngine) -> Iterator[SqlCounter]:
     counter = SqlCounter(engine)
     yield counter
     counter.detach()

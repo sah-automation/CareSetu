@@ -137,7 +137,6 @@ export function DirectoryBrowser({
       }
     },
     staleTime: 60_000,
-    retry: false,
   });
 
   const view: DirectorySearchView | null = data ?? null;

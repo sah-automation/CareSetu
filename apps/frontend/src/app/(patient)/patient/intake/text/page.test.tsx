@@ -17,6 +17,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import TextIntakePage, { TEXT_INTAKE_CAP } from "./page";
@@ -31,6 +32,7 @@ import {
   uploadIntakeMedia,
 } from "@/lib/intake/api";
 import { openMicrophoneRecorder } from "@/lib/intake/recorder";
+import { makeTestQueryClient } from "@/test/query-client";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn() }),
@@ -85,6 +87,14 @@ const upload = vi.mocked(uploadIntakeMedia);
 const submit = vi.mocked(submitIntake);
 const pollIntake = vi.mocked(fetchIntake);
 const composerOpened = vi.mocked(recordComposerOpened);
+
+function renderWithQuery(ui: React.ReactNode) {
+  return render(
+    <QueryClientProvider client={makeTestQueryClient()}>
+      {ui}
+    </QueryClientProvider>,
+  );
+}
 
 function fakeRecorder() {
   return {
@@ -178,7 +188,7 @@ function typeSymptoms(value: string) {
 
 /** Record a voice note (attach -> stop) ending in the preview stage. */
 async function recordNote(seconds: number) {
-  render(<TextIntakePage />);
+  renderWithQuery(<TextIntakePage />);
   const recorder = fakeRecorder();
   openMic.mockResolvedValue(recorder);
   fireEvent.click(screen.getByTestId("note-attach"));
@@ -191,7 +201,7 @@ async function recordNote(seconds: number) {
 
 /** Type symptoms and render the page already in the text-filled idle state. */
 async function setupFilledText(value = "fever since two days") {
-  render(<TextIntakePage />);
+  renderWithQuery(<TextIntakePage />);
   typeSymptoms(value);
 }
 
@@ -201,7 +211,7 @@ function expectVisible(testId: string) {
 
 describe("TextIntakePage (inside the patient shell)", () => {
   it("mounts within the patient AppShell", () => {
-    render(
+    renderWithQuery(
       <PatientGroupLayout>
         <TextIntakePage />
       </PatientGroupLayout>,
@@ -210,7 +220,7 @@ describe("TextIntakePage (inside the patient shell)", () => {
   });
 
   it("renders the idle state: textarea, live counter, bilingual hint, disabled submit", () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     const input = screen.getByTestId("textarea");
     expect(input).toBeInTheDocument();
     expect(input).not.toBeDisabled();
@@ -226,7 +236,7 @@ describe("TextIntakePage (inside the patient shell)", () => {
 
 describe("TextIntakePage funnel entry (B4e, #721)", () => {
   it("reports the composer opened once on mount, before anything is typed", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     await flush();
 
     expect(composerOpened).toHaveBeenCalledTimes(1);
@@ -234,7 +244,7 @@ describe("TextIntakePage funnel entry (B4e, #721)", () => {
 
   it("survives a failed entry ping without showing the patient an error", async () => {
     composerOpened.mockRejectedValue(new Error("analytics down"));
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     await flush();
 
     expect(composerOpened).toHaveBeenCalledTimes(1);
@@ -244,7 +254,7 @@ describe("TextIntakePage funnel entry (B4e, #721)", () => {
   });
 
   it("still submits the intake after reporting the entry", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     await flush();
     typeSymptoms("fever since two days");
     submit.mockResolvedValue({ intake_id: 42, status: "captured" });
@@ -261,7 +271,7 @@ describe("TextIntakePage funnel entry (B4e, #721)", () => {
 
 describe("TextIntakePage textarea cap and enablement", () => {
   it("enables submit once symptoms are typed and hides the empty hint", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     expect(screen.getByTestId("btn-submit")).toBeDisabled();
 
     typeSymptoms("fever");
@@ -275,7 +285,7 @@ describe("TextIntakePage textarea cap and enablement", () => {
   });
 
   it("caps typing at 2000 characters in page and reflects it in the counter", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     const overflow = "f".repeat(TEXT_INTAKE_CAP + 50);
     typeSymptoms(overflow);
     await flush();
@@ -290,7 +300,7 @@ describe("TextIntakePage textarea cap and enablement", () => {
   });
 
   it("ignores a submit attempt with whitespace-only text", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     typeSymptoms("   ");
     await flush();
 
@@ -303,7 +313,7 @@ describe("TextIntakePage textarea cap and enablement", () => {
 
 describe("TextIntakePage optional voice-note attach (doctor-only)", () => {
   it("attach -> recording tips the live duration -> stop -> removable preview", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     const recorder = fakeRecorder();
     openMic.mockResolvedValue(recorder);
 
@@ -334,7 +344,7 @@ describe("TextIntakePage optional voice-note attach (doctor-only)", () => {
   });
 
   it("auto-stops the note at the 180s cap into preview with 03:00 shown", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     const recorder = fakeRecorder();
     openMic.mockResolvedValue(recorder);
     fireEvent.click(screen.getByTestId("note-attach"));
@@ -354,7 +364,7 @@ describe("TextIntakePage optional voice-note attach (doctor-only)", () => {
   });
 
   it("does not gate the text submit: submit stays disabled only while recording", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     const recorder = fakeRecorder();
     openMic.mockResolvedValue(recorder);
 
@@ -478,7 +488,7 @@ describe("TextIntakePage submit -> Structuring pending -> pre-summary link", () 
 
 describe("TextIntakePage failure paths (no silent loss, non-blocking note)", () => {
   it("shows the mic-unavailable banner and lets the patient retry the attach", async () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     openMic.mockRejectedValue(new TypeError("getUserMedia denied"));
 
     fireEvent.click(screen.getByTestId("note-attach"));
@@ -645,7 +655,7 @@ describe("TextIntakePage failure paths (no silent loss, non-blocking note)", () 
 
 describe("TextIntakePage bilingual EN/HI (REQ-006)", () => {
   it("starts in English with the correct EN strings", () => {
-    render(<TextIntakePage />);
+    renderWithQuery(<TextIntakePage />);
     expect(
       screen.getByRole("heading", { name: text.title }),
     ).toBeInTheDocument();
@@ -655,7 +665,7 @@ describe("TextIntakePage bilingual EN/HI (REQ-006)", () => {
   });
 
   it("switches all visible copy to Hindi when the locale flips", async () => {
-    render(<LangFlipHost />);
+    renderWithQuery(<LangFlipHost />);
     fireEvent.click(screen.getByText("flip-lang"));
     await flush();
 

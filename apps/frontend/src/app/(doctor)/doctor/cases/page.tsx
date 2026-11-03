@@ -89,7 +89,6 @@ export default function DoctorCasesIndexPage() {
     queryFn: () => listDoctorCases(),
     enabled: doctorId !== undefined,
     staleTime: DOCTOR_CASES_STALE_TIME,
-    retry: false,
   });
 
   const cases: DoctorCaseRow[] = casesQuery.data?.items ?? [];

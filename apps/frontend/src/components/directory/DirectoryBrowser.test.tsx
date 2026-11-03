@@ -14,7 +14,7 @@ import {
 import { useSyncExternalStore } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { makeQueryClient } from "@/lib/queryClient";
+import { makeTestQueryClient } from "@/test/query-client";
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import {
@@ -111,7 +111,7 @@ function LangSwitcher() {
   );
 }
 
-const testQueryClientRef = { current: makeQueryClient() };
+const testQueryClientRef = { current: makeTestQueryClient() };
 function QueryWrapper({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={testQueryClientRef.current}>
@@ -123,7 +123,7 @@ const render: typeof rtlRender = (ui, options) =>
   rtlRender(ui, { wrapper: QueryWrapper, ...options });
 
 beforeEach(() => {
-  testQueryClientRef.current = makeQueryClient();
+  testQueryClientRef.current = makeTestQueryClient();
   navigation.setParams(new URLSearchParams());
   mockReplace.mockClear();
   searchDirectory.mockReset();

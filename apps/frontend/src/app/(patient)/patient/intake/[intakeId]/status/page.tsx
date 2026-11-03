@@ -12,7 +12,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -115,22 +115,20 @@ export default function IntakeStatusPage() {
 
   const queryClient = useQueryClient();
 
+  const pollCountRef = useRef(0);
+
   const intakeQuery = useQuery({
     queryKey: intakeStatusQueryKey(identityId, intakeId),
     queryFn: () => fetchIntake(intakeId),
     staleTime: TWO_MINUTES,
-    retry: false,
-    refetchInterval: (query: {
-      state: { data?: unknown; dataUpdateCount: number };
-    }) => {
+    refetchInterval: (query) => {
       const data = query.state.data as IntakeDetailView | undefined;
-      if (data?.status !== "structuring") return false;
-      const updates =
-        (query.state as { dataUpdateCount: number; errorUpdateCount: number })
-          .dataUpdateCount +
-        (query.state as { dataUpdateCount: number; errorUpdateCount: number })
-          .errorUpdateCount;
-      if (updates >= 1 + MAX_INTAKE_POLLS) return false;
+      if (data?.status !== "structuring") {
+        pollCountRef.current = 0;
+        return false;
+      }
+      if (pollCountRef.current >= MAX_INTAKE_POLLS) return false;
+      pollCountRef.current += 1;
       return INTAKE_POLL_INTERVAL_MS;
     },
   });
@@ -149,7 +147,6 @@ export default function IntakeStatusPage() {
     },
     enabled: intake?.status === "ready_for_review",
     staleTime: TWO_MINUTES,
-    retry: false,
   });
 
   const preSummary = preSummaryQuery.data ?? null;

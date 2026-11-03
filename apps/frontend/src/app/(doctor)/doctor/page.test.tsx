@@ -32,7 +32,7 @@ import type { ReactNode } from "react";
 import DoctorDashboardPage from "./page";
 import { ApiError } from "@/lib/api-errors";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { makeQueryClient } from "@/lib/queryClient";
+import { makeTestQueryClient } from "@/test/query-client";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import {
@@ -99,7 +99,7 @@ const getCases = vi.mocked(listDoctorCases);
 const getProfile = vi.mocked(fetchDoctorProfile);
 const getPatients = vi.mocked(listDoctorPatients);
 
-const testQueryClientRef = { current: makeQueryClient() };
+const testQueryClientRef = { current: makeTestQueryClient() };
 function QueryWrapper({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={testQueryClientRef.current}>
@@ -209,7 +209,7 @@ function LangFlipHost() {
 }
 
 beforeEach(() => {
-  testQueryClientRef.current = makeQueryClient();
+  testQueryClientRef.current = makeTestQueryClient();
   resolveLoaded();
 });
 

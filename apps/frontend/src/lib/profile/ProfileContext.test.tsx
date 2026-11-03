@@ -12,6 +12,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProfileProvider, useProfile } from "./ProfileContext";
@@ -19,6 +20,7 @@ import type { ProfileReadResult, StoredPatientProfile } from "./api";
 import { initialDraft, saveDraft } from "./profileState";
 import { ProfileGate } from "@/components/patient/profile/ProfileGate";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
+import { makeTestQueryClient } from "@/test/query-client";
 
 const state = vi.hoisted<{
   getProfile: ReturnType<typeof vi.fn>;
@@ -123,7 +125,11 @@ afterEach(() => {
 });
 
 async function renderProvider(ui: React.ReactNode) {
-  const view = render(<ProfileProvider>{ui}</ProfileProvider>);
+  const view = render(
+    <QueryClientProvider client={makeTestQueryClient()}>
+      <ProfileProvider>{ui}</ProfileProvider>
+    </QueryClientProvider>,
+  );
   await waitFor(() =>
     expect(screen.getByTestId("probe-hydrated").textContent).toBe("true"),
   );
@@ -145,6 +151,13 @@ describe("ProfileProvider hydration (#488 AC 2)", () => {
           <Probe />
         </div>
       </ProfileProvider>,
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={makeTestQueryClient()}>
+            {children}
+          </QueryClientProvider>
+        ),
+      },
     );
 
     // The patient types before the GET settles; the reference-guard in the
@@ -272,6 +285,13 @@ describe("ProfileProvider never-silent Finish (#496)", () => {
       <ProfileProvider>
         <Probe />
       </ProfileProvider>,
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={makeTestQueryClient()}>
+            {children}
+          </QueryClientProvider>
+        ),
+      },
     );
 
     fireEvent.click(screen.getByTestId("probe-set-draft"));
@@ -359,11 +379,13 @@ describe("ProfileProvider identity isolation (#488 AC 5)", () => {
     state.getProfile.mockResolvedValue({ set: false, profile: null });
 
     const tree = (
-      <ProfileProvider>
-        <div>
-          <Probe />
-        </div>
-      </ProfileProvider>
+      <QueryClientProvider client={makeTestQueryClient()}>
+        <ProfileProvider>
+          <div>
+            <Probe />
+          </div>
+        </ProfileProvider>
+      </QueryClientProvider>
     );
     rerender(tree);
 

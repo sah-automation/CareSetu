@@ -14,7 +14,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { makeQueryClient } from "@/lib/queryClient";
+import { makeTestQueryClient } from "@/test/query-client";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -71,7 +71,7 @@ const t = STRINGS.en.findCare;
 const search = vi.mocked(state.searchDirectory);
 const replace = vi.mocked(state.mockReplace);
 
-const testQueryClientRef = { current: makeQueryClient() };
+const testQueryClientRef = { current: makeTestQueryClient() };
 function QueryWrapper({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={testQueryClientRef.current}>
@@ -111,7 +111,7 @@ async function renderPage() {
 
 beforeEach(() => {
   __resetLangForTests();
-  testQueryClientRef.current = makeQueryClient();
+  testQueryClientRef.current = makeTestQueryClient();
   state.params = new URLSearchParams();
   state.profileArea = null;
   state.searchDirectory.mockReset();
