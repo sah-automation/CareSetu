@@ -1196,7 +1196,7 @@ class Settings:
 def _env_bool(name: str, default: bool) -> bool:
     """Parse a boolean environment variable, falling back to ``default``."""
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in _TRUE_VALUES
 
@@ -1204,17 +1204,17 @@ def _env_bool(name: str, default: bool) -> bool:
 def _env_float(name: str, default: float) -> float:
     """Parse a float environment variable, falling back to ``default``."""
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
-    return float(raw)
+    return float(raw.strip())
 
 
 def _env_int(name: str, default: int) -> int:
     """Parse an integer environment variable, falling back to ``default``."""
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
-    return int(raw)
+    return int(raw.strip())
 
 
 def _env_decimal(name: str, default: Decimal) -> Decimal:
@@ -1225,7 +1225,7 @@ def _env_decimal(name: str, default: Decimal) -> Decimal:
     binary approximation into a comparison the operator reads as exact.
     """
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
     try:
         return Decimal(raw.strip())
