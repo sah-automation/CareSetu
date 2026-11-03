@@ -463,7 +463,15 @@ class Settings:
     # the Render web service's env vars (free compute covers web services
     # only - background workers require a paid instance).
     dispatcher_in_process_enabled: bool = False
-    # ARCH-P1 #824: process identity, worker count, and reserved scale. The
+    # ARCH-P3 #852: AI async processing. Master switch; defaults off so the
+    # pre-ARCH-P3 behaviour is unchanged. Opt-in only.
+    ai_async_enabled: bool = False
+    # ARCH-P3 #852: when true, the worker process hosts a dedicated AI loop
+    # that claims only the two slow pipeline trigger events. Requires
+    # AI_ASYNC_ENABLED.
+    ai_queue_worker_enabled: bool = (
+        False  # ARCH-P1 #824: process identity, worker count, and reserved scale. The
+    )
     # dispatcher, sharding, and multi-region settings are present and validated
     # here but stay inert in this phase (no behaviour change).
     instance_id: str = ""
@@ -1178,6 +1186,26 @@ class Settings:
             raise ValueError(
                 "region is required when multi-region or cross-region replication is enabled"
             )
+        # ARCH-P3 #852: AI async fail-closed cross-field validation.
+        if self.ai_async_enabled:
+            _dispatcher_mode = self.dispatcher_mode.strip().lower()
+            if _dispatcher_mode not in {"standalone", "coordinated"}:
+                raise ValueError(
+                    "AI_ASYNC_ENABLED=true (ai_async_enabled) requires "
+                    "DISPATCHER_MODE (dispatcher_mode) of 'standalone' or "
+                    "'coordinated'"
+                )
+            if self.dispatcher_in_process_enabled:
+                raise ValueError(
+                    "AI_ASYNC_ENABLED=true (ai_async_enabled) requires "
+                    "DISPATCHER_IN_PROCESS_ENABLED=false "
+                    "(dispatcher_in_process_enabled must be off)"
+                )
+        if self.ai_queue_worker_enabled and not self.ai_async_enabled:
+            raise ValueError(
+                "AI_QUEUE_WORKER_ENABLED=true (ai_queue_worker_enabled) "
+                "requires AI_ASYNC_ENABLED=true (ai_async_enabled)"
+            )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -1437,6 +1465,8 @@ def get_settings() -> Settings:
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
         dispatcher_in_process_enabled=_env_bool("DISPATCHER_IN_PROCESS_ENABLED", False),
+        ai_async_enabled=_env_bool("AI_ASYNC_ENABLED", False),
+        ai_queue_worker_enabled=_env_bool("AI_QUEUE_WORKER_ENABLED", False),
         instance_id=os.environ.get("INSTANCE_ID", ""),
         uvicorn_workers=_env_int("UVICORN_WORKERS", DEFAULT_UVICORN_WORKERS),
         dispatcher_mode=os.environ.get("DISPATCHER_MODE", DEFAULT_DISPATCHER_MODE),
