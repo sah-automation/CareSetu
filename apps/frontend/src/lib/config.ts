@@ -8,7 +8,7 @@ export const STATUS_POLL_INTERVAL_MS =
 
 /** Canonical access-token lifetime (seconds); must match the backend default. */
 export const ACCESS_TOKEN_TTL_SECONDS =
-  Number(process.env.NEXT_PUBLIC_ACCESS_TOKEN_TTL_SECONDS) || 7200;
+  Number(process.env.NEXT_PUBLIC_ACCESS_TOKEN_TTL_SECONDS) || 900;
 
 /** Fraction of the access-token lifetime at which a proactive refresh runs. */
 export const PROACTIVE_REFRESH_RATIO =

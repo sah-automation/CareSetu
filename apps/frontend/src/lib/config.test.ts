@@ -18,11 +18,11 @@ describe("config", () => {
   });
 
   describe("ACCESS_TOKEN_TTL_SECONDS", () => {
-    it("defaults to 7200 when the env var is unset", async () => {
+    it("defaults to 900 when the env var is unset", async () => {
       vi.stubEnv("NEXT_PUBLIC_ACCESS_TOKEN_TTL_SECONDS", undefined);
       vi.resetModules();
       const { ACCESS_TOKEN_TTL_SECONDS } = await import("./config");
-      expect(ACCESS_TOKEN_TTL_SECONDS).toBe(7200);
+      expect(ACCESS_TOKEN_TTL_SECONDS).toBe(900);
     });
   });
 

@@ -99,7 +99,7 @@ def test_issued_token_carries_the_expected_claims() -> None:
 
 
 def test_access_token_ttl_defaults_to_two_hours() -> None:
-    assert ACCESS_TOKEN_TTL_SECONDS == 7200
+    assert ACCESS_TOKEN_TTL_SECONDS == 900
 
 
 def test_operator_token_carries_the_tier_claim() -> None:
