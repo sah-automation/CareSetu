@@ -425,7 +425,7 @@ class Settings:
     # wrapper delegates directly to its inner callable and no breaker opens.
     circuit_breaker_enabled: bool = True
     # Module router flags (ARCH-P1 #823): gate HTTP router inclusion at the
-    # composition root (app/main.py). Only the six ACTIVE flags below map to a
+    # composition root (app/main.py). Only the seven ACTIVE flags below map to a
     # real HTTP router today; the four RESERVED flags are accepted and validated
     # but have no matching HTTP router - they are inert and have no runtime
     # effect (no route inclusion, no outbox/worker/facade gating).
@@ -433,6 +433,7 @@ class Settings:
     module_intake_enabled: bool = True
     module_care_enabled: bool = True
     module_partner_enabled: bool = True
+    module_doctor_enabled: bool = True
     module_audit_enabled: bool = True
     module_observability_enabled: bool = True
     module_ops_enabled: bool = True
@@ -1510,6 +1511,7 @@ def get_settings() -> Settings:
         module_intake_enabled=_env_bool("MODULE_INTAKE_ENABLED", True),
         module_care_enabled=_env_bool("MODULE_CARE_ENABLED", True),
         module_partner_enabled=_env_bool("MODULE_PARTNER_ENABLED", True),
+        module_doctor_enabled=_env_bool("MODULE_DOCTOR_ENABLED", True),
         module_audit_enabled=_env_bool("MODULE_AUDIT_ENABLED", True),
         module_observability_enabled=_env_bool("MODULE_OBSERVABILITY_ENABLED", True),
         module_ops_enabled=_env_bool("MODULE_OPS_ENABLED", True),
@@ -1653,15 +1655,14 @@ def get_settings() -> Settings:
         ai_webhook_max_attempts=_env_int(
             "AI_WEBHOOK_MAX_ATTEMPTS", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
         ),
-        ai_webhook_max_retries=_env_int(
-            "AI_WEBHOOK_MAX_RETRIES", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
-        ),
+        ai_webhook_max_retries=_env_int("AI_WEBHOOK_MAX_RETRIES", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS),
         ai_job_webhook_max_attempts=_env_int(
             "AI_JOB_WEBHOOK_MAX_ATTEMPTS", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
         ),
         ai_job_webhook_max_retries=_env_int(
             "AI_JOB_WEBHOOK_MAX_RETRIES", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
-        ),        log_format=os.environ.get("LOG_FORMAT", DEFAULT_LOG_FORMAT),
+        ),
+        log_format=os.environ.get("LOG_FORMAT", DEFAULT_LOG_FORMAT),
         sentry_dsn=os.environ.get("SENTRY_DSN", ""),
         sentry_traces_sample_rate=_env_float(
             "SENTRY_TRACES_SAMPLE_RATE", DEFAULT_SENTRY_TRACES_SAMPLE_RATE

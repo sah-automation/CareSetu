@@ -22,7 +22,7 @@ from bus.envelope import Envelope
 from bus.events import EVENT_AI_JOB_COMPLETED
 from modules.intake.adapters.ai_gateway import Ext002CallError, post_with_backoff
 from modules.intake.domain.events import AiJobCompletedPayload, AiJobFailedPayload  # noqa: F401
-from modules.notify.adapters.transport import CircuitBreaker
+from modules.notify.facade import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +209,7 @@ class AiJobWebhookAdapter:
             cooldown_seconds=cooldown_float if cooldown_float > 0 else 30.0,
             enabled=True,
         )
+
     @property
     def webhook_url(self) -> str:  # compatibility alias
         return self.url

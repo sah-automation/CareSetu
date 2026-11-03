@@ -26,6 +26,7 @@ from bus.outbox_writer import write_outbox
 from modules.notify.adapters.sms import build_notify_sms_channel
 from modules.notify.adapters.transport import (
     ChannelAdapter,
+    CircuitBreaker,
     DeliveryRequest,
     NotificationDeliveryQueue,
 )
@@ -38,6 +39,10 @@ from modules.notify.outbox import NOTIFY_OUTBOX_TABLE
 from modules.notify.schema.models import notify_notifications
 
 NOTIFY_SCHEMA = "notify"
+
+# Re-export the generic transport circuit breaker so sibling modules can use it
+# without crossing the adapter boundary (ADR-0003).
+CircuitBreaker = CircuitBreaker
 
 NotificationFailedEmitter = Callable[[NotificationFailedPayload], Awaitable[None]]
 

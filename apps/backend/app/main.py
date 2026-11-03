@@ -766,12 +766,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.include_router(ops_router)
     if resolved_settings.module_partner_enabled:
         app.include_router(partner_router)
-    app.include_router(directory_router)
+        app.include_router(directory_router)
     if resolved_settings.module_intake_enabled:
         app.include_router(intake_router)
     if resolved_settings.module_care_enabled:
         app.include_router(care_router)
-    app.include_router(doctor_router)
+    if resolved_settings.module_doctor_enabled:
+        app.include_router(doctor_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)
