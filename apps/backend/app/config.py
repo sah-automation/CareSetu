@@ -207,6 +207,8 @@ DEFAULT_AI_ALLOW_DEV_PROVIDER = False
 DEFAULT_AI_ALLOW_DEMO_PROVIDER = False
 DEFAULT_AI_TIMEOUT_SECONDS = 30.0
 DEFAULT_AI_MAX_RETRIES = 3
+DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS = 10.0
+DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS = 3
 DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # NFR-001 freemium AI spend cap (PHASE-7 T06/T11): the monthly budget in paise
@@ -622,6 +624,21 @@ class Settings:
     ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
     ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
     ai_fallback_model: str = DEFAULT_AI_FALLBACK_MODEL
+    # ARCH-P3 #853: optional AI job completion webhook (MOD-005 AI egress seam).
+    # When the URL is empty the feature is entirely disabled (no handler
+    # registered, no egress). When it is set a signing secret is required.
+    ai_webhook_url: str = ""
+    ai_webhook_secret: str = ""
+    ai_webhook_signing_secret: str = ""
+    ai_job_webhook_url: str = ""
+    ai_job_webhook_secret: str = ""
+    ai_job_webhook_signing_secret: str = ""
+    ai_webhook_timeout_seconds: float = DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS
+    ai_job_webhook_timeout_seconds: float = DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS
+    ai_webhook_max_attempts: int = DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+    ai_webhook_max_retries: int = DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+    ai_job_webhook_max_attempts: int = DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+    ai_job_webhook_max_retries: int = DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
     # Observability gates (PHASE-14A A5, #693; plan-phase14 §4): all additive
     # and disabled by default, so boot and tests are unchanged until a gate is
     # set. ``log_format`` selects the structlog renderer (A1); ``sentry_*``
@@ -932,6 +949,50 @@ class Settings:
             raise ValueError("ai_circuit_breaker_threshold must be positive")
         if self.ai_monthly_budget_paise <= 0:
             raise ValueError("ai_monthly_budget_paise must be positive")
+        # ARCH-P3 #853: when a webhook URL is set a signing secret is required;
+        # timeout / attempt counts must be positive. Aliases are unioned so any
+        # supported name enables the feature.
+        _wh_url = self.ai_webhook_url or self.ai_job_webhook_url
+        _wh_secret = (
+            self.ai_webhook_secret
+            or self.ai_webhook_signing_secret
+            or self.ai_job_webhook_secret
+            or self.ai_job_webhook_signing_secret
+        )
+        if _wh_url.strip() and not _wh_secret.strip():
+            raise ValueError(
+                "AI_WEBHOOK_URL (or AI_JOB_WEBHOOK_URL) is set but the signing "
+                "secret (AI_WEBHOOK_SECRET / AI_WEBHOOK_SIGNING_SECRET) is missing"
+            )
+        if self.ai_webhook_timeout_seconds <= 0 or self.ai_job_webhook_timeout_seconds <= 0:
+            raise ValueError("ai_webhook_timeout_seconds must be positive")
+        if (
+            self.ai_webhook_max_attempts <= 0
+            or self.ai_webhook_max_retries <= 0
+            or self.ai_job_webhook_max_attempts <= 0
+            or self.ai_job_webhook_max_retries <= 0
+        ):
+            raise ValueError("ai_webhook_max_attempts must be positive")
+        # Union alternate field names into the canonical slots so any supported
+        # spelling (url/secret/timeout/attempts) drives the feature.
+        if not self.ai_webhook_url and self.ai_job_webhook_url:
+            object.__setattr__(self, "ai_webhook_url", self.ai_job_webhook_url)
+        if not self.ai_webhook_secret:
+            object.__setattr__(
+                self,
+                "ai_webhook_secret",
+                self.ai_webhook_signing_secret
+                or self.ai_job_webhook_secret
+                or self.ai_job_webhook_signing_secret,
+            )
+        if self.ai_job_webhook_timeout_seconds != DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS:
+            object.__setattr__(
+                self, "ai_webhook_timeout_seconds", self.ai_job_webhook_timeout_seconds
+            )
+        if self.ai_job_webhook_max_attempts != DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS:
+            object.__setattr__(self, "ai_webhook_max_attempts", self.ai_job_webhook_max_attempts)
+        if self.ai_job_webhook_max_retries != DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS:
+            object.__setattr__(self, "ai_webhook_max_retries", self.ai_job_webhook_max_retries)
         if self.settings_cache_ttl_seconds <= 0:
             raise ValueError("settings_cache_ttl_seconds must be positive")
         if self.observability_rollup_max_dates <= 0:
@@ -1573,7 +1634,34 @@ def get_settings() -> Settings:
         ai_fallback_base_url=os.environ.get("AI_FALLBACK_BASE_URL", DEFAULT_AI_FALLBACK_BASE_URL),
         ai_fallback_api_key=os.environ.get("AI_FALLBACK_API_KEY", DEFAULT_AI_FALLBACK_API_KEY),
         ai_fallback_model=os.environ.get("AI_FALLBACK_MODEL", DEFAULT_AI_FALLBACK_MODEL),
-        log_format=os.environ.get("LOG_FORMAT", DEFAULT_LOG_FORMAT),
+        ai_webhook_url=os.environ.get("AI_WEBHOOK_URL", "")
+        or os.environ.get("AI_JOB_WEBHOOK_URL", ""),
+        ai_webhook_secret=os.environ.get("AI_WEBHOOK_SECRET", "")
+        or os.environ.get("AI_WEBHOOK_SIGNING_SECRET", "")
+        or os.environ.get("AI_JOB_WEBHOOK_SECRET", "")
+        or os.environ.get("AI_JOB_WEBHOOK_SIGNING_SECRET", ""),
+        ai_webhook_signing_secret=os.environ.get("AI_WEBHOOK_SIGNING_SECRET", ""),
+        ai_job_webhook_url=os.environ.get("AI_JOB_WEBHOOK_URL", ""),
+        ai_job_webhook_secret=os.environ.get("AI_JOB_WEBHOOK_SECRET", ""),
+        ai_job_webhook_signing_secret=os.environ.get("AI_JOB_WEBHOOK_SIGNING_SECRET", ""),
+        ai_webhook_timeout_seconds=_env_float(
+            "AI_WEBHOOK_TIMEOUT_SECONDS", DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS
+        ),
+        ai_job_webhook_timeout_seconds=_env_float(
+            "AI_JOB_WEBHOOK_TIMEOUT_SECONDS", DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS
+        ),
+        ai_webhook_max_attempts=_env_int(
+            "AI_WEBHOOK_MAX_ATTEMPTS", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+        ),
+        ai_webhook_max_retries=_env_int(
+            "AI_WEBHOOK_MAX_RETRIES", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+        ),
+        ai_job_webhook_max_attempts=_env_int(
+            "AI_JOB_WEBHOOK_MAX_ATTEMPTS", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+        ),
+        ai_job_webhook_max_retries=_env_int(
+            "AI_JOB_WEBHOOK_MAX_RETRIES", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+        ),        log_format=os.environ.get("LOG_FORMAT", DEFAULT_LOG_FORMAT),
         sentry_dsn=os.environ.get("SENTRY_DSN", ""),
         sentry_traces_sample_rate=_env_float(
             "SENTRY_TRACES_SAMPLE_RATE", DEFAULT_SENTRY_TRACES_SAMPLE_RATE
