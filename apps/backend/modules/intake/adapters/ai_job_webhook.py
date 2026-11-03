@@ -22,6 +22,7 @@ from bus.envelope import Envelope
 from bus.events import EVENT_AI_JOB_COMPLETED
 from modules.intake.adapters.ai_gateway import Ext002CallError, post_with_backoff
 from modules.intake.domain.events import AiJobCompletedPayload, AiJobFailedPayload  # noqa: F401
+from modules.notify.adapters.transport import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,26 @@ class AiJobWebhookAdapter:
         else:
             self._client = httpx.AsyncClient(timeout=self.timeout_seconds)
         self._owns_client = client is None
-
+        if settings is not None:
+            threshold = getattr(settings, "ai_circuit_breaker_threshold", 5)
+            cooldown = getattr(settings, "ai_circuit_breaker_cooldown_seconds", 30.0)
+        else:
+            threshold = kwargs.get("circuit_breaker_threshold", 5)
+            cooldown = kwargs.get("circuit_breaker_cooldown_seconds", 30.0)
+        try:
+            threshold_int = int(threshold)
+        except (TypeError, ValueError):
+            threshold_int = 5
+        try:
+            cooldown_float = float(cooldown)
+        except (TypeError, ValueError):
+            cooldown_float = 30.0
+        self._breaker = CircuitBreaker(
+            integration="ai_job_webhook",
+            threshold=threshold_int if threshold_int > 0 else 5,
+            cooldown_seconds=cooldown_float if cooldown_float > 0 else 30.0,
+            enabled=True,
+        )
     @property
     def webhook_url(self) -> str:  # compatibility alias
         return self.url
@@ -226,9 +246,14 @@ class AiJobWebhookAdapter:
         body_bytes = httpx.Request("POST", self.url, json=payload).content
         timestamp = str(self._timestamp_factory())
         headers = self._build_headers(body_bytes, timestamp)
+        if not self._breaker.allow_request():
+            raise Ext002CallError(
+                "ai job webhook circuit breaker is open; delivery refused",
+                retries_exhausted=True,
+            )
         active_client = client or self._client
         try:
-            return await post_with_backoff(
+            result = await post_with_backoff(
                 active_client,
                 self.url,
                 json_body=payload,
@@ -237,10 +262,14 @@ class AiJobWebhookAdapter:
                 sleep=self._sleep,
                 label="ai_job_webhook",
             )
-        except Ext002CallError:
+        except Ext002CallError as exc:
+            if exc.retries_exhausted:
+                self._breaker.record_failure()
             # Secret never appears in these messages (they only name provider/url).
             logger.warning("ai job webhook delivery failed for %s", envelope.event_id)
             raise
+        self._breaker.record_success()
+        return result
 
     async def handle(self, envelope: Any, *, client: httpx.AsyncClient | None = None) -> Any:
         return await self.deliver(envelope, client=client)
@@ -271,18 +300,17 @@ def build_ai_job_webhook_adapter(
     if url is None and effective_settings is not None:
         url = getattr(effective_settings, "ai_webhook_url", "")
     if secret is None and effective_settings is not None:
-        secret = (
-            getattr(effective_settings, "ai_webhook_secret", None)
-            or getattr(effective_settings, "ai_webhook_signing_secret", None)
+        secret = getattr(effective_settings, "ai_webhook_secret", None) or getattr(
+            effective_settings, "ai_webhook_signing_secret", None
         )
     extra: dict[str, Any] = {}
     if effective_settings is not None:
-            extra.setdefault(
-                "timeout_seconds", getattr(effective_settings, "ai_webhook_timeout_seconds", None)
-            )
-            extra.setdefault(
-                "max_attempts", getattr(effective_settings, "ai_webhook_max_attempts", None)
-            )
+        extra.setdefault(
+            "timeout_seconds", getattr(effective_settings, "ai_webhook_timeout_seconds", None)
+        )
+        extra.setdefault(
+            "max_attempts", getattr(effective_settings, "ai_webhook_max_attempts", None)
+        )
     extra.update(kwargs)
     return AiJobWebhookAdapter(url=url, secret=secret, settings=effective_settings, **extra)
 
