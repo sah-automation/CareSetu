@@ -469,9 +469,8 @@ class Settings:
     # ARCH-P3 #852: when true, the worker process hosts a dedicated AI loop
     # that claims only the two slow pipeline trigger events. Requires
     # AI_ASYNC_ENABLED.
-    ai_queue_worker_enabled: bool = (
-        False  # ARCH-P1 #824: process identity, worker count, and reserved scale. The
-    )
+    ai_queue_worker_enabled: bool = False
+    # ARCH-P1 #824: process identity, worker count, and reserved scale. The
     # dispatcher, sharding, and multi-region settings are present and validated
     # here but stay inert in this phase (no behaviour change).
     instance_id: str = ""
