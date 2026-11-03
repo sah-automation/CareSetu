@@ -38,6 +38,16 @@ def create_engine(settings: Settings) -> AsyncEngine:
     return create_primary_engine(settings)
 
 
+def _production_pool_enabled(settings: Settings) -> bool:
+    # Render production boots a pooled primary engine by default - opening a
+    # fresh connection per query (NullPool) made /v1/me miss the live load
+    # gate's p95 bound on the free-tier shared CPU instance (#846 CD).
+    # Operators can still force NullPool with DB_POOL_ENABLED=false.
+    if settings.db_pool_enabled:
+        return True
+    return str(getattr(settings, "app_environment", "")).strip().lower() == "production"
+
+
 def create_primary_engine(settings: Settings) -> AsyncEngine:
     """Create the primary database engine from settings.
 
@@ -46,7 +56,7 @@ def create_primary_engine(settings: Settings) -> AsyncEngine:
     free-tier deployment. When true, creates a bounded pooled engine with
     pre-ping using the configured pool settings.
     """
-    if settings.db_pool_enabled:
+    if _production_pool_enabled(settings):
         return create_async_engine(
             settings.database_url,
             pool_size=settings.db_pool_size,
@@ -72,8 +82,9 @@ def create_read_replica_engines(settings: Settings) -> list[AsyncEngine]:
         urls = tuple(part.strip() for part in urls.split(",") if part.strip())
 
     engines: list[AsyncEngine] = []
+    pool_enabled = _production_pool_enabled(settings)
     for url in urls:
-        if getattr(settings, "db_pool_enabled", False):
+        if pool_enabled:
             engines.append(
                 create_async_engine(
                     url,
