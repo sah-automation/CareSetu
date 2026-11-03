@@ -49,12 +49,21 @@ const securityHeaders = [
     : []),
 ];
 
+const cacheControlValue = "public, s-maxage=3600, stale-while-revalidate=86400";
+
+const publicCacheHeaders = [{ key: "Cache-Control", value: cacheControlValue }];
+
 const nextConfig: NextConfig = {
   headers: async () => [
     {
       source: "/(.*)",
       headers: securityHeaders,
     },
+    { source: "/", headers: publicCacheHeaders },
+    { source: "/directory", headers: publicCacheHeaders },
+    { source: "/doctors", headers: publicCacheHeaders },
+    { source: "/labs", headers: publicCacheHeaders },
+    { source: "/chemists", headers: publicCacheHeaders },
   ],
 };
 

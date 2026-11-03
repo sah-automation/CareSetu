@@ -537,8 +537,10 @@ describe("AppShell patient mobile account surface (#525)", () => {
     await waitFor(() => expect(profileApi.getProfile).toHaveBeenCalled());
     openMore();
 
-    expect(screen.getByTestId("more-account-identity")).toHaveTextContent(
-      "Asha Rao",
+    await waitFor(() =>
+      expect(screen.getByTestId("more-account-identity")).toHaveTextContent(
+        "Asha Rao",
+      ),
     );
     // The shared Avatar's name-initial fallback ("A") for the unnamed photo.
     expect(screen.getByTestId("more-account-card")).toHaveTextContent("A");

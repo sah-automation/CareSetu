@@ -12,6 +12,7 @@ protected route that proves the edge admit/deny.
 import asyncio
 import contextlib
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal, cast
@@ -20,10 +21,10 @@ from fastapi import Depends, FastAPI, File, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
 from app.config import APP_VERSION, Settings, get_settings
+from app.db import create_engine, create_read_replica_engines, dispose_engine
+from app.db.read_replica import ReadReplicaMiddleware
 from app.gateway.errors import (
     CODE_INTERNAL_SERVER_ERROR,
     MESSAGE_INTERNAL_SERVER_ERROR,
@@ -35,10 +36,11 @@ from app.gateway.http_counter import HttpCounterMiddleware
 from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
-from app.gateway.rate_limit import RateLimitMiddleware
+from app.gateway.rate_limit import RateLimitMiddleware, RedisRateLimitMiddleware
 from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
+from app.redis import close_redis_client, init_redis_client
 from modules.audit.adapters.routes import router as audit_router
 from modules.audit.facade import AuditFacade
 from modules.care.adapters.routes import (
@@ -52,7 +54,6 @@ from modules.consent.adapters.routes import (
 )
 from modules.consent.adapters.routes import router as consent_router
 from modules.consent.facade import ConsentFacade, CounterpartyDisplayNameResolver
-from modules.consent.redis_cache import close_redis_client, init_redis_client
 from modules.doctor.adapters.routes import (
     register_error_handlers as register_doctor_error_handlers,
 )
@@ -86,10 +87,6 @@ from modules.partner.adapters.routes import (
     register_error_handlers as register_partner_error_handlers,
 )
 from modules.partner.adapters.routes import router as partner_router
-from modules.partner.directory_cache import (
-    close_directory_redis_client,
-    init_directory_redis_client,
-)
 from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
 from modules.profile_media.adapters.media_store import build_profile_media_store
 from modules.profile_media.facade import ProfileMediaRetryPolicy
@@ -291,10 +288,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     worker (#30) can read the same resolved config from the app instance.
     """
     resolved_settings = settings if settings is not None else get_settings()
+    # ARCH-P1 #824: process identity. Generate a UUID when INSTANCE_ID is empty,
+    # store it on application state below, and log it once with environment and
+    # region. Never put it in responses.
+    resolved_instance_id = resolved_settings.instance_id.strip() or str(uuid.uuid4())
     # PHASE-14A A1 (#694): configure structured logging once at the composition
     # root, before any route/middleware can emit a line. Never raises - a
     # logging setup failure degrades to stdlib defaults instead of blocking boot.
     configure_logging(resolved_settings, service=SERVICE_API)
+    logger.info(
+        "process_instance_id instance_id=%s environment=%s region=%s",
+        resolved_instance_id,
+        resolved_settings.app_environment,
+        resolved_settings.region,
+    )
+    if not resolved_settings.circuit_breaker_enabled:
+        logger.warning("circuit breakers disabled (CIRCUIT_BREAKER_ENABLED=false); failing open")
+    if resolved_settings.degraded_mode:
+        logger.warning(
+            "degraded mode enabled; forcing AI gateway to mock provider and trimming cache TTLs"
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -311,10 +324,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resolved_settings.langfuse_secret_key,
             resolved_settings.langfuse_host,
         )
-        # Initialize Redis clients for the consent-status and directory-search
+        # Initialize shared Redis client for consent-status and directory-search
         # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)
-        await init_directory_redis_client(resolved_settings)
         # PHASE-14A B8 (#726): size the in-process error-capture buffer here, at the
         # WEB composition root - not only in worker/main.py. This is the process
         # that captures: a route that raises calls ``capture_server_error`` before
@@ -366,8 +378,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # (ADR-0002 §2, worker-outbox-runbook Rule 1).
                 dispatcher_stop.set()
                 await dispatcher_task
-            # Close Redis clients on shutdown
-            await close_directory_redis_client()
+            # Close shared Redis client on shutdown
             await close_redis_client()
             # PHASE-14A A4 (#696): flush queued Sentry events on shutdown so a
             # Render spin-down does not drop them; no-op when Sentry is off.
@@ -378,9 +389,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # PHASE-14A B2 (#700): force-flush buffered Langfuse AI spans on
             # shutdown; no-op when Langfuse is unconfigured.
             flush_langfuse()
+            # ARCH-P1 #813: dispose the primary database engine on shutdown.
+            # Worker, script, and test entry points keep constructing raw engines
+            # and manage their own disposal.
+            primary_engine = getattr(app.state, "primary_engine", None)
+            if primary_engine is not None:
+                await dispose_engine(primary_engine)
+            for replica_engine in getattr(app.state, "replica_engines", []) or []:
+                await dispose_engine(replica_engine)
 
     app = FastAPI(title="CareSetu API", version=APP_VERSION, lifespan=lifespan)
     app.state.settings = resolved_settings
+    app.state.instance_id = resolved_instance_id
 
     # MOD-001 (PHASE-2 T3, #54): one resolved iam facade instance behind the
     # gateway stack. The engine is lazy - no connection is opened at boot. It
@@ -390,7 +410,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # OTP read-back route (the E2E suite and the deployed demo) - the real
     # provider is gated out of dev/test by Settings, so the adapter is a
     # MockSmsAdapter whenever it is stored.
-    engine = create_async_engine(resolved_settings.database_url, poolclass=NullPool)
+    primary_engine = create_engine(resolved_settings)
+    app.state.primary_engine = primary_engine
+    replica_engines = create_read_replica_engines(resolved_settings)
+    app.state.replica_engines = replica_engines
+    from app.db.read_replica import ReadReplicaRouter
+
+    engine = ReadReplicaRouter(
+        primary=primary_engine,
+        replicas=replica_engines,
+        settings=resolved_settings,
+        enabled=resolved_settings.read_replica_enabled,
+    )
+    app.state.engine = engine
+    app.state.engine_router = engine
     sms_adapter = build_sms_adapter(resolved_settings)
     # Profile photos (#529, ADR-0020, #532): the private ``profile-media``
     # object-storage surface holds patient/doctor profile photos, encrypted at
@@ -421,6 +454,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         ),
         timeout_seconds=resolved_settings.profile_media_timeout_seconds,
+        enabled=resolved_settings.circuit_breaker_enabled,
     )
     app.state.profile_media_store = profile_media_store
     app.state.profile_media_max_upload_bytes = resolved_settings.profile_media_max_upload_bytes
@@ -435,6 +469,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         operator_mfa_lockout_seconds=resolved_settings.iam_operator_mfa_lockout_seconds,
         media_store=profile_media_store,
         photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
+        profile_cache_ttl_seconds=resolved_settings.profile_cache_ttl_seconds,
     )
     app.state.iam_facade = facade
     # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
@@ -478,6 +513,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # read) - the same settled facade the profile routes use, so a missing
         # profile degrades to the card fallback, never a crash.
         iam_facade=app.state.iam_facade,
+        intake_cache_ttl_seconds=resolved_settings.intake_cache_ttl_seconds,
     )
     # MOD-006 (PHASE-8 T06, #422): the two care facades share the settled
     # engine and the settled intake/health facades - the consult-complete
@@ -488,6 +524,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.care_console_facade = CaseConsoleFacade(
         engine=engine,
         intake_facade=app.state.intake_facade,
+        care_cases_cache_ttl_seconds=resolved_settings.care_cases_cache_ttl_seconds,
     )
     # MOD-003 (PHASE-3 T2, #211): the record facade shares the one settled
     # engine - no connection opens at boot - and is stored like the iam
@@ -518,7 +555,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # no other module's facade. Stored on state so the four operator read routes
     # read one resolved object and their tests stub it wholesale, like the audit
     # instance above.
-    app.state.observability_facade = ObservabilityFacade(engine=engine)
+    app.state.observability_facade = ObservabilityFacade(
+        engine=engine,
+        settings=resolved_settings,
+        provider_health_cache_ttl_seconds=resolved_settings.provider_health_cache_ttl_seconds,
+    )
     # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings facade
     # reads this module's own ``ops_settings`` table for database overrides and
     # falls back to the settled Settings (environment then default). Its 30s
@@ -644,13 +685,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         enabled=resolved_settings.gateway_jwt_verify_enabled,
         validate_token=facade.validate_token,
     )
+    # ARCH-P1 #815: selectable rate-limit backend. The middleware keeps its
+    # in-memory constructor behaviour; under settings.rate_limit_backend="redis"
+    # the shared Redis client is resolved lazily via the gateway accessor so
+    # the middleware stack built at app construction still sees the client once
+    # the lifespan has initialised it.
+    _RateLimitMiddleware = (
+        RedisRateLimitMiddleware
+        if resolved_settings.rate_limit_backend == "redis"
+        else RateLimitMiddleware
+    )
     app.add_middleware(
-        RateLimitMiddleware,
+        _RateLimitMiddleware,
         enabled=resolved_settings.gateway_rate_limit_enabled,
         max_requests=resolved_settings.gateway_rate_limit_auth_max_requests,
         window_seconds=resolved_settings.gateway_rate_limit_auth_window_seconds,
         intake_max_requests=resolved_settings.gateway_rate_limit_intake_max_requests,
         intake_window_seconds=resolved_settings.gateway_rate_limit_intake_window_seconds,
+        rate_limit_backend=resolved_settings.rate_limit_backend,
+        redis_rate_limit_key_prefix=resolved_settings.redis_rate_limit_key_prefix,
     )
     # CORS for the local-dev PWA origin (added so the allow-origin header
     # reaches every response, including 401/403 from the gateway stack). The
@@ -677,6 +730,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Registered last so it wraps the trace middleware's responses too; the
     # one path it does not cover is a 500 regenerated by Starlette's
     # ServerErrorMiddleware, which sits outside all user middleware.
+    app.add_middleware(
+        ReadReplicaMiddleware,
+        settings=resolved_settings,
+        primary_engine=primary_engine,
+        replica_engines=replica_engines,
+        enabled=resolved_settings.read_replica_enabled,
+        router=engine,
+    )
     app.add_middleware(SecurityHeadersMiddleware)
     # PHASE-14A B9 (#727): count every ANSWERED request into the in-process
     # per-minute bucket the worker folds into `observability_http_minute`. The
@@ -696,14 +757,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(iam_router)
     app.include_router(health_router)
     app.include_router(consent_router)
-    app.include_router(audit_router)
-    app.include_router(observability_router)
-    app.include_router(csp_collector_router)
-    app.include_router(ops_router)
-    app.include_router(partner_router)
+    if resolved_settings.module_audit_enabled:
+        app.include_router(audit_router)
+    if resolved_settings.module_observability_enabled:
+        app.include_router(observability_router)
+        app.include_router(csp_collector_router)
+    if resolved_settings.module_ops_enabled:
+        app.include_router(ops_router)
+    if resolved_settings.module_partner_enabled:
+        app.include_router(partner_router)
     app.include_router(directory_router)
-    app.include_router(intake_router)
-    app.include_router(care_router)
+    if resolved_settings.module_intake_enabled:
+        app.include_router(intake_router)
+    if resolved_settings.module_care_enabled:
+        app.include_router(care_router)
     app.include_router(doctor_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
@@ -1063,7 +1130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         )
 
-        engine = create_async_engine(settings.database_url, poolclass=NullPool)
+        engine = create_engine(settings)
         try:
             async with engine.begin() as connection:
                 await write_outbox(connection, "health", HEALTH_OUTBOX_TABLE, report_envelope)

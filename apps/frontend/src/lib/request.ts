@@ -29,7 +29,7 @@ async function authedResponse(
   }
 
   if (!response.ok) {
-    throw new ApiError(await parseErrorEnvelope(response));
+    throw new ApiError(await parseErrorEnvelope(response), response.status);
   }
 
   return response;

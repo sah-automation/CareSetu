@@ -8,9 +8,10 @@
 // offers a continue affordance into consultation booking (Phase 8 boundary);
 // a ready intake with no pre-summary degrades to a raw-review note instead
 // of the dead-end affordance (#390). Bilingual EN/HI per REQ-006.
+// ARCH-P2 #835: intake detail and pre-summary read through useQuery.
 
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
@@ -19,6 +20,8 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { useAuth } from "@/lib/auth/AuthContext";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchIntake,
   fetchPreSummary,
@@ -29,7 +32,6 @@ import {
 import { INTAKE_POLL_INTERVAL_MS, MAX_INTAKE_POLLS } from "@/lib/intake/voice";
 import { cn } from "@/lib/utils";
 
-type LoadStage = "loading" | "ready" | "error";
 type BannerState = {
   title: string;
   body: string;
@@ -64,6 +66,8 @@ const STATUS_STEPS: {
   },
 ];
 
+const TWO_MINUTES = 2 * 60 * 1000;
+
 /**
  * Map a backend status to the index in STATUS_STEPS, or -1 if it is a
  * terminal/error state not in the four-step list.
@@ -81,147 +85,124 @@ function isMissingPreSummary(error: unknown): boolean {
   return error instanceof ApiError && error.code === "INTAKE_NOT_FOUND";
 }
 
+export function intakeStatusQueryKey(
+  identityId: number | undefined,
+  intakeId: number,
+) {
+  return ["intake", identityId, intakeId] as const;
+}
+
+export function intakePreSummaryQueryKey(
+  identityId: number | undefined,
+  intakeId: number,
+) {
+  return ["intake", identityId, intakeId, "pre-summary"] as const;
+}
+
 export default function IntakeStatusPage() {
   const params = useParams<{ intakeId: string }>();
   const intakeId = Number(params.intakeId);
-  const router = useRouter();
   const { lang } = useLang();
   const dict = STRINGS[lang].intake;
   const t = dict.status;
   const nav = STRINGS[lang].nav;
 
-  const [intake, setIntake] = useState<IntakeDetailView | null>(null);
-  const [preSummary, setPreSummary] = useState<PreSummaryView | null>(null);
-  const [preSummaryMissing, setPreSummaryMissing] = useState(false);
-  const [loadStage, setLoadStage] = useState<LoadStage>("loading");
-  const [loadError, setLoadError] = useState<BannerState>(null);
+  const { user } = useAuth();
+  const identityId = user?.id;
+
   const [refreshing, setRefreshing] = useState(false);
+  const [errorDismissed, setErrorDismissed] = useState(false);
 
-  const langRef = useRef(lang);
-  useEffect(() => {
-    langRef.current = lang;
-  }, [lang]);
+  const queryClient = useQueryClient();
 
-  /**
-   * Fetch the pre-summary for a ready intake. A not-found is absorbed as the
-   * degraded state (pre-summary absent, raw-review note shown); any other
-   * failure is re-thrown so the caller keeps its own error/silent branch.
-   */
-  const applyPreSummary = useCallback(async () => {
-    try {
-      const ps = await fetchPreSummary(intakeId);
-      setPreSummary(ps);
-      setPreSummaryMissing(false);
-    } catch (error: unknown) {
-      if (isMissingPreSummary(error)) {
-        setPreSummary(null);
-        setPreSummaryMissing(true);
-        return;
+  const pollCountRef = useRef(0);
+
+  const intakeQuery = useQuery({
+    queryKey: intakeStatusQueryKey(identityId, intakeId),
+    queryFn: () => fetchIntake(intakeId),
+    staleTime: TWO_MINUTES,
+    refetchInterval: (query) => {
+      const data = query.state.data as IntakeDetailView | undefined;
+      if (data?.status !== "structuring") {
+        pollCountRef.current = 0;
+        return false;
       }
-      throw error;
-    }
-  }, [intakeId]);
-
-  const failLoad = useCallback(
-    (error: unknown) => {
-      setLoadStage("error");
-      setLoadError({
-        title: t.loadFailedTitle,
-        body: t.loadFailedBody,
-        traceId: error instanceof ApiError ? error.traceId : undefined,
-      });
+      if (pollCountRef.current >= MAX_INTAKE_POLLS) return false;
+      pollCountRef.current += 1;
+      return INTAKE_POLL_INTERVAL_MS;
     },
-    [t.loadFailedTitle, t.loadFailedBody],
-  );
+  });
 
-  const load = useCallback(() => {
-    fetchIntake(intakeId)
-      .then((detail) => {
-        setIntake(detail);
-        setLoadStage("ready");
-        if (detail.status !== "ready_for_review") {
-          setPreSummary(null);
-          setPreSummaryMissing(false);
-          return;
-        }
-        return applyPreSummary();
-      })
-      .catch(failLoad);
-  }, [intakeId, applyPreSummary, failLoad]);
+  const intake = intakeQuery.data ?? null;
+
+  const preSummaryQuery = useQuery({
+    queryKey: intakePreSummaryQueryKey(identityId, intakeId),
+    queryFn: async () => {
+      try {
+        return await fetchPreSummary(intakeId);
+      } catch (error: unknown) {
+        if (isMissingPreSummary(error)) return null;
+        throw error;
+      }
+    },
+    enabled: intake?.status === "ready_for_review",
+    staleTime: TWO_MINUTES,
+  });
+
+  const preSummary = preSummaryQuery.data ?? null;
+  const preSummaryMissing =
+    intake?.status === "ready_for_review" &&
+    preSummaryQuery.isSuccess &&
+    preSummary === null;
+
+  const failingError = intakeQuery.isError
+    ? intakeQuery.error
+    : preSummaryQuery.isError
+      ? preSummaryQuery.error
+      : null;
 
   useEffect(() => {
-    load();
-  }, [load]);
+    setErrorDismissed(false);
+  }, [failingError]);
 
-  const reload = useCallback(() => {
-    setLoadStage("loading");
-    setLoadError(null);
-    load();
-  }, [load]);
+  const loadError: BannerState =
+    failingError !== null && !errorDismissed
+      ? {
+          title: t.loadFailedTitle,
+          body: t.loadFailedBody,
+          traceId:
+            failingError instanceof ApiError ? failingError.traceId : undefined,
+        }
+      : null;
+
+  const reload = useCallback(async () => {
+    const detailResult = await intakeQuery.refetch();
+    const detail = detailResult.data;
+    if (detail?.status === "ready_for_review") {
+      await preSummaryQuery.refetch().catch(() => undefined);
+    }
+  }, [intakeQuery, preSummaryQuery]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const detail = await fetchIntake(intakeId);
-      setIntake(detail);
-      setPreSummary(null);
-      setPreSummaryMissing(false);
-      if (detail.status === "ready_for_review") {
-        await applyPreSummary();
+      const detailResult = await intakeQuery.refetch();
+      const detail = detailResult.data;
+      if (detail?.status === "ready_for_review") {
+        await preSummaryQuery.refetch();
+      } else {
+        queryClient.removeQueries({
+          queryKey: intakePreSummaryQueryKey(identityId, intakeId),
+        });
       }
     } catch {
       // Silent - the existing state stays visible.
     } finally {
       setRefreshing(false);
     }
-  }, [intakeId, applyPreSummary]);
+  }, [intakeQuery, preSummaryQuery, queryClient, identityId, intakeId]);
 
-  // Poll while structuring so the patient never has to manually refresh.
-  useEffect(() => {
-    if (!intake || intake.status !== "structuring") return;
-    let cancelled = false;
-    let ticks = 0;
-    const timer = window.setInterval(() => {
-      ticks += 1;
-      void (async () => {
-        if (cancelled) return;
-        try {
-          const detail = await fetchIntake(intakeId);
-          if (cancelled) return;
-          setIntake(detail);
-          if (detail.status === "ready_for_review") {
-            window.clearInterval(timer);
-            cancelled = true;
-            try {
-              await applyPreSummary();
-            } catch (error: unknown) {
-              failLoad(error);
-            }
-          } else if (
-            detail.status === "re_record" ||
-            detail.status === "failed"
-          ) {
-            cancelled = true;
-            window.clearInterval(timer);
-          } else if (ticks >= MAX_INTAKE_POLLS) {
-            cancelled = true;
-            window.clearInterval(timer);
-          }
-        } catch {
-          if (ticks >= MAX_INTAKE_POLLS) {
-            cancelled = true;
-            window.clearInterval(timer);
-          }
-        }
-      })();
-    }, INTAKE_POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [intakeId, applyPreSummary, failLoad, intake?.status]);
-
-  if (loadStage === "loading" || (loadStage === "ready" && !intake)) {
+  if (intakeQuery.isPending && !intake) {
     return (
       <>
         <PageHeader
@@ -246,7 +227,7 @@ export default function IntakeStatusPage() {
     );
   }
 
-  if (loadStage === "error" || !intake) {
+  if (intakeQuery.isError || preSummaryQuery.isError || !intake) {
     return (
       <>
         <PageHeader
@@ -267,7 +248,7 @@ export default function IntakeStatusPage() {
             }
             traceId={loadError.traceId}
             onRetry={reload}
-            onDismiss={() => setLoadError(null)}
+            onDismiss={() => setErrorDismissed(true)}
           />
         )}
       </>

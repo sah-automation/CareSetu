@@ -29,9 +29,18 @@ import { ErrorBanner } from "@/components/layout/ErrorBanner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-errors";
-import { listDoctorCases, type DoctorCaseRow } from "@/lib/doctor/api";
+import { useAuth } from "@/lib/auth/AuthContext";
+import {
+  DOCTOR_CASES_STALE_TIME,
+  doctorCasesQueryKey,
+  listDoctorCases,
+  type DoctorCaseRow,
+} from "@/lib/doctor/api";
+
+export { doctorCasesQueryKey } from "@/lib/doctor/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { useQuery } from "@tanstack/react-query";
 
 type LoadStatus = "loading" | "ready" | "error";
 
@@ -70,30 +79,37 @@ function LoadingSkeleton() {
 export default function DoctorCasesIndexPage() {
   const { lang } = useLang();
   const t = STRINGS[lang].doctorConsole;
+  const { user } = useAuth();
+  const doctorId = user?.id;
 
-  const [cases, setCases] = useState<DoctorCaseRow[]>([]);
-  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
-  const [errorTraceId, setErrorTraceId] = useState<string | undefined>();
   const [bannerOpen, setBannerOpen] = useState(false);
 
+  const casesQuery = useQuery({
+    queryKey: doctorCasesQueryKey(doctorId, "all"),
+    queryFn: () => listDoctorCases(),
+    enabled: doctorId !== undefined,
+    staleTime: DOCTOR_CASES_STALE_TIME,
+  });
+
+  const cases: DoctorCaseRow[] = casesQuery.data?.items ?? [];
+  const loadStatus: LoadStatus = casesQuery.isPending
+    ? "loading"
+    : casesQuery.isError && casesQuery.data === undefined
+      ? "error"
+      : "ready";
+
+  const errorTraceId =
+    casesQuery.error instanceof ApiError ? casesQuery.error.traceId : undefined;
+
   const load = useCallback(() => {
-    setLoadStatus("loading");
-    setBannerOpen(false);
-    listDoctorCases()
-      .then(({ items }) => {
-        setCases(items);
-        setLoadStatus("ready");
-      })
-      .catch((err: unknown) => {
-        setErrorTraceId(err instanceof ApiError ? err.traceId : undefined);
-        setLoadStatus("error");
-        setBannerOpen(true);
-      });
-  }, []);
+    setBannerOpen(true);
+    void casesQuery.refetch();
+  }, [casesQuery]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (casesQuery.isError) setBannerOpen(true);
+    else if (casesQuery.isSuccess) setBannerOpen(false);
+  }, [casesQuery.isError, casesQuery.isSuccess]);
 
   const ready = loadStatus === "ready";
   const empty = ready && cases.length === 0;

@@ -30,8 +30,9 @@ the coordinator re-exports them unchanged.
 
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from modules.iam.facade import IamFacade
 from modules.partner.domain.events import PartnerType
 from modules.partner.domain.exceptions import (
@@ -60,7 +61,7 @@ class RegistrationFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         credential_validity: CredentialValidityPort,
         iam_facade: IamFacade | None = None,
     ) -> None:

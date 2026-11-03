@@ -80,11 +80,13 @@ class CircuitBreakerAiGateway:
         threshold: int,
         cooldown_seconds: float,
         clock: Callable[[], float] = time.monotonic,
+        enabled: bool = True,
     ) -> None:
         self._adapter = adapter
         self._threshold = threshold
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
+        self._enabled = enabled
         self._open = False
         self._consecutive_failures = 0
         self._opened_at: float | None = None
@@ -99,7 +101,13 @@ class CircuitBreakerAiGateway:
         """Delegate the wrapped adapter's serving model to the pipeline."""
         return self._adapter.effective_model
 
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
     def _allow(self) -> bool:
+        if not self._enabled:
+            return True
         if self._open and self._opened_at is not None:
             if self._clock() - self._opened_at >= self._cooldown_seconds:
                 self._open = False
@@ -108,6 +116,8 @@ class CircuitBreakerAiGateway:
         return True
 
     def _record(self, ok: bool) -> None:
+        if not self._enabled:
+            return
         if ok:
             self._consecutive_failures = 0
             self._open = False
@@ -187,6 +197,9 @@ def build_ai_gateway(settings: Settings) -> AiGateway:
       ``FallbackAiGateway`` that engages the secondary only on genuine outages.
     """
     provider = settings.ai_provider.strip().lower()
+    if settings.degraded_mode:
+        logger.warning("degraded mode enabled; forcing AI gateway to mock provider")
+        return build_mock_ai_gateway()
     if provider == "mock":
         return build_mock_ai_gateway()
     primary = CircuitBreakerAiGateway(
@@ -200,6 +213,7 @@ def build_ai_gateway(settings: Settings) -> AiGateway:
         ),
         threshold=settings.ai_circuit_breaker_threshold,
         cooldown_seconds=settings.ai_circuit_breaker_cooldown_seconds,
+        enabled=settings.circuit_breaker_enabled,
     )
     if settings.ai_fallback_provider.strip():
         secondary = CircuitBreakerAiGateway(
@@ -213,6 +227,7 @@ def build_ai_gateway(settings: Settings) -> AiGateway:
             ),
             threshold=settings.ai_circuit_breaker_threshold,
             cooldown_seconds=settings.ai_circuit_breaker_cooldown_seconds,
+            enabled=settings.circuit_breaker_enabled,
         )
         return FallbackAiGateway(
             primary=primary,

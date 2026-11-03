@@ -14,8 +14,9 @@ from typing import Literal
 
 from pydantic import BaseModel
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.iam.domain import events
 from modules.iam.domain.lockout import evaluate_failure, lockout_remaining_seconds
@@ -156,7 +157,7 @@ class OtpFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         clock: Callable[[], datetime],
         otp_sender: OtpSender,
     ) -> None:

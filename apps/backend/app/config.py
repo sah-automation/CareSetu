@@ -5,10 +5,12 @@ and gateway (#29) next. Plain frozen dataclass over ``os.environ`` - no extra
 dependency beyond the declared stack (cost floor ``NFR-001``).
 """
 
+import json
 import math
 import os
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from modules.iam.domain.mfa_lockout import (
     DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
@@ -16,6 +18,21 @@ from modules.iam.domain.mfa_lockout import (
 )
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
+# Database connection pool settings (ARCH-P1 #813): the web app builds its primary
+# engine through the factory and disposes it on shutdown. Worker, script, and
+# test entry points keep constructing raw engines. Default path stays
+# poolclass=NullPool so local development and the free-tier deployment do not
+# change. Pooled path uses the four pool settings, pre-ping, and the configured
+# recycle time. Validation: size >= 1, overflow/recycle >= 0, timeout > 0.
+DEFAULT_DB_POOL_ENABLED = False
+DEFAULT_DB_POOL_SIZE = 10
+DEFAULT_DB_MAX_OVERFLOW = 20
+DEFAULT_DB_POOL_TIMEOUT = 30.0
+DEFAULT_DB_POOL_RECYCLE = 1800
+DEFAULT_DATABASE_READ_URLS: tuple[str, ...] = ()
+DEFAULT_READ_REPLICA_ENABLED = False
+DEFAULT_READ_REPLICA_LAG_TOLERANCE_MS = 1000
+DEFAULT_READ_REPLICA_RETRY_COOLDOWN_SECONDS = 30.0
 DEFAULT_APP_ENVIRONMENT = "production"
 # The app's human-maintained version (PHASE-14A A4, #696): the default Sentry
 # ``release`` when ``OTEL_SERVICE_VERSION`` is unset, also handed to FastAPI.
@@ -39,6 +56,20 @@ DEFAULT_REDIS_CONSENT_TTL_SECONDS = 300
 # Redis directory-search result cache (PHASE-6 T02b, #314): optional, same SQL
 # fallback + accelerator-only discipline (ADR-0011). p95 < 250 ms cached target.
 DEFAULT_REDIS_DIRECTORY_TTL_SECONDS = 300
+# Read-cache foundation TTLs (ARCH-P1 #816): per-cache default TTLs for the
+# shared read-cache helper. Positive seconds; validated in ``Settings.__post_init__``.
+DEFAULT_PROFILE_CACHE_TTL_SECONDS = 300
+DEFAULT_INTAKE_CACHE_TTL_SECONDS = 120
+DEFAULT_CARE_CASES_CACHE_TTL_SECONDS = 60
+DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS = 30
+# Degraded-mode cache cap (ARCH-P1 #816): when ``DEGRADED_MODE`` is on every
+# cache write is capped to this TTL and long-lived entries are not served.
+DEFAULT_DEGRADED_CACHE_TTL_SECONDS = 30
+# Redis connection pool settings (ARCH-P1 #812): shared by all cache callers.
+# Timeouts honour third-party-integration-standards §1 (outbound call ceilings).
+DEFAULT_REDIS_MAX_CONNECTIONS = 10
+DEFAULT_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS = 1.0
+DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS = 1.0
 # Boundary directory result cap (PHASE-6 T2, #324): directory search never
 # returns an unbounded nearest-first list - the facade caps the returned items
 # at this top-N after distance ordering, on both the in-scope and the wider-area
@@ -51,6 +82,15 @@ DEFAULT_DIRECTORY_MAX_RESULTS = 50
 # resend) while still stopping bursts.
 DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS = 10
 DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
+# Rate-limit backend selection (ARCH-P1 #815): "memory" (default) keeps the
+# in-process fixed window; "redis" performs one atomic server-side
+# increment-and-expire so two web processes share a window. The Redis prefix
+# namespaces every limiter key; tiers are parsed/validated but not applied.
+DEFAULT_RATE_LIMIT_BACKEND = "memory"
+DEFAULT_REDIS_RATE_LIMIT_KEY_PREFIX = "ratelimit:"
+DEFAULT_RATE_LIMIT_TIERS = (
+    '{"default": {"auth": 10, "intake": 10}, "premium": {"auth": 100, "intake": 50}}'
+)
 # Mirrors ``modules.iam.domain.jwt.ACCESS_TOKEN_TTL_SECONDS``; config stays
 # import-free so it reads as one plain dataclass over the environment.
 DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 900
@@ -297,12 +337,36 @@ DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED = False
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
 
+DEFAULT_UVICORN_WORKERS = 1
+# ARCH-P1 #824: process identity, worker count, and reserved scale settings.
+DEFAULT_DISPATCHER_MODE = "inprocess"
+DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS = 60.0
+DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS = 1.0
+DEFAULT_DISPATCHER_BATCH_SIZE = 100
+DEFAULT_SHARDING_ENABLED = False
+DEFAULT_SHARD_KEY = ""
+DEFAULT_SHARD_COUNT = 1
+DEFAULT_MULTI_REGION_ENABLED = False
+DEFAULT_REGION = ""
+DEFAULT_CROSS_REGION_REPLICATION = False
+
 
 @dataclass(frozen=True)
 class Settings:
     """Runtime settings resolved from the environment at load time."""
 
     database_url: str = DEFAULT_DATABASE_URL
+    # Database connection pool settings (ARCH-P1 #813): see DEFAULT_DB_POOL_*
+    # constants for defaults and validation rules.
+    db_pool_enabled: bool = DEFAULT_DB_POOL_ENABLED
+    db_pool_size: int = DEFAULT_DB_POOL_SIZE
+    db_max_overflow: int = DEFAULT_DB_MAX_OVERFLOW
+    db_pool_timeout: float = DEFAULT_DB_POOL_TIMEOUT
+    db_pool_recycle: int = DEFAULT_DB_POOL_RECYCLE
+    database_read_urls: tuple[str, ...] = DEFAULT_DATABASE_READ_URLS
+    read_replica_enabled: bool = DEFAULT_READ_REPLICA_ENABLED
+    read_replica_lag_tolerance_ms: int = DEFAULT_READ_REPLICA_LAG_TOLERANCE_MS
+    read_replica_retry_cooldown_seconds: float = DEFAULT_READ_REPLICA_RETRY_COOLDOWN_SECONDS
     app_environment: str = DEFAULT_APP_ENVIRONMENT
     gateway_jwt_verify_enabled: bool = False
     gateway_rate_limit_enabled: bool = False
@@ -317,6 +381,12 @@ class Settings:
     # so a burst on one can never exhaust the other's budget.
     gateway_rate_limit_intake_max_requests: int = DEFAULT_AUTH_RATE_LIMIT_MAX_REQUESTS
     gateway_rate_limit_intake_window_seconds: int = DEFAULT_AUTH_RATE_LIMIT_WINDOW_SECONDS
+    # Rate-limit backend selection (ARCH-P1 #815): "memory" (default) or
+    # "redis"; the prefix namespaces every Redis key; tiers is a JSON string
+    # parsed and validated but never applied.
+    rate_limit_backend: str = DEFAULT_RATE_LIMIT_BACKEND
+    redis_rate_limit_key_prefix: str = DEFAULT_REDIS_RATE_LIMIT_KEY_PREFIX
+    rate_limit_tiers: str = DEFAULT_RATE_LIMIT_TIERS
     sms_provider: str = DEFAULT_SMS_PROVIDER
     sms_api_key: str = ""
     sms_base_url: str = ""
@@ -336,6 +406,39 @@ class Settings:
     redis_url: str = DEFAULT_REDIS_URL
     redis_consent_ttl_seconds: int = DEFAULT_REDIS_CONSENT_TTL_SECONDS
     redis_directory_ttl_seconds: int = DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
+    # Redis connection pool settings (ARCH-P1 #812): shared by all cache callers.
+    redis_max_connections: int = DEFAULT_REDIS_MAX_CONNECTIONS
+    redis_socket_connect_timeout_seconds: float = DEFAULT_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS
+    redis_socket_timeout_seconds: float = DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS
+    # Read-cache foundation (ARCH-P1 #816): per-cache TTLs, PHI gate flag,
+    # and degraded-mode cap. Only profile and intake caches honour the PHI gate.
+    phi_cache_enabled: bool = False
+    profile_cache_ttl_seconds: int = DEFAULT_PROFILE_CACHE_TTL_SECONDS
+    intake_cache_ttl_seconds: int = DEFAULT_INTAKE_CACHE_TTL_SECONDS
+    care_cases_cache_ttl_seconds: int = DEFAULT_CARE_CASES_CACHE_TTL_SECONDS
+    provider_health_cache_ttl_seconds: int = DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS
+    degraded_mode: bool = False
+    degraded_cache_ttl_seconds: int = DEFAULT_DEGRADED_CACHE_TTL_SECONDS
+    # Global circuit-breaker bypass (ARCH-P1 #822): when false every breaker
+    # wrapper delegates directly to its inner callable and no breaker opens.
+    circuit_breaker_enabled: bool = True
+    # Module router flags (ARCH-P1 #823): gate HTTP router inclusion at the
+    # composition root (app/main.py). Only the six ACTIVE flags below map to a
+    # real HTTP router today; the four RESERVED flags are accepted and validated
+    # but have no matching HTTP router - they are inert and have no runtime
+    # effect (no route inclusion, no outbox/worker/facade gating).
+    # Active:
+    module_intake_enabled: bool = True
+    module_care_enabled: bool = True
+    module_partner_enabled: bool = True
+    module_audit_enabled: bool = True
+    module_observability_enabled: bool = True
+    module_ops_enabled: bool = True
+    # Reserved (inert): validated, no runtime effect today.
+    module_notify_enabled: bool = True
+    module_settlement_enabled: bool = True
+    module_fulfillment_enabled: bool = True
+    module_diagnostics_enabled: bool = True
     # Directory result cap (PHASE-6 T2, #324): the top-N bound applied after
     # distance ordering in ``search_directory`` (both the in-scope and fallback
     # paths), so a patient's list tops out at the meaningful nearest matches.
@@ -360,6 +463,23 @@ class Settings:
     # the Render web service's env vars (free compute covers web services
     # only - background workers require a paid instance).
     dispatcher_in_process_enabled: bool = False
+    # ARCH-P1 #824: process identity, worker count, and reserved scale. The
+    # dispatcher, sharding, and multi-region settings are present and validated
+    # here but stay inert in this phase (no behaviour change).
+    instance_id: str = ""
+    uvicorn_workers: int = DEFAULT_UVICORN_WORKERS
+    dispatcher_mode: str = DEFAULT_DISPATCHER_MODE
+    dispatcher_claim_timeout_seconds: float = DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS
+    dispatcher_poll_interval_seconds: float = DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS
+    dispatcher_batch_size: int = DEFAULT_DISPATCHER_BATCH_SIZE
+    # Reserved scale settings (inert, validated only): no routing/query-replica/
+    # region-selection behaviour in this phase.
+    sharding_enabled: bool = DEFAULT_SHARDING_ENABLED
+    shard_key: str = DEFAULT_SHARD_KEY
+    shard_count: int = DEFAULT_SHARD_COUNT
+    multi_region_enabled: bool = DEFAULT_MULTI_REGION_ENABLED
+    region: str = DEFAULT_REGION
+    cross_region_replication: bool = DEFAULT_CROSS_REGION_REPLICATION
     # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings read
     # caches resolved values in-process for this many seconds so a polling
     # operator surface does not re-query ``ops_settings`` on every call. Reflects
@@ -640,6 +760,27 @@ class Settings:
     llm_judge_prompt_version: str = DEFAULT_LLM_JUDGE_PROMPT_VERSION
 
     def __post_init__(self) -> None:
+        # Database connection pool validation (ARCH-P1 #813)
+        if self.db_pool_size < 1:
+            raise ValueError("db_pool_size must be >= 1")
+        if self.db_max_overflow < 0:
+            raise ValueError("db_max_overflow must be >= 0")
+        if self.db_pool_timeout <= 0:
+            raise ValueError("db_pool_timeout must be > 0")
+        if self.db_pool_recycle < 0:
+            raise ValueError("db_pool_recycle must be >= 0")
+
+        if self.read_replica_lag_tolerance_ms < 0:
+            raise ValueError("read_replica_lag_tolerance_ms must be >= 0")
+        if self.read_replica_retry_cooldown_seconds < 0:
+            raise ValueError("read_replica_retry_cooldown_seconds must be >= 0")
+        if self.read_replica_enabled and not tuple(self.database_read_urls):
+            raise ValueError(
+                "READ_REPLICA_ENABLED=True requires at least one URL in DATABASE_READ_URLS"
+            )
+        for url in self.database_read_urls:
+            if "+asyncpg" not in str(url):
+                raise ValueError(f"DATABASE_READ_URLS entry must use the asyncpg driver: {url!r}")
         if self.gateway_jwt_verify_enabled and not self.gateway_jwt_signing_key:
             raise ValueError(
                 "gateway_jwt_verify_enabled=True requires GATEWAY_JWT_SIGNING_KEY; "
@@ -649,6 +790,18 @@ class Settings:
             raise ValueError("gateway_rate_limit_auth_max_requests must be positive")
         if self.gateway_rate_limit_auth_window_seconds <= 0:
             raise ValueError("gateway_rate_limit_auth_window_seconds must be positive")
+        # Rate-limit backend selection (ARCH-P1 #815).
+        _backend = self.rate_limit_backend.strip().lower()
+        if _backend not in {"memory", "redis"}:
+            raise ValueError(
+                f"unsupported rate_limit_backend {self.rate_limit_backend!r}; "
+                "expected 'memory' or 'redis'"
+            )
+        if _backend == "redis" and not self.redis_url.strip():
+            raise ValueError("rate_limit_backend='redis' requires a non-empty REDIS_URL")
+        if not isinstance(self.redis_rate_limit_key_prefix, str):
+            raise ValueError("redis_rate_limit_key_prefix must be a string")
+        parse_rate_limit_tiers(self.rate_limit_tiers)
         provider = self.sms_provider.strip().lower()
         if provider not in {"mock", "provider"}:
             raise ValueError(
@@ -846,6 +999,25 @@ class Settings:
             raise ValueError("redis_consent_ttl_seconds must be positive")
         if self.redis_directory_ttl_seconds <= 0:
             raise ValueError("redis_directory_ttl_seconds must be positive")
+        if self.redis_max_connections < 1:
+            raise ValueError("redis_max_connections must be >= 1")
+        if self.redis_socket_connect_timeout_seconds <= 0:
+            raise ValueError("redis_socket_connect_timeout_seconds must be > 0")
+        if self.redis_socket_timeout_seconds <= 0:
+            raise ValueError("redis_socket_timeout_seconds must be > 0")
+        # Read-cache foundation (ARCH-P1 #816).
+        if self.profile_cache_ttl_seconds <= 0:
+            raise ValueError("profile_cache_ttl_seconds must be positive")
+        if self.intake_cache_ttl_seconds <= 0:
+            raise ValueError("intake_cache_ttl_seconds must be positive")
+        if self.care_cases_cache_ttl_seconds <= 0:
+            raise ValueError("care_cases_cache_ttl_seconds must be positive")
+        if self.provider_health_cache_ttl_seconds <= 0:
+            raise ValueError("provider_health_cache_ttl_seconds must be positive")
+        if self.degraded_cache_ttl_seconds <= 0:
+            raise ValueError("degraded_cache_ttl_seconds must be positive")
+        if self.phi_cache_enabled and not self.redis_url.strip():
+            raise ValueError("PHI_CACHE_ENABLED=True requires a Redis URL (non-empty REDIS_URL)")
         if self.directory_max_results <= 0:
             raise ValueError("directory_max_results must be positive")
         if self.audit_retention_days < 0:
@@ -971,6 +1143,41 @@ class Settings:
                 "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
                 "environment (fail-closed)."
             )
+        # ARCH-P1 #824: worker count and reserved scale settings.
+        if self.uvicorn_workers < 1:
+            raise ValueError("uvicorn_workers must be >= 1")
+        if self.dispatcher_in_process_enabled and self.uvicorn_workers > 1:
+            raise ValueError(
+                "dispatcher_in_process_enabled requires uvicorn_workers == 1 "
+                "(in-process dispatcher plus multiple workers would create more "
+                "than one poll loop)"
+            )
+        _dispatcher_mode = self.dispatcher_mode.strip().lower()
+        if _dispatcher_mode not in {"inprocess", "standalone", "coordinated"}:
+            raise ValueError(
+                f"unsupported dispatcher_mode {self.dispatcher_mode!r}; "
+                "expected 'inprocess', 'standalone', or 'coordinated'"
+            )
+        if (
+            not math.isfinite(self.dispatcher_claim_timeout_seconds)
+            or self.dispatcher_claim_timeout_seconds <= 0
+        ):
+            raise ValueError("dispatcher_claim_timeout_seconds must be finite and positive")
+        if (
+            not math.isfinite(self.dispatcher_poll_interval_seconds)
+            or self.dispatcher_poll_interval_seconds <= 0
+        ):
+            raise ValueError("dispatcher_poll_interval_seconds must be finite and positive")
+        if self.dispatcher_batch_size < 1:
+            raise ValueError("dispatcher_batch_size must be >= 1")
+        if self.shard_count < 1:
+            raise ValueError("shard_count must be >= 1")
+        if self.sharding_enabled and not self.shard_key.strip():
+            raise ValueError("shard_key is required when sharding is enabled")
+        if (self.multi_region_enabled or self.cross_region_replication) and not self.region.strip():
+            raise ValueError(
+                "region is required when multi-region or cross-region replication is enabled"
+            )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -1069,6 +1276,43 @@ def parse_ai_pricing_table(raw: str) -> dict[str, tuple[Decimal, Decimal]]:
     return table
 
 
+def parse_rate_limit_tiers(raw: str) -> dict[str, Any]:
+    """Parse a ``RATE_LIMIT_TIERS`` JSON value into per-tier limit maps.
+
+    The tiers are parsed and validated at boot but are not applied to the
+    existing auth and intake limits (ARCH-P1 #815).
+    """
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"RATE_LIMIT_TIERS must be valid JSON; got {raw!r}") from exc
+    if not isinstance(data, dict) or not data:
+        raise ValueError("RATE_LIMIT_TIERS must be a non-empty JSON object")
+    _KNOWN_TIERS = {"default", "premium"}
+    parsed: dict[str, Any] = {}
+    for tier, limits in data.items():
+        if not isinstance(tier, str) or not tier.strip():
+            raise ValueError("RATE_LIMIT_TIERS tier names must be non-empty strings")
+        if tier not in _KNOWN_TIERS:
+            raise ValueError(f"unknown RATE_LIMIT_TIERS tier name {tier!r}")
+        if not isinstance(limits, dict) or not limits:
+            raise ValueError(f"RATE_LIMIT_TIERS tier {tier!r} must be a non-empty object")
+        normalised: dict[str, int] = {}
+        for name in ("auth", "intake"):
+            if name not in limits:
+                raise ValueError(f"RATE_LIMIT_TIERS tier {tier!r} missing required '{name}' entry")
+        for name, value in limits.items():
+            if name not in {"auth", "intake"}:
+                raise ValueError(f"unknown RATE_LIMIT_TIERS limit name {name!r}")
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"RATE_LIMIT_TIERS tier {tier!r} limit {name!r} must be a positive integer"
+                )
+            normalised[str(name)] = value
+        parsed[tier] = normalised
+    return parsed
+
+
 def get_settings() -> Settings:
     """Build ``Settings`` from environment variables.
 
@@ -1081,6 +1325,20 @@ def get_settings() -> Settings:
     """
     return Settings(
         database_url=os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL),
+        db_pool_enabled=_env_bool("DB_POOL_ENABLED", DEFAULT_DB_POOL_ENABLED),
+        db_pool_size=_env_int("DB_POOL_SIZE", DEFAULT_DB_POOL_SIZE),
+        db_max_overflow=_env_int("DB_MAX_OVERFLOW", DEFAULT_DB_MAX_OVERFLOW),
+        db_pool_timeout=_env_float("DB_POOL_TIMEOUT", DEFAULT_DB_POOL_TIMEOUT),
+        db_pool_recycle=_env_int("DB_POOL_RECYCLE", DEFAULT_DB_POOL_RECYCLE),
+        database_read_urls=_env_csv("DATABASE_READ_URLS"),
+        read_replica_enabled=_env_bool("READ_REPLICA_ENABLED", DEFAULT_READ_REPLICA_ENABLED),
+        read_replica_lag_tolerance_ms=_env_int(
+            "READ_REPLICA_LAG_TOLERANCE_MS", DEFAULT_READ_REPLICA_LAG_TOLERANCE_MS
+        ),
+        read_replica_retry_cooldown_seconds=_env_float(
+            "READ_REPLICA_RETRY_COOLDOWN_SECONDS",
+            DEFAULT_READ_REPLICA_RETRY_COOLDOWN_SECONDS,
+        ),
         app_environment=os.environ.get("APP_ENVIRONMENT", DEFAULT_APP_ENVIRONMENT),
         gateway_jwt_verify_enabled=_env_bool("GATEWAY_JWT_VERIFY_ENABLED", False),
         gateway_rate_limit_enabled=_env_bool("GATEWAY_RATE_LIMIT_ENABLED", False),
@@ -1137,11 +1395,66 @@ def get_settings() -> Settings:
         redis_directory_ttl_seconds=_env_int(
             "REDIS_DIRECTORY_TTL_SECONDS", DEFAULT_REDIS_DIRECTORY_TTL_SECONDS
         ),
+        redis_max_connections=_env_int("REDIS_MAX_CONNECTIONS", DEFAULT_REDIS_MAX_CONNECTIONS),
+        redis_socket_connect_timeout_seconds=_env_float(
+            "REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS",
+            DEFAULT_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS,
+        ),
+        redis_socket_timeout_seconds=_env_float(
+            "REDIS_SOCKET_TIMEOUT_SECONDS", DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS
+        ),
+        phi_cache_enabled=_env_bool("PHI_CACHE_ENABLED", False),
+        profile_cache_ttl_seconds=_env_int(
+            "PROFILE_CACHE_TTL_SECONDS", DEFAULT_PROFILE_CACHE_TTL_SECONDS
+        ),
+        intake_cache_ttl_seconds=_env_int(
+            "INTAKE_CACHE_TTL_SECONDS", DEFAULT_INTAKE_CACHE_TTL_SECONDS
+        ),
+        care_cases_cache_ttl_seconds=_env_int(
+            "CARE_CASES_CACHE_TTL_SECONDS", DEFAULT_CARE_CASES_CACHE_TTL_SECONDS
+        ),
+        provider_health_cache_ttl_seconds=_env_int(
+            "PROVIDER_HEALTH_CACHE_TTL_SECONDS",
+            DEFAULT_PROVIDER_HEALTH_CACHE_TTL_SECONDS,
+        ),
+        degraded_mode=_env_bool("DEGRADED_MODE", False),
+        circuit_breaker_enabled=_env_bool("CIRCUIT_BREAKER_ENABLED", True),
+        module_intake_enabled=_env_bool("MODULE_INTAKE_ENABLED", True),
+        module_care_enabled=_env_bool("MODULE_CARE_ENABLED", True),
+        module_partner_enabled=_env_bool("MODULE_PARTNER_ENABLED", True),
+        module_audit_enabled=_env_bool("MODULE_AUDIT_ENABLED", True),
+        module_observability_enabled=_env_bool("MODULE_OBSERVABILITY_ENABLED", True),
+        module_ops_enabled=_env_bool("MODULE_OPS_ENABLED", True),
+        module_notify_enabled=_env_bool("MODULE_NOTIFY_ENABLED", True),
+        module_settlement_enabled=_env_bool("MODULE_SETTLEMENT_ENABLED", True),
+        module_fulfillment_enabled=_env_bool("MODULE_FULFILLMENT_ENABLED", True),
+        module_diagnostics_enabled=_env_bool("MODULE_DIAGNOSTICS_ENABLED", True),
+        degraded_cache_ttl_seconds=_env_int(
+            "DEGRADED_CACHE_TTL_SECONDS", DEFAULT_DEGRADED_CACHE_TTL_SECONDS
+        ),
         directory_max_results=_env_int("DIRECTORY_MAX_RESULTS", DEFAULT_DIRECTORY_MAX_RESULTS),
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
         dispatcher_in_process_enabled=_env_bool("DISPATCHER_IN_PROCESS_ENABLED", False),
+        instance_id=os.environ.get("INSTANCE_ID", ""),
+        uvicorn_workers=_env_int("UVICORN_WORKERS", DEFAULT_UVICORN_WORKERS),
+        dispatcher_mode=os.environ.get("DISPATCHER_MODE", DEFAULT_DISPATCHER_MODE),
+        dispatcher_claim_timeout_seconds=_env_float(
+            "DISPATCHER_CLAIM_TIMEOUT_SECONDS", DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS
+        ),
+        dispatcher_poll_interval_seconds=_env_float(
+            "DISPATCHER_POLL_INTERVAL_SECONDS", DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS
+        ),
+        dispatcher_batch_size=_env_int("DISPATCHER_BATCH_SIZE", DEFAULT_DISPATCHER_BATCH_SIZE),
+        sharding_enabled=_env_bool("SHARDING_ENABLED", DEFAULT_SHARDING_ENABLED),
+        shard_key=os.environ.get("SHARD_KEY", DEFAULT_SHARD_KEY),
+        shard_count=_env_int("SHARD_COUNT", DEFAULT_SHARD_COUNT),
+        multi_region_enabled=_env_bool("MULTI_REGION_ENABLED", DEFAULT_MULTI_REGION_ENABLED),
+        region=os.environ.get("REGION", DEFAULT_REGION),
+        cross_region_replication=_env_bool(
+            "CROSS_REGION_REPLICATION", DEFAULT_CROSS_REGION_REPLICATION
+        ),
         settings_cache_ttl_seconds=_env_int("SETTINGS_CACHE_TTL_SECONDS", 30),
         partner_artifact_root=os.environ.get(
             "PARTNER_ARTIFACT_ROOT", DEFAULT_PARTNER_ARTIFACT_ROOT
@@ -1352,4 +1665,9 @@ def get_settings() -> Settings:
         alert_delivery_base_backoff_seconds=_env_int("ALERT_DELIVERY_BASE_BACKOFF_SECONDS", 30),
         alert_delivery_max_backoff_seconds=_env_int("ALERT_DELIVERY_MAX_BACKOFF_SECONDS", 3600),
         alert_delivery_console_base_url=os.environ.get("ALERT_DELIVERY_CONSOLE_BASE_URL", ""),
+        rate_limit_backend=os.environ.get("RATE_LIMIT_BACKEND", DEFAULT_RATE_LIMIT_BACKEND),
+        redis_rate_limit_key_prefix=os.environ.get(
+            "REDIS_RATE_LIMIT_KEY_PREFIX", DEFAULT_REDIS_RATE_LIMIT_KEY_PREFIX
+        ),
+        rate_limit_tiers=os.environ.get("RATE_LIMIT_TIERS", DEFAULT_RATE_LIMIT_TIERS),
     )

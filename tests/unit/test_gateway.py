@@ -321,7 +321,7 @@ def test_jwt_verify_denies_presented_malformed_token(
 
 def test_jwt_verify_denies_expired_token() -> None:
     client = _protected_client()
-    expired = _issue_access_token(now=datetime.now(UTC) - timedelta(hours=1))
+    expired = _issue_access_token(now=datetime.now(UTC) - timedelta(hours=3))
 
     response = client.get("/v1/me", headers=_bearer(expired))
 

@@ -33,7 +33,7 @@ services:
     # would only add seconds to every cold start for zero benefit. A
     # fresh-from-scratch blueprint provision relies on the next push to main to
     # migrate before first boot.
-    startCommand: uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers ${UVICORN_WORKERS:-1}
     envVars:
       # Render Python runtime selects the interpreter from PYTHON_VERSION.
       - key: PYTHON_VERSION
@@ -54,6 +54,10 @@ services:
         generateValue: true
       - key: GATEWAY_RATE_LIMIT_ENABLED
         value: "true"
+      # Gateway access-token lifetime (seconds, default 7200 = 2 hours). Keep
+      # the JWT cookie max-age derived from this setting.
+      - key: GATEWAY_ACCESS_TOKEN_TTL_SECONDS
+        value: "7200"
       # Demo mode reads the OTP back into the UI, so SMS stays mocked.
       - key: SMS_PROVIDER
         value: mock
@@ -224,3 +228,8 @@ services:
       # uvicorn --workers 1; the startCommand above satisfies that constraint.
       - key: DISPATCHER_IN_PROCESS_ENABLED
         value: "true"
+      # Web worker count (ARCH-P1 #824): templated into the startCommand with a
+      # default of 1. Keep at 1 while DISPATCHER_IN_PROCESS_ENABLED=true so the
+      # single-poll-loop rule (worker-outbox-runbook Rule 1) holds.
+      - key: UVICORN_WORKERS
+        value: "1"

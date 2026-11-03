@@ -32,8 +32,8 @@ import pyotp
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.db import AsyncEngineLike
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain.exceptions import SessionIssuanceError
 from modules.iam.domain.phone import normalize_phone
@@ -82,7 +82,7 @@ class MfaFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         clock: Callable[[], datetime] = _default_clock,
         *,
         mfa_secret_key: str = "",

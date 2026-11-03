@@ -23,6 +23,12 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { useAuth } from "@/lib/auth/AuthContext";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  intakePreSummaryQueryKey,
+  intakeStatusQueryKey,
+} from "@/app/(patient)/patient/intake/[intakeId]/status/page";
 import {
   fetchIntake,
   reRecordIntake,
@@ -53,6 +59,24 @@ const MIC_BUTTON_BASE =
 
 export default function VoiceIntakePage() {
   const { lang } = useLang();
+  const { user } = useAuth();
+  const identityId = user?.id;
+  const queryClient = useQueryClient();
+  const invalidateIntake = useCallback(
+    (targetIntakeId: number) => {
+      if (identityId !== undefined) {
+        void queryClient.invalidateQueries({
+          queryKey: intakeStatusQueryKey(identityId, targetIntakeId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: intakePreSummaryQueryKey(identityId, targetIntakeId),
+        });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["intake"] });
+      }
+    },
+    [identityId, queryClient],
+  );
   const dict = STRINGS[lang].intake;
   const nav = STRINGS[lang].nav;
   const t = dict.voice;
@@ -277,9 +301,11 @@ export default function VoiceIntakePage() {
         submittedIntakeId = submitted.intake_id;
         setIntakeId(submitted.intake_id);
         setAttemptsUsed(1);
+        invalidateIntake(submitted.intake_id);
       } else {
         const rerecorded = await reRecordIntake(intakeId, mediaRef);
         setAttemptsUsed(rerecorded.record_attempts);
+        invalidateIntake(rerecorded.intake_id);
         if (rerecorded.forced_text) {
           // The server capped voice attempts and routed the intake to text.
           setStage("poor");
@@ -298,7 +324,7 @@ export default function VoiceIntakePage() {
         error instanceof ApiError ? error.traceId : undefined,
       );
     }
-  }, [intakeId, lang, failWith, revokeAudioUrl]);
+  }, [intakeId, lang, failWith, revokeAudioUrl, invalidateIntake]);
 
   // Poll the server detail while Structuring (in-button pending, §9.1):
   // ready_for_review -> done (pre-summary link), re_record / unusable ->

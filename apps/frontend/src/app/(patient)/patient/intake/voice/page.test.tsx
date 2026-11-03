@@ -15,6 +15,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import VoiceIntakePage from "./page";
@@ -29,6 +30,7 @@ import {
   uploadIntakeMedia,
 } from "@/lib/intake/api";
 import { openMicrophoneRecorder } from "@/lib/intake/recorder";
+import { makeTestQueryClient } from "@/test/query-client";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn() }),
@@ -85,6 +87,14 @@ const submit = vi.mocked(submitIntake);
 const rerecord = vi.mocked(reRecordIntake);
 const pollIntake = vi.mocked(fetchIntake);
 const composerOpened = vi.mocked(recordComposerOpened);
+
+function renderWithQuery(ui: React.ReactNode) {
+  return render(
+    <QueryClientProvider client={makeTestQueryClient()}>
+      {ui}
+    </QueryClientProvider>,
+  );
+}
 
 function fakeRecorder() {
   return {
@@ -224,7 +234,7 @@ async function advance(ms: number) {
 
 /** Render the page, record a take (mic -> stop) ending in the preview stage. */
 async function recordTake(seconds: number) {
-  render(<VoiceIntakePage />);
+  renderWithQuery(<VoiceIntakePage />);
   const recorder = fakeRecorder();
   openMic.mockResolvedValue(recorder);
   fireEvent.click(screen.getByTestId("mic-button"));
@@ -241,7 +251,7 @@ function expectVisible(testId: string) {
 
 describe("VoiceIntakePage (inside the patient shell)", () => {
   it("mounts within the patient AppShell", () => {
-    render(
+    renderWithQuery(
       <PatientGroupLayout>
         <VoiceIntakePage />
       </PatientGroupLayout>,
@@ -250,7 +260,7 @@ describe("VoiceIntakePage (inside the patient shell)", () => {
   });
 
   it("renders the idle state: mic target, 00:00 duration, idle copy", () => {
-    render(<VoiceIntakePage />);
+    renderWithQuery(<VoiceIntakePage />);
     expect(screen.getByTestId("mic-button")).toBeInTheDocument();
     expect(screen.getByTestId("mic-button")).not.toBeDisabled();
     expect(screen.getByTestId("duration")).toHaveTextContent("00:00");
@@ -262,7 +272,7 @@ describe("VoiceIntakePage (inside the patient shell)", () => {
 
 describe("VoiceIntakePage funnel entry (B4e, #721)", () => {
   it("reports the composer opened once on mount, before anything is recorded", async () => {
-    render(<VoiceIntakePage />);
+    renderWithQuery(<VoiceIntakePage />);
     await flush();
 
     expect(composerOpened).toHaveBeenCalledTimes(1);
@@ -271,7 +281,7 @@ describe("VoiceIntakePage funnel entry (B4e, #721)", () => {
   it("survives a failed entry ping without showing the patient an error", async () => {
     composerOpened.mockRejectedValue(new Error("analytics down"));
 
-    render(<VoiceIntakePage />);
+    renderWithQuery(<VoiceIntakePage />);
     await flush();
 
     expect(composerOpened).toHaveBeenCalledTimes(1);
@@ -288,7 +298,7 @@ describe("VoiceIntakePage recording / playback / cap", () => {
     const recorder = fakeRecorder();
     openMic.mockResolvedValue(recorder);
 
-    render(<VoiceIntakePage />);
+    renderWithQuery(<VoiceIntakePage />);
     fireEvent.click(screen.getByTestId("mic-button"));
     await flush();
 
@@ -306,7 +316,7 @@ describe("VoiceIntakePage recording / playback / cap", () => {
     const recorder = fakeRecorder();
     openMic.mockResolvedValue(recorder);
 
-    render(<VoiceIntakePage />);
+    renderWithQuery(<VoiceIntakePage />);
     fireEvent.click(screen.getByTestId("mic-button"));
     await flush();
     await flush();
@@ -321,7 +331,7 @@ describe("VoiceIntakePage recording / playback / cap", () => {
 
   it("pauses and resumes the counter", async () => {
     openMic.mockResolvedValue(fakeRecorder());
-    render(<VoiceIntakePage />);
+    renderWithQuery(<VoiceIntakePage />);
     fireEvent.click(screen.getByTestId("mic-button"));
     await flush();
 
@@ -456,7 +466,7 @@ describe("VoiceIntakePage playback state toggle (#395)", () => {
   });
 
   it("unmounts mid-playback without error and detaches audio", async () => {
-    render(<VoiceIntakePage />);
+    renderWithQuery(<VoiceIntakePage />);
     const recorder = fakeRecorder();
     openMic.mockResolvedValue(recorder);
     fireEvent.click(screen.getByTestId("mic-button"));
@@ -475,7 +485,7 @@ describe("VoiceIntakePage playback state toggle (#395)", () => {
   });
 
   it("shows the Hindi Stop preview label while playing", async () => {
-    render(<LangFlipHost />);
+    renderWithQuery(<LangFlipHost />);
     fireEvent.click(screen.getByText("flip-lang"));
     await flush();
 
@@ -767,7 +777,7 @@ describe("VoiceIntakePage upload retry ladder", () => {
 
 describe("VoiceIntakePage bilingual EN/HI (REQ-006)", () => {
   it("switches all visible copy to Hindi when the locale flips", async () => {
-    render(<LangFlipHost />);
+    renderWithQuery(<LangFlipHost />);
     fireEvent.click(screen.getByText("flip-lang"));
     await flush();
 
@@ -786,7 +796,7 @@ describe("VoiceIntakePage bilingual EN/HI (REQ-006)", () => {
   });
 
   it("starts in English with the correct EN strings", () => {
-    render(<VoiceIntakePage />);
+    renderWithQuery(<VoiceIntakePage />);
     expect(
       screen.getByRole("heading", { name: voice.title }),
     ).toBeInTheDocument();

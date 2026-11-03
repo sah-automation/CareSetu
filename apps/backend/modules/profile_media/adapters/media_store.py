@@ -130,15 +130,23 @@ class _ProfileMediaCircuit:
         self,
         policy: ProfileMediaRetryPolicy,
         monotonic_clock: Callable[[], float],
+        enabled: bool = True,
     ) -> None:
         self._policy = policy
         self._monotonic_clock = monotonic_clock
+        self._enabled = bool(enabled)
         self._state = "closed"
         self._consecutive_failures = 0
         self._opened_at = 0.0
         self._probe_in_flight = False
 
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
     def allow_request(self) -> bool:
+        if not self._enabled:
+            return True
         if self._state == "open":
             if self._monotonic_clock() - self._opened_at < (
                 self._policy.circuit_breaker_cooldown_seconds
@@ -152,6 +160,8 @@ class _ProfileMediaCircuit:
         return True
 
     def record_success(self) -> None:
+        if not self._enabled:
+            return
         if self._state == "half_open":
             logger.info("profile media circuit recovered")
         self._state = "closed"
@@ -160,6 +170,8 @@ class _ProfileMediaCircuit:
         self._probe_in_flight = False
 
     def record_failure(self) -> None:
+        if not self._enabled:
+            return
         self._probe_in_flight = False
         if self._state == "half_open":
             self._state = "open"
@@ -181,6 +193,7 @@ class ResilientProfileMediaStore:
         self,
         backend: ProfileMediaStore,
         policy: ProfileMediaRetryPolicy,
+        enabled: bool | None = None,
         *,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic_clock: Callable[[], float] = time.monotonic,
@@ -190,13 +203,24 @@ class ResilientProfileMediaStore:
         self._policy = policy
         self._sleep = sleep
         self._random_value = random_value
-        self._circuit = _ProfileMediaCircuit(policy, monotonic_clock)
+        self._enabled = True if enabled is None else bool(enabled)
+        self._circuit = _ProfileMediaCircuit(
+            policy,
+            monotonic_clock,
+            enabled=self._enabled,
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
 
     async def _run(
         self,
         operation: str,
         call: Callable[[], Awaitable[_ResultT]],
     ) -> _ResultT:
+        if not self._enabled:
+            return await call()
         if not self._circuit.allow_request():
             logger.warning("profile media circuit open operation=%s", operation)
             raise ProfileMediaStoreError(
@@ -647,6 +671,7 @@ def build_profile_media_store(
     supabase_url: str = "",
     supabase_service_role_key: str = "",
     retry_policy: ProfileMediaRetryPolicy | None = None,
+    enabled: bool | None = None,
     timeout_seconds: float | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> ProfileMediaStore:
@@ -683,5 +708,10 @@ def build_profile_media_store(
             timeout_seconds=timeout_seconds,
             client=client,
         )
-        return ResilientProfileMediaStore(remote_store, retry_policy)
+        resolved_enabled = enabled
+        return ResilientProfileMediaStore(
+            remote_store,
+            retry_policy,
+            enabled=resolved_enabled,
+        )
     return LocalFilesystemProfileMediaStore(root=root, key_bytes=key_bytes)

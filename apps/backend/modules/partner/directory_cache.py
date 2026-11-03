@@ -1,12 +1,12 @@
 """MOD-002 Redis client for the directory-search result cache (PHASE-6 T02b, #314).
 
+Delegates to the shared application-owned Redis client (ARCH-P1 #812).
 Optional Redis connection pool managed at app lifetime; gracefully degrades to
-SQL-only when unavailable or misconfigured - the same optional-with-SQL-fallback
-discipline as the consent-status cache (``consent/redis_cache.py``). Redis is an
-accelerator ONLY, never a correctness surface (ADR-0011 lazy correctness): the
-search facade re-derives partner validity from recorded dates on every read -
-even on a cache hit - so a stale row for a deactivated or expired partner can
-never surface.
+SQL-only when unavailable or misconfigured. Redis is an accelerator ONLY,
+never a correctness surface (ADR-0011 lazy correctness): the search facade
+re-derives partner validity from recorded dates on every read - even on a
+cache hit - so a stale row for a deactivated or expired partner can never
+surface.
 """
 
 from __future__ import annotations
@@ -16,15 +16,13 @@ import json
 import logging
 from typing import Any
 
-import redis.asyncio as redis
 from redis.asyncio import Redis
 
 from app.config import Settings
+from app.redis import get_redis_client
 from observability.otel import record_cache_hit, record_cache_miss
 
 _LOG = logging.getLogger(__name__)
-
-_REDIS_CLIENT: Redis | None = None
 
 # Cache key namespace for directory search results. Distinct from the consent
 # namespace (``consent:*``) so the two caches never collide on the same server.
@@ -32,48 +30,37 @@ _DIRECTORY_NAMESPACE = "directory"
 
 
 async def init_directory_redis_client(settings: Settings) -> None:
-    """Initialize the global directory-search Redis client from settings.
+    """Initialize the shared Redis client for directory cache.
 
-    Called once at app startup from ``create_app``. If ``redis_url`` is empty
-    or connection fails, the client stays ``None`` and all cache operations
-    become no-ops (SQL fallback) - Redis down/absent is a degraded state, never
-    an error path.
+    Delegates to the shared client init. Kept for backward compatibility
+    with the lifespan call signature.
     """
-    global _REDIS_CLIENT
-    url = settings.redis_url.strip()
-    if not url:
-        _LOG.info("Redis URL not configured; directory cache disabled (SQL fallback)")
-        return
-    try:
-        _REDIS_CLIENT = redis.from_url(
-            url,
-            encoding="utf-8",
-            decode_responses=True,
-            max_connections=10,
-            socket_connect_timeout=1.0,
-            socket_timeout=1.0,
-        )
-        await _REDIS_CLIENT.ping()
+    from app.redis import init_redis_client
+
+    await init_redis_client(settings)
+    if get_redis_client() is not None:
         _LOG.info("Redis directory cache connected")
-    except Exception as exc:
-        _LOG.warning("Redis directory cache unavailable (%s); falling back to SQL", exc)
-        _REDIS_CLIENT = None
+    else:
+        _LOG.info("Redis URL not configured; directory cache disabled (SQL fallback)")
 
 
 async def close_directory_redis_client() -> None:
-    """Close the directory-search Redis connection pool at app shutdown."""
-    global _REDIS_CLIENT
-    if _REDIS_CLIENT is not None:
-        await _REDIS_CLIENT.close()
-        _REDIS_CLIENT = None
+    """Close the shared Redis connection pool at app shutdown.
+
+    Delegates to the shared client close. Kept for backward compatibility
+    with the lifespan call signature.
+    """
+    from app.redis import close_redis_client
+
+    await close_redis_client()
 
 
 def get_directory_redis_client() -> Redis | None:
-    """Return the active directory-search Redis client, or ``None`` if unavailable.
+    """Return the active shared Redis client, or ``None`` if unavailable.
 
     Callers MUST treat ``None`` as a cache miss and fall back to SQL.
     """
-    return _REDIS_CLIENT
+    return get_redis_client()
 
 
 def _cache_key(

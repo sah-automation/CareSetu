@@ -126,7 +126,10 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from app.config import Settings
+from app.cache import get_cached, set_cached
+from app.config import Settings, get_settings
+from app.db import AsyncEngineLike
+from app.redis import get_redis_client
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import count_outbox_rows, discover_outbox_tables
 from bus.envelope import Envelope
@@ -6217,6 +6220,29 @@ class HumanLabelResult(EvaluationScore):
     created: bool = True
 
 
+# Provider-health cache (ARCH-P1 #820) namespace.
+_PROVIDER_HEALTH_CACHE_NAMESPACE = "provider_health"
+
+
+def _provider_health_cache_ttl(self: object) -> int:
+    ttl = getattr(self, "_provider_health_cache_ttl_seconds", None)
+    if ttl is None:
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            try:
+                settings = get_settings()
+            except Exception:
+                settings = None
+        if settings is not None:
+            ttl = getattr(settings, "provider_health_cache_ttl_seconds", None)
+    if ttl is None:
+        ttl = 0
+    try:
+        return int(ttl or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class ObservabilityFacade:
     """Typed public facade for observability.
 
@@ -6239,13 +6265,26 @@ class ObservabilityFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         settings: Settings | None = None,
         ops_facade: OpsFacade | None = None,
+        provider_health_cache_ttl_seconds: int | None = None,
+        **_cache_kwargs: Any,
     ) -> None:
         self._engine = engine
         self._settings = settings
         self._ops_facade = ops_facade
+        _ttl = provider_health_cache_ttl_seconds
+        for _k in (
+            "provider_health_cache_ttl",
+            "provider_health_ttl_seconds",
+            "cache_ttl_seconds",
+            "ttl_seconds",
+            "ttl",
+        ):
+            if _ttl is None:
+                _ttl = _cache_kwargs.get(_k)
+        self._provider_health_cache_ttl_seconds = _ttl
 
     def set_ops_facade(self, ops_facade: OpsFacade) -> None:
         """Set the OpsFacade for alert delivery operations.
@@ -6273,9 +6312,61 @@ class ObservabilityFacade:
 
     async def get_quality(self, *, days: int, today: date | None = None) -> QualityReport:
         """Read the quality rates and per-provider health over the last ``days`` days."""
+        import contextlib
+
         from_date, to_date = window_for(days, today=today)
+        ttl = _provider_health_cache_ttl(self)
+        _client = None
+        _settings = getattr(self, "_settings", None)
+        if ttl > 0:
+            try:
+                _client = get_redis_client()
+            except Exception:
+                _client = None
+            if _settings is None:
+                try:
+                    _settings = get_settings()
+                except Exception:
+                    _settings = None
+
+        cache_key = f"{from_date.isoformat()}:{to_date.isoformat()}"
+
+        # Cache read.
+        if _client is not None:
+            try:
+                cached = await get_cached(
+                    _client,
+                    _PROVIDER_HEALTH_CACHE_NAMESPACE,
+                    key=cache_key,
+                    settings=_settings,
+                    phi=False,
+                )
+            except Exception:
+                cached = None
+            if isinstance(cached, dict):
+                try:
+                    return QualityReport(**cached)
+                except Exception:
+                    cached = None
+            elif cached is not None:
+                cached = None
+
         async with self._engine.begin() as connection:
-            return await query_quality(connection, from_date=from_date, to_date=to_date)
+            result = await query_quality(connection, from_date=from_date, to_date=to_date)
+
+        # Cache write.
+        if _client is not None:
+            with contextlib.suppress(Exception):
+                await set_cached(
+                    _client,
+                    _PROVIDER_HEALTH_CACHE_NAMESPACE,
+                    key=cache_key,
+                    value=result.model_dump(mode="json"),
+                    settings=_settings,
+                    ttl_seconds=ttl,
+                    phi=False,
+                )
+        return result
 
     async def get_overview(self, *, days: int, today: date | None = None) -> Overview:
         """Read the headline KPIs over the last ``days`` days."""

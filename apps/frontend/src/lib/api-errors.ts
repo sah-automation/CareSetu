@@ -37,13 +37,16 @@ export class ApiError extends Error {
    * nothing left to read. `code` alone cannot say which field.
    */
   readonly details: Record<string, unknown>;
+  /** The HTTP status that produced this error, absent for network failures. */
+  readonly status?: number;
 
-  constructor(envelope: ErrorEnvelope) {
+  constructor(envelope: ErrorEnvelope, status?: number) {
     super(envelope.message);
     this.name = "ApiError";
     this.code = envelope.code;
     this.traceId = envelope.trace_id;
     this.details = envelope.details;
+    this.status = status;
   }
 
   /**

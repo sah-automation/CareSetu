@@ -27,13 +27,14 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from cache_fixtures import FakeRedis as _FakeRedis
 from conftest import seed_daltonganj_service_area
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 from test_directory_search import _activate_partner, _pending_partner
 
-import modules.partner.directory_cache as directory_cache
+import app.redis as shared_redis
 from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
@@ -90,40 +91,7 @@ async def clean_partner(database_url: str, migration: None) -> Iterator[None]:
     finally:
         await engine.dispose()
     yield
-    directory_cache._REDIS_CLIENT = None
-
-
-class _FakeRedis:
-    """In-memory stand-in for the ``redis.asyncio.Redis`` surface the facade
-    touches through :mod:`modules.partner.directory_cache`."""
-
-    def __init__(self) -> None:
-        self.store: dict[str, str] = {}
-
-    async def get(self, key: str) -> str | None:
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.store[key] = value
-        self.last_ttl: int | None = ex
-
-    async def scan(
-        self, cursor: int, match: str | None = None, count: int | None = None
-    ) -> tuple[int, list[str]]:
-        keys = (
-            sorted(self.store)
-            if match is None
-            else [k for k in self.store if k.startswith(match.rstrip("*"))]
-        )
-        return 0, keys
-
-    async def delete(self, *keys: str) -> int:
-        removed = 0
-        for key in keys:
-            if key in self.store:
-                del self.store[key]
-                removed += 1
-        return removed
+    shared_redis._REDIS_CLIENT = None
 
 
 def _facade(database_url: str, tmp_path: Path) -> tuple[IamFacade, PartnerFacade]:
@@ -160,7 +128,7 @@ async def test_stale_cached_partner_never_surfaces(
     was written is rejected on read and fresh SQL replaces the stale row."""
     _, partner = _facade(database_url, tmp_path)
     cache = _FakeRedis()
-    directory_cache._REDIS_CLIENT = cache
+    shared_redis._REDIS_CLIENT = cache
 
     await _activate_partner(
         database_url, partner, practice_name="Dr. Clinch Square", specialty="General Physician"
@@ -203,7 +171,7 @@ async def test_activation_flushes_namespace_and_new_partner_appears(
     is visible on the next search even though the pre-approval row was cached."""
     _, partner = _facade(database_url, tmp_path)
     cache = _FakeRedis()
-    directory_cache._REDIS_CLIENT = cache
+    shared_redis._REDIS_CLIENT = cache
 
     await _activate_partner(
         database_url, partner, practice_name="Dr. Clinch Square", specialty="General Physician"
@@ -235,7 +203,7 @@ async def test_credential_invalidated_reject_of_active_partner_flushes_cache(
     deindex path) invalidates the cache and the deactivated partner hides."""
     _, partner = _facade(database_url, tmp_path)
     cache = _FakeRedis()
-    directory_cache._REDIS_CLIENT = cache
+    shared_redis._REDIS_CLIENT = cache
 
     active_id = await _activate_partner(
         database_url, partner, practice_name="Dr. Clinch Square", specialty="General Physician"
@@ -261,7 +229,7 @@ async def test_credential_purge_flushes_cache(
     """The permanent-rejection credential purge also flushes the namespace."""
     _, partner = _facade(database_url, tmp_path)
     cache = _FakeRedis()
-    directory_cache._REDIS_CLIENT = cache
+    shared_redis._REDIS_CLIENT = cache
 
     await _activate_partner(
         database_url, partner, practice_name="Dr. Clinch Square", specialty="General Physician"

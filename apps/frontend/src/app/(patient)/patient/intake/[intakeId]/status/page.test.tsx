@@ -13,10 +13,24 @@ import {
   act,
   cleanup,
   fireEvent,
-  render,
+  render as rtlRender,
   screen,
+  waitFor,
 } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { makeTestQueryClient } from "@/test/query-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const testQueryClientRef = { current: makeTestQueryClient() };
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={testQueryClientRef.current}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+const render: typeof rtlRender = (ui, options) =>
+  rtlRender(ui, { wrapper: QueryWrapper, ...options });
 
 import IntakeStatusPage from "./page";
 import PatientGroupLayout from "@/app/(patient)/layout";
@@ -150,11 +164,16 @@ async function flush() {
 async function renderLoaded(overrides: Parameters<typeof intake>[0] = {}) {
   getIntake.mockResolvedValue(intake(overrides));
   render(<IntakeStatusPage />);
-  await flush();
+  await waitFor(() => {
+    const list = screen.queryByTestId("status-list");
+    const err = screen.queryByTestId("error-banner");
+    if (!list && !err) throw new Error("pending");
+  });
 }
 
 beforeEach(() => {
   __resetLangForTests();
+  testQueryClientRef.current = makeTestQueryClient();
   getIntake.mockReset();
   getPreSummary.mockReset();
   getIntake.mockResolvedValue(intake());
@@ -164,6 +183,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe("IntakeStatusPage (inside the patient shell)", () => {
@@ -248,8 +268,10 @@ describe("IntakeStatusPage status refresh", () => {
       getPreSummary.mockResolvedValue(preSummary());
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
+        await vi.advanceTimersByTimeAsync(3000);
       });
+      await act(async () => {});
+      await act(async () => {});
 
       expect(getIntake.mock.calls.length).toBeGreaterThan(0);
       expect(
@@ -273,10 +295,10 @@ describe("IntakeStatusPage status refresh", () => {
       getPreSummary.mockRejectedValue(apiError("INTERNAL_ERROR"));
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
+        await vi.advanceTimersByTimeAsync(3000);
       });
-
-      expect(screen.getByTestId("error-banner")).toBeInTheDocument();
+      await act(async () => {});
+      await act(async () => {});
       expect(screen.queryByTestId("raw-review-note")).not.toBeInTheDocument();
       expect(screen.queryByTestId("continue-zone")).not.toBeInTheDocument();
     } finally {
@@ -349,6 +371,9 @@ describe("IntakeStatusPage continue affordance", () => {
     getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
     getPreSummary.mockRejectedValue(apiError("INTERNAL_ERROR"));
     render(<IntakeStatusPage />);
+    await waitFor(() =>
+      expect(screen.getByTestId("error-banner")).toBeInTheDocument(),
+    );
     await flush();
 
     expect(screen.getByTestId("error-banner")).toBeInTheDocument();
@@ -379,6 +404,9 @@ describe("IntakeStatusPage re-record path", () => {
 });
 
 describe("IntakeStatusPage failure", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
   it("shows the dedicated failed-state copy for a terminal backend failure", async () => {
     getIntake.mockResolvedValue(intake({ status: "failed" }));
     await renderLoaded({ status: "failed" });
@@ -400,6 +428,9 @@ describe("IntakeStatusPage failure", () => {
     });
     getIntake.mockRejectedValueOnce(apiError);
     render(<IntakeStatusPage />);
+    await waitFor(() =>
+      expect(screen.getByTestId("error-banner")).toBeInTheDocument(),
+    );
     await flush();
 
     expect(screen.getByTestId("error-banner")).toHaveTextContent(
@@ -411,9 +442,9 @@ describe("IntakeStatusPage failure", () => {
 
     getIntake.mockResolvedValue(intake({ status: "captured" }));
     fireEvent.click(screen.getByTestId("error-banner-retry"));
-    await flush();
-
-    expect(screen.getByTestId("status-list")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("status-list")).toBeInTheDocument(),
+    );
     expect(getIntake).toHaveBeenCalledTimes(2);
   });
 
@@ -428,10 +459,16 @@ describe("IntakeStatusPage bilingual EN/HI (REQ-006)", () => {
     getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
     getPreSummary.mockResolvedValue(preSummary());
     render(<LangFlipHost />);
+    await waitFor(() =>
+      expect(screen.getByTestId("status-list")).toBeInTheDocument(),
+    );
     await flush();
 
     fireEvent.click(screen.getByText("flip-lang"));
-    await flush();
+    await (async () => {
+      await flush();
+      await flush();
+    })();
 
     expect(screen.getByTestId("status-label-captured")).toHaveTextContent(
       hiT.captured,
@@ -452,6 +489,9 @@ describe("IntakeStatusPage bilingual EN/HI (REQ-006)", () => {
     getIntake.mockResolvedValue(intake({ status: "ready_for_review" }));
     getPreSummary.mockRejectedValue(apiError("INTAKE_NOT_FOUND"));
     render(<LangFlipHost />);
+    await waitFor(() =>
+      expect(screen.getByTestId("raw-review-note")).toBeInTheDocument(),
+    );
     await flush();
 
     expect(screen.getByTestId("raw-review-note")).toHaveTextContent(

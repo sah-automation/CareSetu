@@ -38,8 +38,9 @@ from typing import Any
 
 from sqlalchemy import Text, cast, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.partner.directory_models import (
     DirectoryEntry as DirectoryEntry,
@@ -135,7 +136,7 @@ class DirectoryFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         credential_validity: CredentialValidityPort,
         directory_cache: DirectoryCachePort,
         *,

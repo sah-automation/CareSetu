@@ -40,8 +40,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.audit.facade import AuditFacade
 from modules.partner.credential_validity import CloseOutCredential
@@ -153,7 +154,7 @@ class OperatorGateFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         credential_validity: CredentialValidityPort,
         directory_cache: DirectoryCachePort,
         audit_facade: AuditFacade | None = None,

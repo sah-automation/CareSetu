@@ -15,7 +15,7 @@
 
 import {
   cleanup,
-  render,
+  render as rtlRender,
   screen,
   waitFor,
   within,
@@ -26,6 +26,8 @@ import type { ReactNode } from "react";
 import DoctorCasesIndexPage from "./page";
 import { ApiError } from "@/lib/api-errors";
 import { listDoctorCases, type DoctorCaseRow } from "@/lib/doctor/api";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { makeTestQueryClient } from "@/test/query-client";
 import type { DoctorCasesListView } from "@/lib/doctor/api";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
@@ -52,9 +54,31 @@ vi.mock("@/lib/doctor/api", async (importOriginal) => {
   return { ...mod, listDoctorCases: vi.fn() };
 });
 
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: { id: 7, phone: "+911234567890", roles: ["partner"] },
+    selectedRole: "partner",
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const t = STRINGS.en.doctorConsole;
 const hiT = STRINGS.hi.doctorConsole;
 const getCases = vi.mocked(listDoctorCases);
+
+const testQueryClientRef = { current: makeTestQueryClient() };
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={testQueryClientRef.current}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+const render: typeof rtlRender = (ui, options) =>
+  rtlRender(ui, { wrapper: QueryWrapper, ...options });
 
 function caseItem(
   id: number,
@@ -81,6 +105,7 @@ function casesView(...rows: DoctorCaseRow[]): DoctorCasesListView {
 }
 
 beforeEach(() => {
+  testQueryClientRef.current = makeTestQueryClient();
   getCases.mockResolvedValue(casesView());
 });
 

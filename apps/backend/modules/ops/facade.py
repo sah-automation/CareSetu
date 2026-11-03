@@ -7,9 +7,9 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
+from app.db import AsyncEngineLike
 from bus.events import EVENT_AUDIT_EVENT
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.settings import (
@@ -43,7 +43,7 @@ class OpsFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         settings: Settings,
         cache_ttl_seconds: int | None = None,
     ) -> None:

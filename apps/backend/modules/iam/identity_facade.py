@@ -19,9 +19,12 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.config import DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
+from app.cache import get_cached, invalidate, set_cached
+from app.config import DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES, get_settings
+from app.db import AsyncEngineLike
+from app.redis import get_redis_client
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain import events
@@ -59,6 +62,24 @@ from modules.iam.session_facade import grant_operator_role
 from modules.profile_media.facade import PATIENT_PREFIX, ProfileMediaStore
 
 _IAM_SCHEMA = "iam"
+
+# Patient profile cache (ARCH-P1 #817) marker for a "not set" profile.
+_PROFILE_NOT_SET_MARKER_KEY = "__patient_profile_not_set__"
+_PROFILE_NOT_SET_MARKER = {_PROFILE_NOT_SET_MARKER_KEY: True}
+_PROFILE_CACHE_NAMESPACE = "profile"
+
+
+def _profile_cache_ttl(self: object) -> int:
+    ttl = getattr(self, "_profile_cache_ttl_seconds", None)
+    if ttl is None:
+        try:
+            ttl = int(get_settings().profile_cache_ttl_seconds)
+        except Exception:
+            ttl = 0
+    try:
+        return int(ttl or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 class RegisterPatientResult(BaseModel):
@@ -257,13 +278,14 @@ class IdentityFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         otp_sender: OtpSender,
         clock: Callable[[], datetime] = _default_clock,
         *,
         media_store: ProfileMediaStore | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
+        profile_cache_ttl_seconds: int | None = None,
     ) -> None:
         self._engine = engine
         self._otp_sender = otp_sender
@@ -274,10 +296,12 @@ class IdentityFacade:
         # (coding-standards §9.2).
         self._photo_max_bytes = photo_max_bytes
         # US-20 (#533): the private profile-media store backs the patient's
-        # profile photo. Injected at the composition root; None is the
-        # unconfigured state the photo methods refuse loudly.
+        # profile photo. Injected at the composition root; None is the unconfigured
+        # state the photo methods refuse loudly.
         self._media_store = media_store
         self._sleep = sleep
+        # Profile cache TTL (ARCH-P1 #817). ``None`` falls back to settings.
+        self._profile_cache_ttl_seconds = profile_cache_ttl_seconds
 
     async def register_patient(self, phone: str) -> RegisterPatientResult:
         """Begin-or-resume: create the identity on first use, else resolve it.
@@ -817,12 +841,22 @@ class IdentityFacade:
                 )
             )
 
+        _owns_transaction = connection is None
         if connection is not None:
             await _run(connection)
         else:
             async with self._engine.begin() as connection:
                 await _run(connection)
 
+        if _owns_transaction:
+            with contextlib.suppress(Exception):
+                _client = get_redis_client()
+                if _client is not None:
+                    await invalidate(
+                        _client,
+                        _PROFILE_CACHE_NAMESPACE,
+                        key=identity_id,
+                    )
         return profile
 
     async def get_patient_profile(
@@ -859,10 +893,62 @@ class IdentityFacade:
                 photo_ref=row["photo_ref"],
             )
 
+        _ttl = _profile_cache_ttl(self)
+        _caller_connection = connection is not None
+        _client = None
+        _settings = None
+        if not _caller_connection and _ttl > 0:
+            try:
+                _client = get_redis_client()
+                _settings = get_settings()
+            except Exception:
+                _client = None
+                _settings = None
+
+        # Cache read (bypassed entirely when the caller supplied a connection).
+        if not _caller_connection and _client is not None:
+            try:
+                cached = await get_cached(
+                    _client,
+                    _PROFILE_CACHE_NAMESPACE,
+                    key=identity_id,
+                    settings=_settings,
+                    phi=True,
+                )
+            except Exception:
+                cached = None
+            if isinstance(cached, dict):
+                if cached.get(_PROFILE_NOT_SET_MARKER_KEY):
+                    return None
+                try:
+                    return PatientProfile(**cached)
+                except Exception:
+                    # Malformed/incompatible payload -> treat as a miss.
+                    cached = None
+            elif cached is not None:
+                # Unexpected typed payload: fall through to SQL.
+                cached = None
+
         if connection is not None:
-            return await _read(connection)
-        async with self._engine.begin() as connection:
-            return await _read(connection)
+            result = await _read(connection)
+        else:
+            async with self._engine.begin() as _conn:
+                result = await _read(_conn)
+
+        # Cache write (bypassed entirely when the caller supplied a connection).
+        if not _caller_connection and _client is not None:
+            value = result.model_dump() if result is not None else _PROFILE_NOT_SET_MARKER
+            with contextlib.suppress(Exception):
+                await set_cached(
+                    _client,
+                    _PROFILE_CACHE_NAMESPACE,
+                    key=identity_id,
+                    value=value,
+                    settings=_settings,
+                    phi=True,
+                    ttl_seconds=_ttl,
+                )
+        return result
 
     async def save_patient_photo(
         self,
@@ -920,6 +1006,10 @@ class IdentityFacade:
             with contextlib.suppress(Exception):
                 await self._media_store.delete(object_key=profile.photo_ref)
         profile.photo_ref = new_key
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _PROFILE_CACHE_NAMESPACE, key=identity_id)
         return profile
 
     async def get_patient_photo(self, *, identity_id: int) -> PhotoContent | None:
@@ -970,6 +1060,10 @@ class IdentityFacade:
         with contextlib.suppress(Exception):
             await self._media_store.delete(object_key=old_key)
         profile.photo_ref = None
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _PROFILE_CACHE_NAMESPACE, key=identity_id)
         return profile
 
     async def _store_photo(self, data: bytes, identity_id: int) -> str:

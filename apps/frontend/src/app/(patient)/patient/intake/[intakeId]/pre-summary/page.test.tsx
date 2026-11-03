@@ -20,6 +20,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import PreSummaryReviewPage from "./page";
@@ -34,6 +35,7 @@ import {
   type PreSummaryView,
   type StructuredFields,
 } from "@/lib/intake/api";
+import { makeTestQueryClient } from "@/test/query-client";
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ intakeId: "42" }),
@@ -80,6 +82,14 @@ const hiT = STRINGS.hi.intake.preSummary;
 const getSummary = vi.mocked(fetchPreSummary);
 const getIntake = vi.mocked(fetchIntake);
 const saveEdits = vi.mocked(savePatientEdits);
+
+function renderWithQuery(ui: React.ReactNode) {
+  return render(
+    <QueryClientProvider client={makeTestQueryClient()}>
+      {ui}
+    </QueryClientProvider>,
+  );
+}
 
 function preSummary(overrides: Partial<PreSummaryView> = {}): PreSummaryView {
   return {
@@ -144,7 +154,7 @@ async function flush() {
 
 async function renderLoaded(overrides: Partial<PreSummaryView> = {}) {
   getSummary.mockResolvedValue(preSummary(overrides));
-  render(<PreSummaryReviewPage />);
+  renderWithQuery(<PreSummaryReviewPage />);
   await flush();
 }
 
@@ -165,7 +175,7 @@ afterEach(() => {
 
 describe("PreSummaryReviewPage (inside the patient shell)", () => {
   it("mounts within the patient AppShell", async () => {
-    render(
+    renderWithQuery(
       <PatientGroupLayout>
         <PreSummaryReviewPage />
       </PatientGroupLayout>,
@@ -346,7 +356,7 @@ describe("PreSummaryReviewPage failure and edge cases", () => {
       details: {},
     });
     getSummary.mockRejectedValueOnce(apiError);
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
 
     expect(screen.getByTestId("error-banner")).toHaveTextContent(
@@ -408,7 +418,7 @@ describe("PreSummaryReviewPage failure and edge cases", () => {
 
   it("reads the intake id from the route params and fetches that pre-summary", async () => {
     getSummary.mockResolvedValue(preSummary());
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
     expect(getSummary).toHaveBeenCalledWith(42);
   });
@@ -431,7 +441,7 @@ describe("PreSummaryReviewPage still-processing poll state (issue 2: 404 race)",
     getSummary.mockRejectedValueOnce(notFound).mockResolvedValue(preSummary());
     getIntake.mockResolvedValue(intakeDetail({ status: "structuring" }));
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
 
     // The row does not exist yet: the page shows the calm preparing state
@@ -460,7 +470,7 @@ describe("PreSummaryReviewPage still-processing poll state (issue 2: 404 race)",
       .mockResolvedValue(preSummary()); // poll 3
     getIntake.mockResolvedValue(intakeDetail({ status: "structuring" }));
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
     expect(screen.getByTestId("load-processing")).toBeInTheDocument();
 
@@ -479,7 +489,7 @@ describe("PreSummaryReviewPage still-processing poll state (issue 2: 404 race)",
     getSummary.mockRejectedValue(notFound);
     getIntake.mockResolvedValue(intakeDetail({ status: "structuring" }));
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
     expect(screen.getByTestId("load-processing")).toBeInTheDocument();
 
@@ -496,7 +506,7 @@ describe("PreSummaryReviewPage still-processing poll state (issue 2: 404 race)",
     getSummary.mockRejectedValueOnce(notFound);
     getIntake.mockResolvedValue(intakeDetail({ status: "failed" }));
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
 
     expect(screen.getByTestId("error-banner")).toHaveTextContent(
@@ -509,7 +519,7 @@ describe("PreSummaryReviewPage still-processing poll state (issue 2: 404 race)",
     getSummary.mockRejectedValueOnce(notFound);
     getIntake.mockResolvedValue(intakeDetail({ status: "captured" }));
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
 
     expect(screen.getByTestId("load-processing")).toBeInTheDocument();
@@ -540,7 +550,7 @@ describe("PreSummaryReviewPage degraded raw doctor review surface (#389)", () =>
       }),
     );
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
 
     expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
@@ -575,7 +585,7 @@ describe("PreSummaryReviewPage degraded raw doctor review surface (#389)", () =>
     getSummary.mockRejectedValueOnce(notFound);
     getIntake.mockResolvedValue(readyIntake({ mode: "voice" }));
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
 
     expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
@@ -594,7 +604,7 @@ describe("PreSummaryReviewPage degraded raw doctor review surface (#389)", () =>
       .mockResolvedValueOnce(intakeDetail({ status: "structuring" }))
       .mockResolvedValue(readyIntake());
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
     expect(screen.getByTestId("load-processing")).toBeInTheDocument();
 
@@ -612,7 +622,7 @@ describe("PreSummaryReviewPage degraded raw doctor review surface (#389)", () =>
     getSummary.mockRejectedValueOnce(notFound).mockResolvedValue(preSummary());
     getIntake.mockResolvedValue(readyIntake({ mode: "text", text: "fever" }));
 
-    render(<PreSummaryReviewPage />);
+    renderWithQuery(<PreSummaryReviewPage />);
     await flush();
     expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
 
@@ -629,7 +639,7 @@ describe("PreSummaryReviewPage degraded raw doctor review surface (#389)", () =>
     getSummary.mockRejectedValueOnce(notFound);
     getIntake.mockResolvedValue(readyIntake({ mode: "text", text: "बुखार" }));
 
-    render(<LangFlipHost />);
+    renderWithQuery(<LangFlipHost />);
     await flush();
     expect(screen.getByTestId("degraded-surface")).toBeInTheDocument();
 
@@ -648,7 +658,7 @@ describe("PreSummaryReviewPage degraded raw doctor review surface (#389)", () =>
 describe("PreSummaryReviewPage bilingual EN/HI (REQ-006)", () => {
   it("renders all visible copy in Hindi when the locale flips", async () => {
     getSummary.mockResolvedValue(preSummary());
-    render(<LangFlipHost />);
+    renderWithQuery(<LangFlipHost />);
     await flush();
 
     fireEvent.click(screen.getByText("flip-lang"));

@@ -31,6 +31,7 @@ degrades to a logged skip.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from datetime import UTC, datetime
@@ -44,7 +45,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from sqlalchemy.pool import NullPool
 
 import modules.intake.adapters as _adapters
+from app.cache import invalidate as _invalidate_cache
 from app.config import get_settings
+from app.redis import get_redis_client
 from bus.outbox_writer import write_outbox
 from modules.consent.facade import ConsentFacade
 from modules.intake.adapters.ai_gateway import (
@@ -578,6 +581,15 @@ async def _degrade_to_raw_review(
         )
     )
     logger.warning("intake %s degraded to raw doctor review: %s", intake_id, reason)
+    with contextlib.suppress(Exception):
+        _rows = await connection.execute(
+            select(intake_intakes.c.patient_id).where(intake_intakes.c.id == intake_id)
+        )
+        _pid = _rows.scalar_one_or_none()
+        if _pid is not None:
+            _client = get_redis_client()
+            if _client is not None:
+                await _invalidate_cache(_client, "intake", key=f"{_pid}:{intake_id}")
 
 
 async def _screen_prompt_injection(connection: AsyncConnection, text: str) -> None:
@@ -747,3 +759,8 @@ async def _finalize_pipeline(
         output_tokens=output_tokens,
         low_confidence=low_conf,
     )
+    with contextlib.suppress(Exception):
+        _client = get_redis_client()
+        if _client is not None:
+            await _invalidate_cache(_client, "intake", key=f"{patient_id}:{intake_id}")
+            await _invalidate_cache(_client, "intake", key=f"{patient_id}:{intake_id}:pre_summary")

@@ -51,7 +51,14 @@ import {
   ObservabilityPanelPage,
   ReadPanel,
 } from "@/components/observability/ObservabilityPanelPage";
-import { ThroughputPerMinuteChart } from "@/components/observability/ReliabilityCharts";
+import dynamic from "next/dynamic";
+const ThroughputPerMinuteChart = dynamic(
+  () =>
+    import("@/components/observability/ReliabilityCharts").then(
+      (m) => m.ThroughputPerMinuteChart,
+    ),
+  { ssr: true },
+);
 import {
   ErrorRow,
   OutboxTable,

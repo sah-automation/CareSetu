@@ -1,9 +1,16 @@
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { act, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
 
 import { AuthProvider, useAuth, type AuthContextValue } from "./AuthContext";
 import type { StoredSession } from "./session";
+import {
+  ACCESS_TOKEN_TTL_SECONDS,
+  PROACTIVE_REFRESH_RATIO,
+} from "@/lib/config";
+
+const PROACTIVE_REFRESH_MS =
+  ACCESS_TOKEN_TTL_SECONDS * 1000 * PROACTIVE_REFRESH_RATIO;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,6 +66,12 @@ function renderWithAuth(ui?: ReactNode) {
   return render(<AuthProvider>{ui ?? <TestConsumer />}</AuthProvider>);
 }
 
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -78,6 +91,8 @@ beforeEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
   mockReplace.mockReset();
+  document.cookie =
+    "caresetu_authed=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
 });
 
 afterEach(() => {
@@ -158,14 +173,19 @@ describe("AuthProvider", () => {
   it("redirects to /login when refresh also fails", async () => {
     setStoredSession(VALID_SESSION);
 
+    vi.useFakeTimers();
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     // /v1/me fails
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
-    // refresh also fails
+    // refresh also fails all three attempts
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
 
     renderWithAuth();
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -178,12 +198,17 @@ describe("AuthProvider", () => {
   it("redirects to /login when GET /v1/me returns 500 and refresh fails", async () => {
     setStoredSession(VALID_SESSION);
 
+    vi.useFakeTimers();
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
     fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
 
     renderWithAuth();
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -240,14 +265,14 @@ describe("AuthProvider", () => {
   it("handles network errors on /v1/me gracefully by trying refresh", async () => {
     setStoredSession(VALID_SESSION);
 
+    vi.useFakeTimers();
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
-    // Network error on /v1/me
-    fetchSpy.mockRejectedValueOnce(new TypeError("Failed to fetch"));
-    // Refresh also fails with network error
-    fetchSpy.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    fetchSpy.mockRejectedValue(new TypeError("Failed to fetch"));
 
     renderWithAuth();
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/login");
@@ -277,7 +302,8 @@ describe("AuthProvider", () => {
 // The seam resolves a session persisted AFTER the provider mounted - exactly
 // the OTP-login shape where the mount-only validate() saw no session. It reuses
 // the /v1/me (+ refresh retry) resolution path and applies identity/roles
-// in-flow, and is best-effort: failures never force-logout a fresh session.
+// in-flow. On refresh exhaustion the session is cleared and the user is sent to
+// /login (#837), so a dead token never leaves the app half-authenticated.
 // ---------------------------------------------------------------------------
 
 describe("AuthProvider resumeSession seam (#496)", () => {
@@ -360,7 +386,7 @@ describe("AuthProvider resumeSession seam (#496)", () => {
     expect(localStorage.getItem("caresetu.access_jwt")).toBe("refreshed-jwt");
   });
 
-  it("leaves state untouched and never force-logs-out on resolution failure", async () => {
+  it("clears the session and redirects to /login when refresh is exhausted", async () => {
     renderWithAuth();
     await waitFor(() => {
       expect(screen.getByTestId("is-loading").textContent).toBe("false");
@@ -377,12 +403,162 @@ describe("AuthProvider resumeSession seam (#496)", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("is-authenticated").textContent).toBe("false");
+      expect(mockReplace).toHaveBeenCalledWith("/login");
     });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("is-authenticated").textContent).toBe("false");
     expect(screen.getByTestId("user-id").textContent).toBe("null");
-    // A just-minted session is never cleared or redirected off on a transient miss.
-    expect(mockReplace).not.toHaveBeenCalled();
-    expect(localStorage.getItem("caresetu.session")).not.toBeNull();
+    expect(localStorage.getItem("caresetu.session")).toBeNull();
+    expect(localStorage.getItem("caresetu.access_jwt")).toBeNull();
+    expect(localStorage.getItem("caresetu.refresh_token")).toBeNull();
+  });
+
+  it("does not retry a 4xx refresh rejection", async () => {
+    renderWithAuth();
+    await waitFor(() => {
+      expect(screen.getByTestId("is-loading").textContent).toBe("false");
+    });
+
+    setStoredSession(VALID_SESSION);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+
+    await waitFor(() => {
+      screen.getByTestId("resume").click();
+    });
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/login");
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #844 proactive refresh
+//
+// The provider refreshes at 80% of ACCESS_TOKEN_TTL_SECONDS, persists the
+// rotated pair, keeps the non-httpOnly hint cookie, reschedules from the new
+// token, and tears the timer down on logout. A rejected refresh clears the
+// session and redirects to /login rather than leaving a half-auth shell.
+// ---------------------------------------------------------------------------
+
+describe("AuthProvider proactive refresh (#844)", () => {
+  it("refreshes at 80% of the token lifetime and persists rotated tokens", async () => {
+    setStoredSession(VALID_SESSION);
+    document.cookie = "caresetu_authed=1; path=/";
+
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(ME_RESPONSE), { status: 200 }),
+    );
+
+    renderWithAuth();
+    await advance(0);
+    expect(screen.getByTestId("is-authenticated").textContent).toBe("true");
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(REFRESH_RESPONSE), { status: 200 }),
+    );
+
+    await advance(PROACTIVE_REFRESH_MS - 1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    await advance(1);
+    vi.useRealTimers();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy.mock.calls[1][0]).toBe(
+      "http://localhost:8000/v1/auth/refresh",
+    );
+    expect(localStorage.getItem("caresetu.access_jwt")).toBe("refreshed-jwt");
+    expect(localStorage.getItem("caresetu.refresh_token")).toBe(
+      "refreshed-refresh",
+    );
+    expect(document.cookie).toContain("caresetu_authed=1");
+  });
+
+  it("schedules the next refresh from the rotated token", async () => {
+    setStoredSession(VALID_SESSION);
+
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(ME_RESPONSE), { status: 200 }),
+    );
+
+    renderWithAuth();
+    await advance(0);
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(REFRESH_RESPONSE), { status: 200 }),
+    );
+    await advance(PROACTIVE_REFRESH_MS);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ jwt: "second-jwt", refresh_token: "second-refresh" }),
+        { status: 200 },
+      ),
+    );
+    await advance(PROACTIVE_REFRESH_MS);
+    vi.useRealTimers();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(localStorage.getItem("caresetu.access_jwt")).toBe("second-jwt");
+  });
+
+  it("stops refreshing after logout", async () => {
+    setStoredSession(VALID_SESSION);
+
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(ME_RESPONSE), { status: 200 }),
+    );
+
+    renderWithAuth();
+    await advance(0);
+
+    act(() => {
+      screen.getByText("logout").click();
+    });
+    await advance(PROACTIVE_REFRESH_MS);
+    vi.useRealTimers();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the session and redirects when proactive refresh is rejected", async () => {
+    setStoredSession(VALID_SESSION);
+
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(ME_RESPONSE), { status: 200 }),
+    );
+
+    renderWithAuth();
+    await advance(0);
+
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    await advance(PROACTIVE_REFRESH_MS);
+
+    // Retry after 5 seconds
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 401 }));
+    await advance(5_000);
+    vi.useRealTimers();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(mockReplace).toHaveBeenCalledWith("/login");
+    expect(localStorage.getItem("caresetu.session")).toBeNull();
+    expect(screen.getByTestId("is-authenticated").textContent).toBe("false");
   });
 });
 

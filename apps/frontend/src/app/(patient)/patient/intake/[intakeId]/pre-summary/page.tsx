@@ -33,6 +33,12 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-errors";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { useAuth } from "@/lib/auth/AuthContext";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  intakePreSummaryQueryKey,
+  intakeStatusQueryKey,
+} from "@/app/(patient)/patient/intake/[intakeId]/status/page";
 import {
   fetchIntake,
   fetchPreSummary,
@@ -79,6 +85,24 @@ export default function PreSummaryReviewPage() {
   const params = useParams<{ intakeId: string }>();
   const intakeId = Number(params.intakeId);
   const { lang } = useLang();
+  const { user } = useAuth();
+  const identityId = user?.id;
+  const queryClient = useQueryClient();
+  const invalidateIntake = useCallback(
+    (targetIntakeId: number) => {
+      if (identityId !== undefined) {
+        void queryClient.invalidateQueries({
+          queryKey: intakePreSummaryQueryKey(identityId, targetIntakeId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: intakeStatusQueryKey(identityId, targetIntakeId),
+        });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["intake"] });
+      }
+    },
+    [identityId, queryClient],
+  );
   const dict = STRINGS[lang].intake;
   const t = dict.preSummary;
   const nav = STRINGS[lang].nav;
@@ -349,6 +373,7 @@ export default function PreSummaryReviewPage() {
       );
       setCorrections(result.patient_edits ?? {});
       setEditing(false);
+      invalidateIntake(intakeId);
     } catch (error) {
       setSaveError({
         title: t.saveFailedTitle,
@@ -358,7 +383,15 @@ export default function PreSummaryReviewPage() {
     } finally {
       setSaveStage("idle");
     }
-  }, [summary, fieldKeys, drafts, displayValueFor, intakeId, t]);
+  }, [
+    summary,
+    fieldKeys,
+    drafts,
+    displayValueFor,
+    intakeId,
+    t,
+    invalidateIntake,
+  ]);
 
   const handleConfirm = useCallback(() => {
     setConfirmed(true);

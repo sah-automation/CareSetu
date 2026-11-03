@@ -6,6 +6,8 @@ import OperatorDashboardPage from "@/app/(operator)/operator/page";
 import PartnerDashboardPage from "@/app/(partner)/partner/page";
 import PatientDashboardPage from "@/app/(patient)/patient/page";
 import { ProfileProvider } from "@/lib/profile/ProfileContext";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { makeQueryClient } from "@/lib/queryClient";
 
 // The operator page (PHASE-5 T5, #284) fetches the verification queue on
 // mount; mock the api seam so the scaffold render is synchronous and no
@@ -117,6 +119,10 @@ describe("per-role route-group scaffold pages", () => {
           <ProfileProvider>
             <Page />
           </ProfileProvider>
+        ) : role === "doctor" ? (
+          <QueryClientProvider client={makeQueryClient()}>
+            <Page />
+          </QueryClientProvider>
         ) : (
           <Page />
         ),

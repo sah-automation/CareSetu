@@ -37,8 +37,9 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
 from modules.partner.credential_intake_models import (
@@ -158,7 +159,7 @@ class CredentialIntakeFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         credential_validity: CredentialValidityPort,
         artifact_store: CredentialArtifactStore | None = None,
         *,

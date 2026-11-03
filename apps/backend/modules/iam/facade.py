@@ -16,8 +16,9 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.db import AsyncEngineLike
 from bus.outbox_writer import write_outbox
 from modules.iam.adapters.sms import (
     SmsAdapter,
@@ -28,7 +29,7 @@ from modules.iam.adapters.sms import (
 from modules.iam.adapters.sms import (
     build_sms_adapter as build_sms_adapter,
 )
-from modules.iam.domain import events
+from modules.iam.domain import events, jwt
 from modules.iam.domain.exceptions import (
     InvalidAccessTokenError as InvalidAccessTokenError,
 )
@@ -132,18 +133,19 @@ class IamFacade:
 
     def __init__(
         self,
-        engine: AsyncEngine,
+        engine: AsyncEngineLike,
         sms_adapter: SmsAdapter,
         clock: Callable[[], datetime] = _default_clock,
         *,
         access_token_signing_key: str = "",
-        access_token_ttl_seconds: int = 900,
+        access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
         refresh_token_ttl_seconds: int = 2_592_000,
         mfa_secret_key: str = "",
         operator_mfa_lockout_threshold: int = DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
         operator_mfa_lockout_seconds: int = DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
         media_store: ProfileMediaStore | None = None,
         photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
+        profile_cache_ttl_seconds: int | None = None,
     ) -> None:
         self._engine = engine
         self.delivery_queue = SmsDeliveryQueue(
@@ -166,6 +168,7 @@ class IamFacade:
             clock,
             media_store=media_store,
             photo_max_bytes=photo_max_bytes,
+            profile_cache_ttl_seconds=profile_cache_ttl_seconds,
         )
         self._otp = OtpFacade(engine, clock, self._otp_sender)
         self._mfa = MfaFacade(engine, clock, mfa_secret_key=mfa_secret_key)

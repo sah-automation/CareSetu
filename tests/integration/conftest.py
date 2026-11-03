@@ -29,6 +29,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from cache_fixtures import FakeRedis, SqlCounter
 from sqlalchemy import delete, text
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
@@ -246,3 +247,21 @@ async def engine(database_url: str, clean_tables: None) -> AsyncIterator[AsyncEn
         yield created
     finally:
         await created.dispose()
+
+
+@pytest.fixture
+def fake_redis() -> Iterator[FakeRedis]:
+    import app.redis as shared_redis
+
+    previous = shared_redis._REDIS_CLIENT
+    client = FakeRedis()
+    shared_redis._REDIS_CLIENT = client
+    yield client
+    shared_redis._REDIS_CLIENT = previous
+
+
+@pytest.fixture
+def sql_counter(engine: AsyncEngine) -> Iterator[SqlCounter]:
+    counter = SqlCounter(engine)
+    yield counter
+    counter.detach()
