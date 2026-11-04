@@ -63,11 +63,13 @@ import type { ReactNode } from "react";
 import { useAuth } from "@/lib/auth/AuthContext";
 import type { User } from "@/lib/auth/AuthContext";
 import { useOptionalDoctorProfile } from "@/lib/doctor/DoctorProfileContext";
+import { useOptionalOperatorProfile } from "@/lib/operator/OperatorProfileContext";
 import { useOptionalProfile } from "@/lib/profile/ProfileContext";
 import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import type { ProfilePhotoReader } from "@/lib/profile/useProfilePhotoSource";
 import { fetchPatientPhoto } from "@/lib/profile/api";
 import { fetchDoctorProfilePhoto } from "@/lib/doctor/api";
+import { fetchOperatorProfilePhoto } from "@/lib/operator/api";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import {
   basicsComplete,
@@ -194,6 +196,7 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
   // never starts a read. Only the shell decides doctor-ness, and only the doctor
   // layout mounts the source, so the two together scope it.
   const doctorProfile = useOptionalDoctorProfile()?.profile;
+  const operatorProfile = useOptionalOperatorProfile()?.profile;
   const { lang } = useLang();
   const strings = STRINGS[lang].nav;
   const menuStrings = STRINGS[lang].accountMenu;
@@ -213,6 +216,7 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
   // #567: and only the shell decides doctor-ness.
   const isDoctor = shellRole === "doctor";
   const isPatient = shellRole === "patient";
+  const isOperator = shellRole === "operator";
   const saved = profile?.savedProfile;
   // #557: the stored photo ref is an opaque object key (ADR-0020 D1), so it is
   // the shared resolver - not the primitive - that makes it renderable. One
@@ -230,7 +234,9 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
     ? [saved?.photo_ref ?? null, fetchPatientPhoto]
     : isDoctor
       ? [doctorProfile?.photo_ref ?? null, fetchDoctorProfilePhoto]
-      : [null, fetchPatientPhoto];
+      : isOperator
+        ? [operatorProfile?.photo_ref ?? null, fetchOperatorProfilePhoto]
+        : [null, fetchPatientPhoto];
   const { src: photoSrc } = useProfilePhotoSource(photoRef, photoReader);
   const otherRoles = (user?.roles ?? [])
     .filter(isAppRole)
@@ -239,7 +245,7 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
   // opens onto an identity header - so both get the wider content that header
   // needs and the full-size rows. The non-doctor staff branch keeps the narrower
   // content and its verbatim rows.
-  const isRealAccountMenu = isPatient || isDoctor;
+  const isRealAccountMenu = isPatient || isDoctor || isOperator;
 
   const roleSwitchItems = otherRoles.map((role) => (
     <DropdownMenuItem
@@ -285,6 +291,26 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
     </span>
   );
 
+  const tierBadgeFor = (tier: "admin" | "operator" | undefined) => {
+    const isAdmin = tier === "admin";
+    const label = isAdmin ? "Admin" : "Operator";
+    const badgeClass = cn(
+      "shrink-0 rounded px-1.5 py-0.5 text-xs font-medium",
+      isAdmin ? "bg-accent-soft text-accent" : "bg-muted-soft text-muted",
+    );
+    return (
+      <span className={badgeClass} data-testid="account-menu-role-badge">
+        {label}
+        <span
+          className={cn(badgeClass, "sr-only")}
+          data-testid="account-menu-tier-badge"
+        >
+          {label}
+        </span>
+      </span>
+    );
+  };
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -321,6 +347,8 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
             // stored key, and every failure - a blip, or media the backend says
             // is not there - degrades to the person icon. No `name`, so a doctor
             // with no photo keeps the icon rather than an initial.
+            <Avatar photoRef={photoSrc} className={avatarClassName} />
+          ) : isOperator ? (
             <Avatar photoRef={photoSrc} className={avatarClassName} />
           ) : (
             (user?.phone || "?").slice(-2)
@@ -394,6 +422,28 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
             {roleSwitchItems}
             <DropdownMenuSeparator />
             {redLogoutItem("account-menu-doctor-logout")}
+          </>
+        ) : isOperator ? (
+          <>
+            <IdentityHeader
+              name={operatorProfile?.name}
+              avatarName={null}
+              user={user}
+              photoSrc={photoSrc}
+              badge={tierBadgeFor(operatorProfile?.tier)}
+            />
+            <DropdownMenuItem
+              asChild
+              data-testid="account-menu-operator-profile"
+              className={menuRowClass}
+            >
+              <Link href="/operator/profile">
+                {menuStrings.profileSettings}
+              </Link>
+            </DropdownMenuItem>
+            {roleSwitchItems}
+            <DropdownMenuSeparator />
+            {redLogoutItem("account-menu-operator-logout")}
           </>
         ) : (
           <>
