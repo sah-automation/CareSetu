@@ -361,6 +361,13 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
         },
       ],
     },
+    {
+      key: "profile",
+      labelKey: "profile",
+      href: "/operator/profile",
+      icon: User,
+      group: "account",
+    },
   ],
 };
 
