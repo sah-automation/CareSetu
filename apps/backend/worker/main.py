@@ -48,7 +48,7 @@ import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 # apscheduler ships no py.typed marker; strict mypy skips it (import-untyped).
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -59,7 +59,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from app.config import Settings, get_settings
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import (
-    DEFAULT_DISPATCHER_CONFIG,
     DispatcherConfig,
     OutboxTable,
     discover_outbox_tables,
@@ -97,6 +96,19 @@ from observability.otel import flush_otel, init_otel, start_span
 from observability.sentry import flush_sentry, init_sentry
 
 logger = logging.getLogger(__name__)
+
+# ARCH-P3 #858: AI async partition - the only two outbox event types that the
+# dedicated AI loop claims. The regular dispatcher excludes exactly these when
+# AI async is enabled. No new event names are introduced.
+AI_ASYNC_EVENT_TYPES: frozenset[str] = frozenset({"intake.captured", "intake.retry_requested"})
+AI_TRIGGER_EVENT_TYPES = AI_ASYNC_EVENT_TYPES
+AI_LOOP_EVENT_TYPES = AI_ASYNC_EVENT_TYPES
+AI_QUEUE_EVENT_TYPES = AI_ASYNC_EVENT_TYPES
+AI_ASYNC_TRIGGERS = AI_ASYNC_EVENT_TYPES
+AI_LOOP_INCLUDE_EVENT_TYPES = AI_ASYNC_EVENT_TYPES
+AI_LOOP_INCLUDE = AI_ASYNC_EVENT_TYPES
+AI_EVENTS = AI_ASYNC_EVENT_TYPES
+
 
 #: What a buffered-drain pass returns. The two drains report different reports
 #: (the error feed's write counts, the counter's fold counts), and the shared
@@ -523,6 +535,22 @@ async def _run_judge_job(engine: AsyncEngine | None = None) -> None:
         )
 
 
+# ARCH-P3 #855: explicit safety vs optional split. Optional jobs are the only
+# ones degraded mode may drop; all other scheduled jobs are safety/care work.
+SAFETY_SCHEDULER_JOBS: frozenset[str] = frozenset(
+    {
+        "credential-expiry-sweep",
+        "error-buffer-drain",
+        "security-detector-scan",
+        "alert-delivery-router",
+        "alert-delivery-drainer",
+    }
+)
+DEGRADED_MODE_OPTIONAL_JOBS: frozenset[str] = frozenset({"http-counter-fold", "llm-judge-run"})
+OPTIONAL_JOBS = DEGRADED_MODE_OPTIONAL_JOBS
+SAFETY_JOBS = SAFETY_SCHEDULER_JOBS
+
+
 def build_scheduler(
     settings: Settings,
     *,
@@ -581,6 +609,15 @@ def build_scheduler(
     firings cannot stack duplicate passes across a sleep, and ``max_instances=1``
     so a drain that is slower than its interval skips rather than overlaps.
     """
+    if getattr(settings, "ai_async_enabled", False) and not getattr(
+        settings, "ai_queue_worker_enabled", False
+    ):
+        logger.warning(
+            "AI async misconfiguration: AI_ASYNC_ENABLED is true but "
+            "AI_QUEUE_WORKER_ENABLED is false; the AI trigger events "
+            "(intake.captured, intake.retry_requested) would otherwise have "
+            "no claimer and would stall"
+        )
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         sweep_callback,
@@ -603,7 +640,10 @@ def build_scheduler(
     # a deployment that has not opted into the counter has an always-empty map, so
     # the gate-off scheduler is the pre-#727 one (sweep, plus the error drain when
     # its own gate is on).
-    if settings.http_counter_enabled and not settings.degraded_mode:
+    # Optional work: dropped only in degraded mode (central safety/optional split).
+    if settings.http_counter_enabled and not (
+        settings.degraded_mode and "http-counter-fold" in DEGRADED_MODE_OPTIONAL_JOBS
+    ):
         scheduler.add_job(
             counter_drain_callback,
             IntervalTrigger(seconds=settings.http_counter_drain_interval_seconds),
@@ -631,7 +671,10 @@ def build_scheduler(
         # The drainer runs every 30 seconds to process pending deliveries
         pass  # Jobs are added in run_worker_until_stopped with proper adapters
     # #789: LLM judge run - gated behind llm_judge_enabled
-    if settings.llm_judge_enabled and not settings.degraded_mode:
+    # Optional work: dropped only in degraded mode (central safety/optional split).
+    if settings.llm_judge_enabled and not (
+        settings.degraded_mode and "llm-judge-run" in DEGRADED_MODE_OPTIONAL_JOBS
+    ):
         scheduler.add_job(
             judge_job_callback,
             CronTrigger.from_crontab("0 3 * * *", timezone="UTC"),  # Daily at 03:00 UTC
@@ -643,10 +686,44 @@ def build_scheduler(
     return scheduler
 
 
+def build_dispatcher_config(settings: Settings) -> DispatcherConfig:
+    """Copy dispatcher tuning fields from ``Settings`` into a ``DispatcherConfig``."""
+    exclude_event_types = (
+        AI_ASYNC_EVENT_TYPES if getattr(settings, "ai_async_enabled", False) else None
+    )
+    return DispatcherConfig(
+        poll_interval_seconds=settings.dispatcher_poll_interval_seconds,
+        claim_timeout_seconds=settings.dispatcher_claim_timeout_seconds,
+        batch_size=settings.dispatcher_batch_size,
+        exclude_event_types=exclude_event_types,
+    )
+
+
+def build_ai_dispatcher_config(settings: Settings) -> DispatcherConfig:
+    """Build the dedicated AI loop's dispatcher config (include-only filter)."""
+    base = build_dispatcher_config(settings)
+    return DispatcherConfig(
+        poll_interval_seconds=base.poll_interval_seconds,
+        claim_timeout_seconds=base.claim_timeout_seconds,
+        batch_size=base.batch_size,
+        max_attempts=base.max_attempts,
+        backoff_base_seconds=base.backoff_base_seconds,
+        include_event_types=AI_ASYNC_EVENT_TYPES,
+        exclude_event_types=None,
+    )
+
+
+def build_regular_dispatcher_config(settings: Settings) -> DispatcherConfig:
+    """Alias for the regular-loop dispatcher config."""
+    return build_dispatcher_config(settings)
+
+
 async def run_worker_until_stopped(
     stop_event: asyncio.Event,
     settings: Settings | None = None,
-    config: DispatcherConfig = DEFAULT_DISPATCHER_CONFIG,
+    config: DispatcherConfig | None = None,
+    *,
+    host: Literal["worker", "web"] = "worker",
 ) -> None:
     """Run the dispatcher loop until ``stop_event`` is set, draining inflight claims.
 
@@ -657,9 +734,16 @@ async def run_worker_until_stopped(
     event loop and the sweep job is stopped before the engine is disposed. The
     loop honours ``stop_event`` between passes, so the pass in flight finishes and
     inflight claims already under delivery drain before this coroutine returns
-    (ADR-0002 §2, issue #16 user story 19). Exceptions from ``run_poll_loop``
+    (ADR-0002, issue #16 user story 19). Exceptions from ``run_poll_loop``
     propagate - a worker failing to reach its database crashes loudly. The engine
     and scheduler are always disposed.
+
+    ``host`` selects which composition root invoked this function. ARCH-P3 #857
+    makes ``DISPATCHER_MODE`` decide the poll-loop host: the web process hosts a
+    loop only in ``inprocess`` mode, while the dedicated worker hosts it in
+    ``standalone``/``coordinated`` mode. Both roots share this function, so the
+    caller names its role rather than the callee guessing from ``DISPATCHER_MODE``
+    alone.
     """
     resolved_settings = settings if settings is not None else get_settings()
     # PHASE-14A A1 (#694): configure structured logging once at the worker
@@ -702,6 +786,48 @@ async def run_worker_until_stopped(
     )
     registry = build_registry()
     engine = create_async_engine(resolved_settings.database_url)
+    base_dispatcher_config = (
+        config if config is not None else build_dispatcher_config(resolved_settings)
+    )
+    effective_dispatcher_config = base_dispatcher_config
+
+    if resolved_settings.ai_async_enabled and not resolved_settings.ai_queue_worker_enabled:
+        logger.warning(
+            "AI async misconfiguration: AI_ASYNC_ENABLED is true but "
+            "AI_QUEUE_WORKER_ENABLED is false; the AI trigger events "
+            "(intake.captured, intake.retry_requested) would otherwise have "
+            "no claimer and would stall"
+        )
+
+    _ai_async_enabled = bool(resolved_settings.ai_async_enabled)
+    _ai_queue_worker_enabled = bool(resolved_settings.ai_queue_worker_enabled)
+    _should_run_ai_loop = _ai_async_enabled and _ai_queue_worker_enabled
+
+    if _ai_async_enabled:
+        regular_exclude = AI_ASYNC_EVENT_TYPES
+        if base_dispatcher_config.exclude_event_types is not None:
+            regular_exclude = base_dispatcher_config.exclude_event_types | AI_ASYNC_EVENT_TYPES
+        effective_dispatcher_config = DispatcherConfig(
+            poll_interval_seconds=base_dispatcher_config.poll_interval_seconds,
+            claim_timeout_seconds=base_dispatcher_config.claim_timeout_seconds,
+            batch_size=base_dispatcher_config.batch_size,
+            max_attempts=base_dispatcher_config.max_attempts,
+            backoff_base_seconds=base_dispatcher_config.backoff_base_seconds,
+            include_event_types=base_dispatcher_config.include_event_types,
+            exclude_event_types=regular_exclude,
+        )
+
+    ai_dispatcher_config = None
+    if _should_run_ai_loop:
+        ai_dispatcher_config = DispatcherConfig(
+            poll_interval_seconds=base_dispatcher_config.poll_interval_seconds,
+            claim_timeout_seconds=base_dispatcher_config.claim_timeout_seconds,
+            batch_size=base_dispatcher_config.batch_size,
+            max_attempts=base_dispatcher_config.max_attempts,
+            backoff_base_seconds=base_dispatcher_config.backoff_base_seconds,
+            include_event_types=AI_ASYNC_EVENT_TYPES,
+            exclude_event_types=None,
+        )
     # PHASE-14A A3a (#697): wire the OTel SDK at the worker composition root and
     # instrument the worker's engine (DB spans) + httpx outbound spans when
     # OTEL_ENABLED is on; inert when off. Never raises.
@@ -751,18 +877,62 @@ async def run_worker_until_stopped(
             logger.warning("alert delivery enabled but no channel adapters configured")
 
     try:
-        async with engine.connect() as connection:
-            tables: tuple[OutboxTable, ...] = await discover_outbox_tables(
-                connection, MODULE_SCHEMAS
+        _inprocess_mode = resolved_settings.dispatcher_runs_in_process
+        # A worker process in inprocess mode is a no-op for the poll loop so the
+        # web process stays the one and only claimer.
+        _hosts_poll_loop = _inprocess_mode if host == "web" else not _inprocess_mode
+        if not _hosts_poll_loop:
+            logger.info(
+                "dispatcher poll loop not hosted by the %s process (mode=%s)",
+                host,
+                resolved_settings.dispatcher_mode,
+                extra={"event": "dispatcher_host_skip", "host": host},
             )
-        scheduler.start()
-        try:
-            await run_poll_loop(engine, tables, registry, config, stop_event=stop_event)
-        finally:
-            # The poll loop returned (stop_event set) or raised; stop the
-            # scheduler before the engine/loop tear down so no timer wakes after
-            # return (wait=False: never block the drain on a mid-fire job).
-            scheduler.shutdown(wait=False)
+        else:
+            async with engine.connect() as connection:
+                tables: tuple[OutboxTable, ...] = await discover_outbox_tables(
+                    connection, MODULE_SCHEMAS
+                )
+            scheduler.start()
+            loop_tasks: list[asyncio.Task[None]] = []
+            regular_task = asyncio.create_task(
+                run_poll_loop(
+                    engine,
+                    tables,
+                    registry,
+                    effective_dispatcher_config,
+                    stop_event=stop_event,
+                ),
+                name="outbox-regular-loop",
+            )
+            loop_tasks.append(regular_task)
+            if _should_run_ai_loop and ai_dispatcher_config is not None:
+                ai_task = asyncio.create_task(
+                    run_poll_loop(
+                        engine,
+                        tables,
+                        registry,
+                        ai_dispatcher_config,
+                        stop_event=stop_event,
+                    ),
+                    name="outbox-ai-loop",
+                )
+                loop_tasks.append(ai_task)
+            try:
+                if loop_tasks:
+                    await asyncio.gather(*loop_tasks)
+            except Exception:
+                for task in loop_tasks:
+                    if not task.done():
+                        task.cancel()
+                if loop_tasks:
+                    await asyncio.gather(*loop_tasks, return_exceptions=True)
+                raise
+            finally:
+                # The poll loop returned (stop_event set) or raised; stop the
+                # scheduler before the engine/loop tear down so no timer wakes after
+                # return (wait=False: never block the drain on a mid-fire job).
+                scheduler.shutdown(wait=False)
     finally:
         await engine.dispose()
         # PHASE-14A A4 (#696): flush queued Sentry events on shutdown; no-op

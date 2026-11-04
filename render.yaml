@@ -228,8 +228,38 @@ services:
       # uvicorn --workers 1; the startCommand above satisfies that constraint.
       - key: DISPATCHER_IN_PROCESS_ENABLED
         value: "true"
+      - key: DISPATCHER_MODE
+        value: "inprocess"
       # Web worker count (ARCH-P1 #824): templated into the startCommand with a
       # default of 1. Keep at 1 while DISPATCHER_IN_PROCESS_ENABLED=true so the
       # single-poll-loop rule (worker-outbox-runbook Rule 1) holds.
       - key: UVICORN_WORKERS
         value: "1"
+      # ARCH-P3 #852/#858: AI async stays off by default. To enable it, set
+      # AI_ASYNC_ENABLED=true and AI_QUEUE_WORKER_ENABLED=true, switch
+      # DISPATCHER_MODE to 'standalone' or 'coordinated', and set
+      # DISPATCHER_IN_PROCESS_ENABLED=false so the poll loop runs in the
+      # worker process with event-type partitioning (no broker). Leaving the
+      # flags at false keeps the pre-ARCH-P3 single-loop behaviour.
+      - key: AI_ASYNC_ENABLED
+        value: "false"
+      - key: AI_QUEUE_WORKER_ENABLED
+        value: "false"
+      # ARCH-P3 #853: optional AI job completion webhook. Leave unset
+      # (sync: false) to disable egress entirely; set in the dashboard.
+      - key: AI_WEBHOOK_URL
+        sync: false
+      - key: AI_WEBHOOK_SECRET
+        sync: false
+      - key: AI_WEBHOOK_SIGNING_SECRET
+        sync: false
+      - key: AI_JOB_WEBHOOK_URL
+        sync: false
+      - key: AI_JOB_WEBHOOK_SECRET
+        sync: false
+      - key: AI_JOB_WEBHOOK_SIGNING_SECRET
+        sync: false
+      - key: AI_WEBHOOK_TIMEOUT_SECONDS
+        value: "10.0"
+      - key: AI_WEBHOOK_MAX_ATTEMPTS
+        value: "3"

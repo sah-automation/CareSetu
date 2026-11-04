@@ -39,8 +39,13 @@ from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware, RedisRateLimitMiddleware
 from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
+from app.gateway.sharding import ShardingMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
 from app.redis import close_redis_client, init_redis_client
+
+# Type-only import to avoid a heavy dependency at module load? Keep runtime
+# since DispatcherConfig is a simple dataclass and is needed for the annotation.
+from bus.dispatcher import DispatcherConfig
 from modules.audit.adapters.routes import router as audit_router
 from modules.audit.facade import AuditFacade
 from modules.care.adapters.routes import (
@@ -101,7 +106,7 @@ from observability.langfuse_client import flush_langfuse, get_langfuse_client
 from observability.logging import SERVICE_API, configure_logging
 from observability.otel import flush_otel, init_otel
 from observability.sentry import flush_sentry, init_sentry
-from worker.main import run_worker_until_stopped
+from worker.main import build_dispatcher_config, run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +144,16 @@ class SeedEgressResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Payload of the ``/health`` route."""
+    """Payload of the ``/health`` route.
+
+    Multi-region (ARCH-P3 #856) records its region and replication intent here;
+    nothing about routing changes in this shape.
+    """
 
     status: Literal["ok"]
+    region: str = ""
+    multi_region_enabled: bool = False
+    cross_region_replication: bool = False
 
 
 class MeResponse(BaseModel):
@@ -180,6 +192,7 @@ async def _run_in_process_dispatcher(
     stop_event: asyncio.Event,
     settings: Settings,
     *,
+    config: DispatcherConfig | None = None,
     restart_delay_seconds: float = 5.0,
 ) -> None:
     """Run the outbox poll loop in-process, restarting it after a crash.
@@ -195,7 +208,10 @@ async def _run_in_process_dispatcher(
     """
     while not stop_event.is_set():
         try:
-            await run_worker_until_stopped(stop_event, settings=settings)
+            resolved_config = config if config is not None else build_dispatcher_config(settings)
+            await run_worker_until_stopped(
+                stop_event, settings=settings, config=resolved_config, host="web"
+            )
             return
         except asyncio.CancelledError:
             raise
@@ -305,8 +321,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if not resolved_settings.circuit_breaker_enabled:
         logger.warning("circuit breakers disabled (CIRCUIT_BREAKER_ENABLED=false); failing open")
     if resolved_settings.degraded_mode:
+        # ARCH-P3 #855: exactly one structured warning listing the capabilities
+        # that are reduced. The list is the single source of truth for boot.
+        _reduced_capabilities = [
+            "ai_gateway (forced to mock provider)",
+            "cache_ttl (capped to degraded TTL)",
+            "http_counter_fold",
+            "llm_judge_run",
+            "evaluation_jobs",
+            "analytics_jobs",
+        ]
         logger.warning(
-            "degraded mode enabled; forcing AI gateway to mock provider and trimming cache TTLs"
+            "degraded mode enabled; reduced capabilities: %s",
+            ", ".join(_reduced_capabilities),
+            extra={"reduced_capabilities": _reduced_capabilities, "event": "degraded_mode"},
+        )
+    if resolved_settings.sharding_enabled:
+        logger.warning(
+            "sharding enabled (inert, ARCH-P3 #856): no routing performed; "
+            "shard identity %r recorded on request state",
+            resolved_settings.shard_key,
+            extra={
+                "event": "sharding",
+                "sharding_enabled": True,
+                "shard_key": resolved_settings.shard_key,
+                "shard_count": resolved_settings.shard_count,
+            },
+        )
+    if resolved_settings.multi_region_enabled or resolved_settings.cross_region_replication:
+        logger.warning(
+            "multi-region enabled (inert, ARCH-P3 #856): region=%r replication=%s; "
+            "no region selection, failover, or cross-region replication performed",
+            resolved_settings.region,
+            resolved_settings.cross_region_replication,
+            extra={
+                "event": "multi_region",
+                "multi_region_enabled": resolved_settings.multi_region_enabled,
+                "region": resolved_settings.region,
+                "cross_region_replication": resolved_settings.cross_region_replication,
+            },
         )
 
     @asynccontextmanager
@@ -361,13 +414,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # more than one uvicorn worker.
         dispatcher_task: asyncio.Task[None] | None = None
         dispatcher_stop = asyncio.Event()
-        if resolved_settings.dispatcher_in_process_enabled:
+        _inprocess_mode = resolved_settings.dispatcher_runs_in_process
+        if _inprocess_mode:
             logger.warning(
                 "in-process dispatcher enabled; single poll loop under uvicorn --workers 1"
             )
             dispatcher_task = asyncio.create_task(
-                _run_in_process_dispatcher(dispatcher_stop, resolved_settings)
+                _run_in_process_dispatcher(
+                    dispatcher_stop,
+                    resolved_settings,
+                    config=build_dispatcher_config(resolved_settings),
+                )
             )
+
         try:
             yield
         finally:
@@ -739,6 +798,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         router=engine,
     )
     app.add_middleware(SecurityHeadersMiddleware)
+    # ARCH-P3 #856: no-op sharding middleware, installed only when enabled.
+    if resolved_settings.sharding_enabled:
+        app.add_middleware(
+            ShardingMiddleware,
+            settings=resolved_settings,
+            shard_key=resolved_settings.shard_key,
+            shard_count=resolved_settings.shard_count,
+            enabled=True,
+        )
     # PHASE-14A B9 (#727): count every ANSWERED request into the in-process
     # per-minute bucket the worker folds into `observability_http_minute`. The
     # OUTERMOST user middleware, so a gateway rejection - a 401 from jwt_verify, a
@@ -766,12 +834,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.include_router(ops_router)
     if resolved_settings.module_partner_enabled:
         app.include_router(partner_router)
-    app.include_router(directory_router)
+        app.include_router(directory_router)
     if resolved_settings.module_intake_enabled:
         app.include_router(intake_router)
     if resolved_settings.module_care_enabled:
         app.include_router(care_router)
-    app.include_router(doctor_router)
+    if resolved_settings.module_doctor_enabled:
+        app.include_router(doctor_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
     register_health_error_handlers(app)
@@ -838,7 +907,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok")
+        return HealthResponse(
+            status="ok",
+            region=resolved_settings.region,
+            multi_region_enabled=resolved_settings.multi_region_enabled,
+            cross_region_replication=resolved_settings.cross_region_replication,
+        )
 
     @app.get("/v1/me", response_model=MeResponse)
     async def me(

@@ -207,6 +207,8 @@ DEFAULT_AI_ALLOW_DEV_PROVIDER = False
 DEFAULT_AI_ALLOW_DEMO_PROVIDER = False
 DEFAULT_AI_TIMEOUT_SECONDS = 30.0
 DEFAULT_AI_MAX_RETRIES = 3
+DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS = 10.0
+DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS = 3
 DEFAULT_AI_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30.0
 # NFR-001 freemium AI spend cap (PHASE-7 T06/T11): the monthly budget in paise
@@ -339,7 +341,7 @@ _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
 
 DEFAULT_UVICORN_WORKERS = 1
 # ARCH-P1 #824: process identity, worker count, and reserved scale settings.
-DEFAULT_DISPATCHER_MODE = "inprocess"
+DEFAULT_DISPATCHER_MODE = "standalone"
 DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS = 60.0
 DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_DISPATCHER_BATCH_SIZE = 100
@@ -423,14 +425,17 @@ class Settings:
     # wrapper delegates directly to its inner callable and no breaker opens.
     circuit_breaker_enabled: bool = True
     # Module router flags (ARCH-P1 #823): gate HTTP router inclusion at the
-    # composition root (app/main.py). Only the six ACTIVE flags below map to a
+    # composition root (app/main.py). Only the seven ACTIVE flags below map to a
     # real HTTP router today; the four RESERVED flags are accepted and validated
     # but have no matching HTTP router - they are inert and have no runtime
     # effect (no route inclusion, no outbox/worker/facade gating).
-    # Active:
+    # Active: intake, care, partner (incl. directory), doctor, audit,
+    # observability, ops. Reserved/inert: notify, settlement, fulfillment,
+    # diagnostics. IAM, consent, and health are not independently disableable.
     module_intake_enabled: bool = True
     module_care_enabled: bool = True
     module_partner_enabled: bool = True
+    module_doctor_enabled: bool = True
     module_audit_enabled: bool = True
     module_observability_enabled: bool = True
     module_ops_enabled: bool = True
@@ -463,12 +468,24 @@ class Settings:
     # the Render web service's env vars (free compute covers web services
     # only - background workers require a paid instance).
     dispatcher_in_process_enabled: bool = False
+    # ARCH-P3 #852: AI async processing. Master switch; defaults off so the
+    # pre-ARCH-P3 behaviour is unchanged. Opt-in only.
+    ai_async_enabled: bool = False
+    # ARCH-P3 #852: when true, the worker process hosts a dedicated AI loop
+    # that claims only the two slow pipeline trigger events. Requires
+    # AI_ASYNC_ENABLED.
+    ai_queue_worker_enabled: bool = False
     # ARCH-P1 #824: process identity, worker count, and reserved scale. The
     # dispatcher, sharding, and multi-region settings are present and validated
     # here but stay inert in this phase (no behaviour change).
     instance_id: str = ""
     uvicorn_workers: int = DEFAULT_UVICORN_WORKERS
-    dispatcher_mode: str = DEFAULT_DISPATCHER_MODE
+    # Empty means "not specified": ``__post_init__`` resolves it to
+    # DEFAULT_DISPATCHER_MODE, unless the DISPATCHER_IN_PROCESS_ENABLED alias
+    # forces ``inprocess``. This lets the backward-compatible alias work for
+    # direct ``Settings(...)`` construction while still rejecting an explicit
+    # conflicting mode.
+    dispatcher_mode: str = ""
     dispatcher_claim_timeout_seconds: float = DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS
     dispatcher_poll_interval_seconds: float = DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS
     dispatcher_batch_size: int = DEFAULT_DISPATCHER_BATCH_SIZE
@@ -615,6 +632,21 @@ class Settings:
     ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
     ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
     ai_fallback_model: str = DEFAULT_AI_FALLBACK_MODEL
+    # ARCH-P3 #853: optional AI job completion webhook (MOD-005 AI egress seam).
+    # When the URL is empty the feature is entirely disabled (no handler
+    # registered, no egress). When it is set a signing secret is required.
+    ai_webhook_url: str = ""
+    ai_webhook_secret: str = ""
+    ai_webhook_signing_secret: str = ""
+    ai_job_webhook_url: str = ""
+    ai_job_webhook_secret: str = ""
+    ai_job_webhook_signing_secret: str = ""
+    ai_webhook_timeout_seconds: float = DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS
+    ai_job_webhook_timeout_seconds: float = DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS
+    ai_webhook_max_attempts: int = DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+    ai_webhook_max_retries: int = DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+    ai_job_webhook_max_attempts: int = DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+    ai_job_webhook_max_retries: int = DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
     # Observability gates (PHASE-14A A5, #693; plan-phase14 §4): all additive
     # and disabled by default, so boot and tests are unchanged until a gate is
     # set. ``log_format`` selects the structlog renderer (A1); ``sentry_*``
@@ -925,6 +957,50 @@ class Settings:
             raise ValueError("ai_circuit_breaker_threshold must be positive")
         if self.ai_monthly_budget_paise <= 0:
             raise ValueError("ai_monthly_budget_paise must be positive")
+        # ARCH-P3 #853: when a webhook URL is set a signing secret is required;
+        # timeout / attempt counts must be positive. Aliases are unioned so any
+        # supported name enables the feature.
+        _wh_url = self.ai_webhook_url or self.ai_job_webhook_url
+        _wh_secret = (
+            self.ai_webhook_secret
+            or self.ai_webhook_signing_secret
+            or self.ai_job_webhook_secret
+            or self.ai_job_webhook_signing_secret
+        )
+        if _wh_url.strip() and not _wh_secret.strip():
+            raise ValueError(
+                "AI_WEBHOOK_URL (or AI_JOB_WEBHOOK_URL) is set but the signing "
+                "secret (AI_WEBHOOK_SECRET / AI_WEBHOOK_SIGNING_SECRET) is missing"
+            )
+        if self.ai_webhook_timeout_seconds <= 0 or self.ai_job_webhook_timeout_seconds <= 0:
+            raise ValueError("ai_webhook_timeout_seconds must be positive")
+        if (
+            self.ai_webhook_max_attempts <= 0
+            or self.ai_webhook_max_retries <= 0
+            or self.ai_job_webhook_max_attempts <= 0
+            or self.ai_job_webhook_max_retries <= 0
+        ):
+            raise ValueError("ai_webhook_max_attempts must be positive")
+        # Union alternate field names into the canonical slots so any supported
+        # spelling (url/secret/timeout/attempts) drives the feature.
+        if not self.ai_webhook_url and self.ai_job_webhook_url:
+            object.__setattr__(self, "ai_webhook_url", self.ai_job_webhook_url)
+        if not self.ai_webhook_secret:
+            object.__setattr__(
+                self,
+                "ai_webhook_secret",
+                self.ai_webhook_signing_secret
+                or self.ai_job_webhook_secret
+                or self.ai_job_webhook_signing_secret,
+            )
+        if self.ai_job_webhook_timeout_seconds != DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS:
+            object.__setattr__(
+                self, "ai_webhook_timeout_seconds", self.ai_job_webhook_timeout_seconds
+            )
+        if self.ai_job_webhook_max_attempts != DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS:
+            object.__setattr__(self, "ai_webhook_max_attempts", self.ai_job_webhook_max_attempts)
+        if self.ai_job_webhook_max_retries != DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS:
+            object.__setattr__(self, "ai_webhook_max_retries", self.ai_job_webhook_max_retries)
         if self.settings_cache_ttl_seconds <= 0:
             raise ValueError("settings_cache_ttl_seconds must be positive")
         if self.observability_rollup_max_dates <= 0:
@@ -1143,12 +1219,29 @@ class Settings:
                 "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
                 "environment (fail-closed)."
             )
-        # ARCH-P1 #824: worker count and reserved scale settings.
+        # Backward-compatible alias: DISPATCHER_IN_PROCESS_ENABLED forces inprocess;
+        # an explicit conflicting mode is rejected at construction. An empty
+        # mode means it was not specified, so the alias (or the default) wins.
+        _dispatcher_mode_initial = self.dispatcher_mode.strip().lower()
+        if not _dispatcher_mode_initial:
+            object.__setattr__(
+                self,
+                "dispatcher_mode",
+                "inprocess" if self.dispatcher_in_process_enabled else DEFAULT_DISPATCHER_MODE,
+            )
+        elif self.dispatcher_in_process_enabled and _dispatcher_mode_initial != "inprocess":
+            raise ValueError(
+                "DISPATCHER_IN_PROCESS_ENABLED=true "
+                "(dispatcher_in_process_enabled) conflicts with "
+                f"DISPATCHER_MODE={self.dispatcher_mode!r}; "
+                "the alias forces 'inprocess' mode"
+            )
+        _effective_inprocess = self.dispatcher_runs_in_process
         if self.uvicorn_workers < 1:
             raise ValueError("uvicorn_workers must be >= 1")
-        if self.dispatcher_in_process_enabled and self.uvicorn_workers > 1:
+        if _effective_inprocess and self.uvicorn_workers > 1:
             raise ValueError(
-                "dispatcher_in_process_enabled requires uvicorn_workers == 1 "
+                "in-process dispatcher requires uvicorn_workers == 1 "
                 "(in-process dispatcher plus multiple workers would create more "
                 "than one poll loop)"
             )
@@ -1178,6 +1271,32 @@ class Settings:
             raise ValueError(
                 "region is required when multi-region or cross-region replication is enabled"
             )
+        # ARCH-P3 #852: AI async fail-closed cross-field validation.
+        if self.ai_async_enabled:
+            _dispatcher_mode = self.dispatcher_mode.strip().lower()
+            if _dispatcher_mode not in {"standalone", "coordinated"}:
+                raise ValueError(
+                    "AI_ASYNC_ENABLED=true (ai_async_enabled) requires "
+                    "DISPATCHER_MODE (dispatcher_mode) of 'standalone' or "
+                    "'coordinated'"
+                )
+            if self.dispatcher_in_process_enabled:
+                raise ValueError(
+                    "AI_ASYNC_ENABLED=true (ai_async_enabled) requires "
+                    "DISPATCHER_IN_PROCESS_ENABLED=false "
+                    "(dispatcher_in_process_enabled must be off)"
+                )
+        if self.ai_queue_worker_enabled and not self.ai_async_enabled:
+            raise ValueError(
+                "AI_QUEUE_WORKER_ENABLED=true (ai_queue_worker_enabled) "
+                "requires AI_ASYNC_ENABLED=true (ai_async_enabled)"
+            )
+
+    @property
+    def dispatcher_runs_in_process(self) -> bool:
+        return self.dispatcher_in_process_enabled or (
+            self.dispatcher_mode.strip().lower() == "inprocess"
+        )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -1422,6 +1541,7 @@ def get_settings() -> Settings:
         module_intake_enabled=_env_bool("MODULE_INTAKE_ENABLED", True),
         module_care_enabled=_env_bool("MODULE_CARE_ENABLED", True),
         module_partner_enabled=_env_bool("MODULE_PARTNER_ENABLED", True),
+        module_doctor_enabled=_env_bool("MODULE_DOCTOR_ENABLED", True),
         module_audit_enabled=_env_bool("MODULE_AUDIT_ENABLED", True),
         module_observability_enabled=_env_bool("MODULE_OBSERVABILITY_ENABLED", True),
         module_ops_enabled=_env_bool("MODULE_OPS_ENABLED", True),
@@ -1437,9 +1557,18 @@ def get_settings() -> Settings:
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         demo_mode=_env_bool("DEMO_MODE", False),
         dispatcher_in_process_enabled=_env_bool("DISPATCHER_IN_PROCESS_ENABLED", False),
+        ai_async_enabled=_env_bool("AI_ASYNC_ENABLED", False),
+        ai_queue_worker_enabled=_env_bool("AI_QUEUE_WORKER_ENABLED", False),
         instance_id=os.environ.get("INSTANCE_ID", ""),
         uvicorn_workers=_env_int("UVICORN_WORKERS", DEFAULT_UVICORN_WORKERS),
-        dispatcher_mode=os.environ.get("DISPATCHER_MODE", DEFAULT_DISPATCHER_MODE),
+        dispatcher_mode=(
+            "inprocess"
+            if (
+                _env_bool("DISPATCHER_IN_PROCESS_ENABLED", False)
+                and os.environ.get("DISPATCHER_MODE") is None
+            )
+            else os.environ.get("DISPATCHER_MODE", DEFAULT_DISPATCHER_MODE)
+        ),
         dispatcher_claim_timeout_seconds=_env_float(
             "DISPATCHER_CLAIM_TIMEOUT_SECONDS", DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS
         ),
@@ -1544,6 +1673,32 @@ def get_settings() -> Settings:
         ai_fallback_base_url=os.environ.get("AI_FALLBACK_BASE_URL", DEFAULT_AI_FALLBACK_BASE_URL),
         ai_fallback_api_key=os.environ.get("AI_FALLBACK_API_KEY", DEFAULT_AI_FALLBACK_API_KEY),
         ai_fallback_model=os.environ.get("AI_FALLBACK_MODEL", DEFAULT_AI_FALLBACK_MODEL),
+        ai_webhook_url=os.environ.get("AI_WEBHOOK_URL", "")
+        or os.environ.get("AI_JOB_WEBHOOK_URL", ""),
+        ai_webhook_secret=os.environ.get("AI_WEBHOOK_SECRET", "")
+        or os.environ.get("AI_WEBHOOK_SIGNING_SECRET", "")
+        or os.environ.get("AI_JOB_WEBHOOK_SECRET", "")
+        or os.environ.get("AI_JOB_WEBHOOK_SIGNING_SECRET", ""),
+        ai_webhook_signing_secret=os.environ.get("AI_WEBHOOK_SIGNING_SECRET", ""),
+        ai_job_webhook_url=os.environ.get("AI_JOB_WEBHOOK_URL", ""),
+        ai_job_webhook_secret=os.environ.get("AI_JOB_WEBHOOK_SECRET", ""),
+        ai_job_webhook_signing_secret=os.environ.get("AI_JOB_WEBHOOK_SIGNING_SECRET", ""),
+        ai_webhook_timeout_seconds=_env_float(
+            "AI_WEBHOOK_TIMEOUT_SECONDS", DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS
+        ),
+        ai_job_webhook_timeout_seconds=_env_float(
+            "AI_JOB_WEBHOOK_TIMEOUT_SECONDS", DEFAULT_AI_WEBHOOK_TIMEOUT_SECONDS
+        ),
+        ai_webhook_max_attempts=_env_int(
+            "AI_WEBHOOK_MAX_ATTEMPTS", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+        ),
+        ai_webhook_max_retries=_env_int("AI_WEBHOOK_MAX_RETRIES", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS),
+        ai_job_webhook_max_attempts=_env_int(
+            "AI_JOB_WEBHOOK_MAX_ATTEMPTS", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+        ),
+        ai_job_webhook_max_retries=_env_int(
+            "AI_JOB_WEBHOOK_MAX_RETRIES", DEFAULT_AI_WEBHOOK_MAX_ATTEMPTS
+        ),
         log_format=os.environ.get("LOG_FORMAT", DEFAULT_LOG_FORMAT),
         sentry_dsn=os.environ.get("SENTRY_DSN", ""),
         sentry_traces_sample_rate=_env_float(

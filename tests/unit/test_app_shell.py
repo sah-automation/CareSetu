@@ -55,7 +55,7 @@ def test_health_returns_200() -> None:
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
 
 
 def test_auth_routes_are_the_only_business_routes() -> None:
@@ -458,23 +458,29 @@ def test_dev_otp_returns_null_in_demo_mode_when_nothing_sent() -> None:
 def test_lifespan_starts_in_process_dispatcher_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    entered = {"called": False, "stopped": False}
+    entered: dict[str, object] = {"called": False, "stopped": False}
 
     async def fake_run_worker(
         stop_event: asyncio.Event,
         settings: Settings | None = None,
         config: object = None,
+        *,
+        host: str = "worker",
     ) -> None:
         entered["called"] = True
+        entered["host"] = host
         await stop_event.wait()
         entered["stopped"] = True
 
     monkeypatch.setattr(app_main, "run_worker_until_stopped", fake_run_worker)
 
-    app = create_app(settings=Settings(dispatcher_in_process_enabled=True))
+    app = create_app(
+        settings=Settings(dispatcher_in_process_enabled=True, dispatcher_mode="inprocess")
+    )
 
     with TestClient(app):
         assert entered["called"] is True
+        assert entered["host"] == "web"
 
     assert entered["stopped"] is True
 

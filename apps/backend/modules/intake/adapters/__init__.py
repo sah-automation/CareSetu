@@ -19,6 +19,7 @@ import logging
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.config import get_settings  # noqa: F401
 from bus.envelope import Envelope
 from bus.events import (
     EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED,
@@ -36,6 +37,7 @@ from bus.events import (
 )
 from bus.handler_harness import run_handler
 from bus.registry import HandlerRegistry
+from modules.intake.adapters.ai_job_webhook import build_ai_job_webhook_adapter
 from modules.intake.adapters.ai_provider_ext import build_ai_gateway
 from modules.intake.adapters.ai_provider_mock import MOCK_AI_MODEL, MOCK_AI_PROVIDER
 from modules.intake.adapters.pipeline import (
@@ -129,6 +131,60 @@ def register_handlers(registry: HandlerRegistry) -> None:
     registry.register(EVENT_INTAKE_STARTED, _on_intake_started)
     registry.register(EVENT_INTAKE_CAPTURED, _on_intake_captured)
     registry.register(EVENT_INTAKE_RETRY_REQUESTED, _on_intake_retry_requested)
+
+    _get_settings = globals().get("get_settings", None)
+    if not callable(_get_settings):
+        from app.config import get_settings as _get_settings
+    settings = _get_settings()  # type: ignore[misc]
+    webhook_url = getattr(settings, "ai_webhook_url", "") or ""
+    if str(webhook_url).strip():
+        webhook_secret = (
+            getattr(settings, "ai_webhook_secret", "")
+            or getattr(settings, "ai_webhook_signing_secret", "")
+            or getattr(settings, "ai_job_webhook_secret", "")
+            or getattr(settings, "ai_job_webhook_signing_secret", "")
+        )
+        if not str(webhook_secret).strip():
+            raise ValueError(
+                "AI_WEBHOOK_URL is set but the signing secret "
+                "(AI_WEBHOOK_SECRET / AI_WEBHOOK_SIGNING_SECRET) is missing"
+            )
+        adapter = build_ai_job_webhook_adapter(settings=settings)
+
+        async def _on_ai_job_completed_webhook(envelope: Envelope[BaseModel]) -> None:
+            async def _impl(connection: AsyncConnection, payload: AiJobCompletedPayload) -> None:
+                del connection
+                try:
+                    await adapter.deliver(envelope)
+                except Exception:
+                    logger.exception("ai job webhook delivery failed")
+
+            await run_handler(
+                envelope,
+                AiJobCompletedPayload,
+                _impl,
+                "ai_job_completed_webhook",
+                INTAKE_SCHEMA,
+            )
+
+        async def _on_ai_job_failed_webhook(envelope: Envelope[BaseModel]) -> None:
+            async def _impl(connection: AsyncConnection, payload: AiJobFailedPayload) -> None:
+                del connection
+                try:
+                    await adapter.deliver(envelope)
+                except Exception:
+                    logger.exception("ai job webhook delivery failed")
+
+            await run_handler(
+                envelope,
+                AiJobFailedPayload,
+                _impl,
+                "ai_job_failed_webhook",
+                INTAKE_SCHEMA,
+            )
+
+        registry.register(EVENT_AI_JOB_COMPLETED, _on_ai_job_completed_webhook)
+        registry.register(EVENT_AI_JOB_FAILED, _on_ai_job_failed_webhook)
 
 
 async def _on_intake_started(envelope: Envelope[BaseModel]) -> None:

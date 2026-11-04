@@ -1131,11 +1131,86 @@ def test_settings_dispatcher_in_process_defaults_off() -> None:
 def test_settings_dispatcher_in_process_reads_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("DISPATCHER_MODE", "inprocess")
     monkeypatch.setenv("DISPATCHER_IN_PROCESS_ENABLED", "true")
 
     settings = get_settings()
 
     assert settings.dispatcher_in_process_enabled is True
+
+
+def test_settings_dispatcher_in_process_alias_forces_inprocess_mode() -> None:
+    settings = Settings(dispatcher_in_process_enabled=True)
+
+    assert settings.dispatcher_mode == "inprocess"
+    assert settings.dispatcher_runs_in_process is True
+
+
+def test_settings_dispatcher_in_process_alias_rejects_explicit_conflict() -> None:
+    with pytest.raises(ValueError, match="DISPATCHER_IN_PROCESS_ENABLED"):
+        Settings(dispatcher_in_process_enabled=True, dispatcher_mode="coordinated")
+
+
+def test_settings_ai_async_flags_default_off() -> None:
+    settings = Settings()
+
+    assert settings.ai_async_enabled is False
+    assert settings.ai_queue_worker_enabled is False
+
+
+def test_settings_ai_async_requires_standalone_or_coordinated_mode() -> None:
+    with pytest.raises(ValueError, match="AI_ASYNC_ENABLED"):
+        Settings(ai_async_enabled=True, dispatcher_mode="inprocess")
+
+
+def test_settings_ai_async_requires_mode_standalone_or_coordinated() -> None:
+    with pytest.raises(ValueError, match="DISPATCHER_MODE"):
+        Settings(ai_async_enabled=True, dispatcher_mode="inprocess")
+
+
+def test_settings_ai_async_requires_inprocess_dispatcher_off() -> None:
+    with pytest.raises(ValueError, match="DISPATCHER_IN_PROCESS_ENABLED"):
+        Settings(
+            ai_async_enabled=True,
+            dispatcher_mode="standalone",
+            dispatcher_in_process_enabled=True,
+        )
+
+
+def test_settings_ai_queue_worker_requires_ai_async() -> None:
+    with pytest.raises(ValueError, match="AI_QUEUE_WORKER_ENABLED"):
+        Settings(ai_queue_worker_enabled=True)
+
+
+def test_settings_ai_async_valid_combinations() -> None:
+    settings = Settings(
+        ai_async_enabled=True,
+        dispatcher_mode="standalone",
+        dispatcher_in_process_enabled=False,
+    )
+    assert settings.ai_async_enabled is True
+
+    settings = Settings(
+        ai_async_enabled=True,
+        dispatcher_mode="coordinated",
+        dispatcher_in_process_enabled=False,
+        ai_queue_worker_enabled=True,
+    )
+    assert settings.ai_queue_worker_enabled is True
+
+
+def test_settings_ai_async_flags_read_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DISPATCHER_MODE", "standalone")
+    monkeypatch.setenv("DISPATCHER_IN_PROCESS_ENABLED", "false")
+    monkeypatch.setenv("AI_ASYNC_ENABLED", "true")
+    monkeypatch.setenv("AI_QUEUE_WORKER_ENABLED", "true")
+
+    settings = get_settings()
+
+    assert settings.ai_async_enabled is True
+    assert settings.ai_queue_worker_enabled is True
 
 
 def test_settings_local_backend_needs_no_supabase_env(

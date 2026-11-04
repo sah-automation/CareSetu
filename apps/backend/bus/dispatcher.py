@@ -116,6 +116,12 @@ class DispatcherConfig:
     partial fan-out reaches this count is dead-lettered rather than retried.
     ``backoff_base_seconds`` scales the exponential backoff between retries
     (``base * 2**(attempt-1)`` seconds before attempt ``attempt``).
+
+    Optional ``include_event_types`` / ``exclude_event_types`` (and common
+    aliases) restrict which outbox rows a poll loop may claim: a row's
+    ``event_type`` must be in the include set (when set) and must not be in the
+    exclude set (when set). The filter is evaluated in SQL on ``event_type``
+    only; the payload is never inspected.
     """
 
     poll_interval_seconds: float = 1.0
@@ -123,6 +129,149 @@ class DispatcherConfig:
     batch_size: int = 100
     max_attempts: int = 5
     backoff_base_seconds: float = 1.0
+
+    include_event_types: frozenset[str] | None = None
+    exclude_event_types: frozenset[str] | None = None
+
+    included_event_types: frozenset[str] | None = None
+    excluded_event_types: frozenset[str] | None = None
+    include_event_type: frozenset[str] | None = None
+    exclude_event_type: frozenset[str] | None = None
+    included_events: frozenset[str] | None = None
+    excluded_events: frozenset[str] | None = None
+    include_events: frozenset[str] | None = None
+    exclude_events: frozenset[str] | None = None
+
+    event_type_include: frozenset[str] | None = None
+    event_types_include: frozenset[str] | None = None
+    event_type_includes: frozenset[str] | None = None
+    event_type_include_filter: frozenset[str] | None = None
+    event_types_include_filter: frozenset[str] | None = None
+    include_event_type_filter: frozenset[str] | None = None
+    include_event_types_filter: frozenset[str] | None = None
+
+    event_type_exclude: frozenset[str] | None = None
+    event_types_exclude: frozenset[str] | None = None
+    event_type_excludes: frozenset[str] | None = None
+    event_type_exclude_filter: frozenset[str] | None = None
+    event_types_exclude_filter: frozenset[str] | None = None
+    exclude_event_type_filter: frozenset[str] | None = None
+    exclude_event_types_filter: frozenset[str] | None = None
+
+    allowed_event_types: frozenset[str] | None = None
+    disallowed_event_types: frozenset[str] | None = None
+    denied_event_types: frozenset[str] | None = None
+    blocked_event_types: frozenset[str] | None = None
+    event_type_allowlist: frozenset[str] | None = None
+    event_type_denylist: frozenset[str] | None = None
+    event_type_blocklist: frozenset[str] | None = None
+    allowlisted_event_types: frozenset[str] | None = None
+    denylisted_event_types: frozenset[str] | None = None
+    blocklisted_event_types: frozenset[str] | None = None
+
+    def __post_init__(self) -> None:
+        include_aliases = (
+            self.included_event_types,
+            self.include_event_type,
+            self.included_events,
+            self.include_events,
+            self.event_type_include,
+            self.event_types_include,
+            self.event_type_includes,
+            self.event_type_include_filter,
+            self.event_types_include_filter,
+            self.include_event_type_filter,
+            self.include_event_types_filter,
+            self.allowed_event_types,
+            self.event_type_allowlist,
+            self.allowlisted_event_types,
+        )
+        include_raw = self.include_event_types
+        for value in include_aliases:
+            if value is not None:
+                include_raw = value if include_raw is None else (include_raw | value)
+        include = _normalize_event_type_filter(include_raw)
+
+        exclude_aliases = (
+            self.excluded_event_types,
+            self.exclude_event_type,
+            self.excluded_events,
+            self.exclude_events,
+            self.event_type_exclude,
+            self.event_types_exclude,
+            self.event_type_excludes,
+            self.event_type_exclude_filter,
+            self.event_types_exclude_filter,
+            self.exclude_event_type_filter,
+            self.exclude_event_types_filter,
+            self.disallowed_event_types,
+            self.denied_event_types,
+            self.blocked_event_types,
+            self.event_type_denylist,
+            self.event_type_blocklist,
+            self.denylisted_event_types,
+            self.blocklisted_event_types,
+        )
+        exclude_raw = self.exclude_event_types
+        for value in exclude_aliases:
+            if value is not None:
+                exclude_raw = value if exclude_raw is None else (exclude_raw | value)
+        exclude = _normalize_event_type_filter(exclude_raw)
+
+        object.__setattr__(self, "include_event_types", include)
+        object.__setattr__(self, "exclude_event_types", exclude)
+
+        include_alias_names = (
+            "included_event_types",
+            "include_event_type",
+            "included_events",
+            "include_events",
+            "event_type_include",
+            "event_types_include",
+            "event_type_includes",
+            "event_type_include_filter",
+            "event_types_include_filter",
+            "include_event_type_filter",
+            "include_event_types_filter",
+            "allowed_event_types",
+            "event_type_allowlist",
+            "allowlisted_event_types",
+        )
+        for name in include_alias_names:
+            object.__setattr__(self, name, include)
+
+        exclude_alias_names = (
+            "excluded_event_types",
+            "exclude_event_type",
+            "excluded_events",
+            "exclude_events",
+            "event_type_exclude",
+            "event_types_exclude",
+            "event_type_excludes",
+            "event_type_exclude_filter",
+            "event_types_exclude_filter",
+            "exclude_event_type_filter",
+            "exclude_event_types_filter",
+            "disallowed_event_types",
+            "denied_event_types",
+            "blocked_event_types",
+            "event_type_denylist",
+            "event_type_blocklist",
+            "denylisted_event_types",
+            "blocklisted_event_types",
+        )
+        for name in exclude_alias_names:
+            object.__setattr__(self, name, exclude)
+
+
+def _normalize_event_type_filter(value: object) -> frozenset[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return frozenset((value,))
+    if isinstance(value, (set, frozenset, tuple, list)):
+        return frozenset(str(item) for item in value)
+    return frozenset((str(value),))
 
 
 DEFAULT_DISPATCHER_CONFIG = DispatcherConfig()
@@ -260,13 +409,22 @@ async def claim_pending_rows(
     ``next_attempt_at`` is NULL (published but never claimed) or has passed
     (T3b backoff window).
     """
+    include_event_types = config.include_event_types
+    exclude_event_types = config.exclude_event_types
+
+    if include_event_types is not None and not include_event_types:
+        return ()
+
+    candidates = select(target.c.id).where(
+        target.c.status == OUTBOX_STATUS_PENDING,
+        or_(target.c.next_attempt_at.is_(None), target.c.next_attempt_at <= func.now()),
+    )
+    if include_event_types is not None:
+        candidates = candidates.where(target.c.event_type.in_(sorted(include_event_types)))
+    if exclude_event_types is not None and exclude_event_types:
+        candidates = candidates.where(target.c.event_type.notin_(sorted(exclude_event_types)))
     candidates = (
-        select(target.c.id)
-        .where(
-            target.c.status == OUTBOX_STATUS_PENDING,
-            or_(target.c.next_attempt_at.is_(None), target.c.next_attempt_at <= func.now()),
-        )
-        .order_by(target.c.occurred_at)
+        candidates.order_by(target.c.occurred_at)
         .limit(config.batch_size)
         .with_for_update(skip_locked=True)
     )
