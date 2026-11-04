@@ -458,14 +458,17 @@ def test_dev_otp_returns_null_in_demo_mode_when_nothing_sent() -> None:
 def test_lifespan_starts_in_process_dispatcher_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    entered = {"called": False, "stopped": False}
+    entered: dict[str, object] = {"called": False, "stopped": False}
 
     async def fake_run_worker(
         stop_event: asyncio.Event,
         settings: Settings | None = None,
         config: object = None,
+        *,
+        host: str = "worker",
     ) -> None:
         entered["called"] = True
+        entered["host"] = host
         await stop_event.wait()
         entered["stopped"] = True
 
@@ -477,6 +480,7 @@ def test_lifespan_starts_in_process_dispatcher_when_enabled(
 
     with TestClient(app):
         assert entered["called"] is True
+        assert entered["host"] == "web"
 
     assert entered["stopped"] is True
 

@@ -1139,6 +1139,18 @@ def test_settings_dispatcher_in_process_reads_from_environment(
     assert settings.dispatcher_in_process_enabled is True
 
 
+def test_settings_dispatcher_in_process_alias_forces_inprocess_mode() -> None:
+    settings = Settings(dispatcher_in_process_enabled=True)
+
+    assert settings.dispatcher_mode == "inprocess"
+    assert settings.dispatcher_runs_in_process is True
+
+
+def test_settings_dispatcher_in_process_alias_rejects_explicit_conflict() -> None:
+    with pytest.raises(ValueError, match="DISPATCHER_IN_PROCESS_ENABLED"):
+        Settings(dispatcher_in_process_enabled=True, dispatcher_mode="coordinated")
+
+
 def test_settings_ai_async_flags_default_off() -> None:
     settings = Settings()
 

@@ -48,7 +48,7 @@ import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 # apscheduler ships no py.typed marker; strict mypy skips it (import-untyped).
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -722,6 +722,8 @@ async def run_worker_until_stopped(
     stop_event: asyncio.Event,
     settings: Settings | None = None,
     config: DispatcherConfig | None = None,
+    *,
+    host: Literal["worker", "web"] = "worker",
 ) -> None:
     """Run the dispatcher loop until ``stop_event`` is set, draining inflight claims.
 
@@ -732,9 +734,16 @@ async def run_worker_until_stopped(
     event loop and the sweep job is stopped before the engine is disposed. The
     loop honours ``stop_event`` between passes, so the pass in flight finishes and
     inflight claims already under delivery drain before this coroutine returns
-    (ADR-0002 §2, issue #16 user story 19). Exceptions from ``run_poll_loop``
+    (ADR-0002, issue #16 user story 19). Exceptions from ``run_poll_loop``
     propagate - a worker failing to reach its database crashes loudly. The engine
     and scheduler are always disposed.
+
+    ``host`` selects which composition root invoked this function. ARCH-P3 #857
+    makes ``DISPATCHER_MODE`` decide the poll-loop host: the web process hosts a
+    loop only in ``inprocess`` mode, while the dedicated worker hosts it in
+    ``standalone``/``coordinated`` mode. Both roots share this function, so the
+    caller names its role rather than the callee guessing from ``DISPATCHER_MODE``
+    alone.
     """
     resolved_settings = settings if settings is not None else get_settings()
     # PHASE-14A A1 (#694): configure structured logging once at the worker
@@ -868,15 +877,17 @@ async def run_worker_until_stopped(
             logger.warning("alert delivery enabled but no channel adapters configured")
 
     try:
-        _inprocess_mode = (
-            resolved_settings.dispatcher_in_process_enabled
-            or resolved_settings.dispatcher_mode.strip().lower() == "inprocess"
-        )
-        if _inprocess_mode:
-            # In-process mode hosts the poll loop in the web process; a worker
-            # process started in this mode is a no-op for the poll loop (avoid
-            # a second loop and duplicated claims).
-            pass
+        _inprocess_mode = resolved_settings.dispatcher_runs_in_process
+        # A worker process in inprocess mode is a no-op for the poll loop so the
+        # web process stays the one and only claimer.
+        _hosts_poll_loop = _inprocess_mode if host == "web" else not _inprocess_mode
+        if not _hosts_poll_loop:
+            logger.info(
+                "dispatcher poll loop not hosted by the %s process (mode=%s)",
+                host,
+                resolved_settings.dispatcher_mode,
+                extra={"event": "dispatcher_host_skip", "host": host},
+            )
         else:
             async with engine.connect() as connection:
                 tables: tuple[OutboxTable, ...] = await discover_outbox_tables(

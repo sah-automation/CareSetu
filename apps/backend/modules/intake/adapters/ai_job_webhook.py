@@ -22,9 +22,65 @@ from bus.envelope import Envelope
 from bus.events import EVENT_AI_JOB_COMPLETED
 from modules.intake.adapters.ai_gateway import Ext002CallError, post_with_backoff
 from modules.intake.domain.events import AiJobCompletedPayload, AiJobFailedPayload  # noqa: F401
-from modules.notify.facade import CircuitBreaker
 
 logger = logging.getLogger(__name__)
+
+
+class _WebhookCircuitBreaker:
+    """In-process breaker gating the webhook send after repeated outages.
+
+    Mirrors the shared in-process breaker policy (threshold then cooldown, with
+    a half-open recovery probe) but lives inside MOD-005 so the AI egress seam
+    does not import another module's adapters (module isolation rule).
+    """
+
+    def __init__(
+        self,
+        *,
+        integration: str,
+        threshold: int,
+        cooldown_seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+        enabled: bool = True,
+    ) -> None:
+        self._integration = integration
+        self._threshold = threshold
+        self._cooldown_seconds = cooldown_seconds
+        self._clock = clock
+        self._enabled = enabled
+        self._open = False
+        self._consecutive_failures = 0
+        self._opened_at: float | None = None
+
+    def allow_request(self) -> bool:
+        if not self._enabled:
+            return True
+        if self._open and self._opened_at is not None:
+            if self._clock() - self._opened_at >= self._cooldown_seconds:
+                self._open = False
+                return True
+            return False
+        return True
+
+    def record_success(self) -> None:
+        if not self._enabled:
+            return
+        self._consecutive_failures = 0
+        self._open = False
+
+    def record_failure(self) -> None:
+        if not self._enabled:
+            return
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._threshold:
+            self._open = True
+            self._opened_at = self._clock()
+            logger.warning(
+                "%s circuit breaker opened after %d consecutive outage failures",
+                self._integration,
+                self._consecutive_failures,
+            )
+
 
 #: Header carrying the HMAC-SHA256 signature (hex) of the raw request body.
 SIGNATURE_HEADER = "X-Webhook-Signature"
@@ -203,7 +259,7 @@ class AiJobWebhookAdapter:
             cooldown_float = float(cooldown)
         except (TypeError, ValueError):
             cooldown_float = 30.0
-        self._breaker = CircuitBreaker(
+        self._breaker = _WebhookCircuitBreaker(
             integration="ai_job_webhook",
             threshold=threshold_int if threshold_int > 0 else 5,
             cooldown_seconds=cooldown_float if cooldown_float > 0 else 30.0,

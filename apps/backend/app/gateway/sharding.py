@@ -80,16 +80,18 @@ class ShardingMiddleware(BaseHTTPMiddleware):
                 else:
                     setattr(request.state, attr, identity)
 
-        logger.warning(
-            "sharding enabled (inert): shard identity %r recorded on request state; "
-            "no routing performed",
-            identity,
-            extra={
-                "event": "sharding",
-                "shard_key": identity,
-                "shard_count": self.shard_count,
-            },
-        )
+        if not self._warned:
+            self._warned = True
+            logger.warning(
+                "sharding enabled (inert): shard identity %r recorded on request state; "
+                "no routing performed",
+                identity,
+                extra={
+                    "event": "sharding",
+                    "shard_key": identity,
+                    "shard_count": self.shard_count,
+                },
+            )
 
         return cast(Response, await call_next(request))
 

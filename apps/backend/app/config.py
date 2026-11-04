@@ -480,7 +480,12 @@ class Settings:
     # here but stay inert in this phase (no behaviour change).
     instance_id: str = ""
     uvicorn_workers: int = DEFAULT_UVICORN_WORKERS
-    dispatcher_mode: str = DEFAULT_DISPATCHER_MODE
+    # Empty means "not specified": ``__post_init__`` resolves it to
+    # DEFAULT_DISPATCHER_MODE, unless the DISPATCHER_IN_PROCESS_ENABLED alias
+    # forces ``inprocess``. This lets the backward-compatible alias work for
+    # direct ``Settings(...)`` construction while still rejecting an explicit
+    # conflicting mode.
+    dispatcher_mode: str = ""
     dispatcher_claim_timeout_seconds: float = DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS
     dispatcher_poll_interval_seconds: float = DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS
     dispatcher_batch_size: int = DEFAULT_DISPATCHER_BATCH_SIZE
@@ -1214,18 +1219,24 @@ class Settings:
                 "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
                 "environment (fail-closed)."
             )
-        _effective_inprocess = self.dispatcher_runs_in_process
         # Backward-compatible alias: DISPATCHER_IN_PROCESS_ENABLED forces inprocess;
-        # an explicit conflicting mode is rejected at construction.
-        if self.dispatcher_in_process_enabled:
-            _dispatcher_mode_initial = self.dispatcher_mode.strip().lower()
-            if _dispatcher_mode_initial != "inprocess":
-                raise ValueError(
-                    "DISPATCHER_IN_PROCESS_ENABLED=true "
-                    "(dispatcher_in_process_enabled) conflicts with "
-                    f"DISPATCHER_MODE={self.dispatcher_mode!r}; "
-                    "the alias forces 'inprocess' mode"
-                )
+        # an explicit conflicting mode is rejected at construction. An empty
+        # mode means it was not specified, so the alias (or the default) wins.
+        _dispatcher_mode_initial = self.dispatcher_mode.strip().lower()
+        if not _dispatcher_mode_initial:
+            object.__setattr__(
+                self,
+                "dispatcher_mode",
+                "inprocess" if self.dispatcher_in_process_enabled else DEFAULT_DISPATCHER_MODE,
+            )
+        elif self.dispatcher_in_process_enabled and _dispatcher_mode_initial != "inprocess":
+            raise ValueError(
+                "DISPATCHER_IN_PROCESS_ENABLED=true "
+                "(dispatcher_in_process_enabled) conflicts with "
+                f"DISPATCHER_MODE={self.dispatcher_mode!r}; "
+                "the alias forces 'inprocess' mode"
+            )
+        _effective_inprocess = self.dispatcher_runs_in_process
         if self.uvicorn_workers < 1:
             raise ValueError("uvicorn_workers must be >= 1")
         if _effective_inprocess and self.uvicorn_workers > 1:

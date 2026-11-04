@@ -184,6 +184,97 @@ async def test_run_worker_until_stopped_drains_and_exits(
     assert engine.disposed
 
 
+async def test_run_worker_until_stopped_skips_loop_for_worker_in_inprocess_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop_event = asyncio.Event()
+    stop_event.set()
+    engine = _FakeEngine()
+    polled = False
+
+    async def fake_discover(connection: object, schemas: object) -> tuple[object, ...]:
+        return ()
+
+    async def fake_poll(*_args: object, **_kwargs: object) -> None:
+        nonlocal polled
+        polled = True
+
+    monkeypatch.setattr(worker_main, "create_async_engine", lambda url: engine)
+    monkeypatch.setattr(worker_main, "discover_outbox_tables", fake_discover)
+    monkeypatch.setattr(worker_main, "run_poll_loop", fake_poll)
+
+    settings = Settings(dispatcher_in_process_enabled=True)
+    await worker_main.run_worker_until_stopped(stop_event, settings=settings)
+
+    assert polled is False
+    assert engine.disposed
+
+
+async def test_run_worker_until_stopped_hosts_loop_for_web_in_inprocess_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop_event = asyncio.Event()
+    stop_event.set()
+    engine = _FakeEngine()
+    polled = False
+
+    async def fake_discover(connection: object, schemas: object) -> tuple[object, ...]:
+        return ()
+
+    async def fake_poll(*_args: object, **_kwargs: object) -> None:
+        nonlocal polled
+        polled = True
+
+    monkeypatch.setattr(worker_main, "create_async_engine", lambda url: engine)
+    monkeypatch.setattr(worker_main, "discover_outbox_tables", fake_discover)
+    monkeypatch.setattr(worker_main, "run_poll_loop", fake_poll)
+
+    settings = Settings(dispatcher_in_process_enabled=True)
+    await worker_main.run_worker_until_stopped(stop_event, settings=settings, host="web")
+
+    assert polled is True
+    assert engine.disposed
+
+
+async def test_run_worker_until_stopped_partitions_ai_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop_event = asyncio.Event()
+    stop_event.set()
+    engine = _FakeEngine()
+    configs: list[worker_main.DispatcherConfig] = []
+
+    async def fake_discover(connection: object, schemas: object) -> tuple[object, ...]:
+        return ()
+
+    async def fake_poll(
+        _engine: object,
+        _tables: object,
+        _registry: object,
+        config: worker_main.DispatcherConfig,
+        *,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
+        del stop_event
+        configs.append(config)
+
+    monkeypatch.setattr(worker_main, "create_async_engine", lambda url: engine)
+    monkeypatch.setattr(worker_main, "discover_outbox_tables", fake_discover)
+    monkeypatch.setattr(worker_main, "run_poll_loop", fake_poll)
+
+    settings = Settings(
+        dispatcher_mode="standalone",
+        ai_async_enabled=True,
+        ai_queue_worker_enabled=True,
+    )
+    await worker_main.run_worker_until_stopped(stop_event, settings=settings)
+
+    regular = next(config for config in configs if config.include_event_types is None)
+    ai = next(config for config in configs if config.include_event_types is not None)
+    assert set(regular.exclude_event_types or ()) == set(worker_main.AI_ASYNC_EVENT_TYPES)
+    assert set(ai.include_event_types or ()) == set(worker_main.AI_ASYNC_EVENT_TYPES)
+
+
 async def test_install_signal_handlers_wires_sigterm_and_sigint() -> None:
     stop_event = asyncio.Event()
 
@@ -208,6 +299,38 @@ def test_build_scheduler_registers_the_sweep_on_the_configured_cron() -> None:
     # "30 1 * * *" -> 01:30 UTC daily.
     next_fire = job.trigger.get_next_fire_time(None, datetime(2026, 9, 5, 12, 0, tzinfo=UTC))
     assert next_fire == datetime(2026, 9, 6, 1, 30, tzinfo=UTC)
+
+
+def test_degraded_mode_drops_optional_jobs_and_keeps_safety_jobs() -> None:
+    settings = Settings(
+        degraded_mode=True,
+        http_counter_enabled=True,
+        llm_judge_enabled=True,
+        security_detection_enabled=True,
+        error_capture_enabled=True,
+    )
+
+    job_ids = {job.id for job in worker_main.build_scheduler(settings).get_jobs()}
+
+    assert "http-counter-fold" not in job_ids
+    assert "llm-judge-run" not in job_ids
+    assert {
+        "credential-expiry-sweep",
+        "error-buffer-drain",
+        "security-detector-scan",
+    } <= job_ids
+
+
+def test_non_degraded_mode_keeps_optional_jobs() -> None:
+    settings = Settings(
+        http_counter_enabled=True,
+        llm_judge_enabled=True,
+    )
+
+    job_ids = {job.id for job in worker_main.build_scheduler(settings).get_jobs()}
+
+    assert "http-counter-fold" in job_ids
+    assert "llm-judge-run" in job_ids
 
 
 def test_build_scheduler_honours_a_configured_cadence() -> None:

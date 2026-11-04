@@ -209,7 +209,9 @@ async def _run_in_process_dispatcher(
     while not stop_event.is_set():
         try:
             resolved_config = config if config is not None else build_dispatcher_config(settings)
-            await run_worker_until_stopped(stop_event, settings=settings, config=resolved_config)
+            await run_worker_until_stopped(
+                stop_event, settings=settings, config=resolved_config, host="web"
+            )
             return
         except asyncio.CancelledError:
             raise
@@ -804,7 +806,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             shard_key=resolved_settings.shard_key,
             shard_count=resolved_settings.shard_count,
             enabled=True,
-        )  # PHASE-14A B9 (#727): count every ANSWERED request into the in-process
+        )
+    # PHASE-14A B9 (#727): count every ANSWERED request into the in-process
     # per-minute bucket the worker folds into `observability_http_minute`. The
     # OUTERMOST user middleware, so a gateway rejection - a 401 from jwt_verify, a
     # 429 from rate_limit - is counted like any other served request; an inner

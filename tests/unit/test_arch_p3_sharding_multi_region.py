@@ -1,5 +1,8 @@
 """Unit tests for ARCH-P3 #856: inert sharding + multi-region stubs."""
 
+import logging
+
+import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
@@ -28,6 +31,21 @@ def test_sharding_attaches_identity_to_request_state_and_is_inert() -> None:
     response = client.get("/echo")
     assert response.status_code == 200
     assert response.json() == {"shard": "shard-42", "shard_id": "shard-42"}
+
+
+def test_sharding_warns_once_not_per_request(caplog: pytest.LogCaptureFixture) -> None:
+    settings = Settings(sharding_enabled=True, shard_key="shard-42", shard_count=2)
+    app = create_app(settings=settings)
+
+    with caplog.at_level(logging.WARNING):
+        client = TestClient(app)
+        assert client.get("/health").status_code == 200
+        assert client.get("/health").status_code == 200
+
+    warnings = [
+        record for record in caplog.records if "sharding enabled (inert)" in record.getMessage()
+    ]
+    assert len(warnings) == 1
 
 
 def test_multi_region_records_region_and_replication_in_health() -> None:

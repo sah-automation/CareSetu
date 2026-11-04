@@ -17,20 +17,19 @@ undeliverable WhatsApp send into a ``notification.failed`` outbox event.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 from bus.outbox_writer import write_outbox
-
-if TYPE_CHECKING:
-    from modules.notify.adapters.transport import (
-        ChannelAdapter,
-        DeliveryRequest,
-        NotificationDeliveryQueue,
-    )
+from modules.notify.adapters.sms import build_notify_sms_channel
+from modules.notify.adapters.transport import (
+    ChannelAdapter,
+    DeliveryRequest,
+    NotificationDeliveryQueue,
+)
+from modules.notify.adapters.whatsapp import build_whatsapp_channel
 from modules.notify.domain.events import (
     NotificationFailedPayload,
     notification_failed_envelope,
@@ -58,8 +57,6 @@ class NotifyFacade:
         sms_adapter: ChannelAdapter,
         wa_failed_emitter: NotificationFailedEmitter,
     ) -> None:
-        from modules.notify.adapters.transport import NotificationDeliveryQueue
-
         self._whatsapp_queue = NotificationDeliveryQueue(
             whatsapp_adapter, on_delivery_failed=self._on_wa_delivery_failed
         )
@@ -175,19 +172,8 @@ def _emit_notification_failed_to_outbox(payload: NotificationFailedPayload) -> A
 def build_notify_facade() -> NotifyFacade:
     """Resolve the notify facade from settings; mock channels are the default."""
     settings = get_settings()
-    from modules.notify.adapters.sms import build_notify_sms_channel
-    from modules.notify.adapters.whatsapp import build_whatsapp_channel
-
     return NotifyFacade(
         build_whatsapp_channel(settings),
         build_notify_sms_channel(settings),
         wa_failed_emitter=_emit_notification_failed_to_outbox,
     )
-
-
-def __getattr__(name: str) -> Any:
-    if name == "CircuitBreaker":
-        from modules.notify.adapters.transport import CircuitBreaker as _CB
-
-        return _CB
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

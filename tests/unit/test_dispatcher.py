@@ -10,11 +10,15 @@ claim/reclaim/delete/retry SQL and the drain behaviour are exercised against
 the native PostgreSQL in ``tests/integration/test_dispatcher.py``.
 """
 
+from __future__ import annotations
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from pydantic import BaseModel
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from bus.dispatcher import (
@@ -22,6 +26,7 @@ from bus.dispatcher import (
     OutboxRow,
     OutboxTable,
     backoff_delay,
+    claim_pending_rows,
     count_outbox_rows,
     discover_outbox_tables,
     envelope_from_row,
@@ -86,6 +91,76 @@ def test_run_poll_loop_returns_immediately_when_stop_event_is_set() -> None:
             stop_event=stop_event,
         )
     )
+
+
+def _outbox_table() -> sa.Table:
+    metadata = sa.MetaData()
+    return sa.Table(
+        "arch_p3_outbox",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("event_id", sa.Integer),
+        sa.Column("event_type", sa.String),
+        sa.Column("payload", sa.JSON),
+        sa.Column("status", sa.String),
+        sa.Column("occurred_at", sa.DateTime),
+        sa.Column("next_attempt_at", sa.DateTime),
+        sa.Column("attempts", sa.Integer),
+        sa.Column("traceparent", sa.String),
+    )
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.statement: object | None = None
+
+    async def execute(self, statement: object) -> _EmptyRows:
+        self.statement = statement
+        return _EmptyRows()
+
+
+class _EmptyRows:
+    def mappings(self) -> _EmptyRows:
+        return self
+
+    def all(self) -> list[object]:
+        return []
+
+
+def test_claim_query_applies_include_and_exclude_event_type_filters() -> None:
+    connection = _RecordingConnection()
+    config = DispatcherConfig(
+        include_event_types=frozenset({"intake.captured", "intake.retry_requested"}),
+        exclude_event_types=frozenset({"ai_job.completed"}),
+    )
+
+    asyncio.run(claim_pending_rows(connection, _outbox_table(), config))  # type: ignore[arg-type]
+
+    assert connection.statement is not None
+    sql = str(connection.statement.compile(dialect=postgresql.dialect()))
+    assert "event_type IN" in sql
+    assert "event_type NOT IN" in sql
+
+
+def test_claim_query_with_an_empty_include_filter_claims_nothing() -> None:
+    connection = _RecordingConnection()
+    config = DispatcherConfig(include_event_types=frozenset())
+
+    rows = asyncio.run(claim_pending_rows(connection, _outbox_table(), config))  # type: ignore[arg-type]
+
+    assert rows == ()
+    assert connection.statement is None
+
+
+def test_claim_query_with_no_filter_preserves_the_unfiltered_claim() -> None:
+    connection = _RecordingConnection()
+
+    asyncio.run(claim_pending_rows(connection, _outbox_table(), DispatcherConfig()))  # type: ignore[arg-type]
+
+    assert connection.statement is not None
+    sql = str(connection.statement.compile(dialect=postgresql.dialect()))
+    assert "event_type IN" not in sql
+    assert "event_type NOT IN" not in sql
 
 
 def test_backoff_delay_doubles_exponentially_with_each_attempt() -> None:
