@@ -471,7 +471,9 @@ def test_lifespan_starts_in_process_dispatcher_when_enabled(
 
     monkeypatch.setattr(app_main, "run_worker_until_stopped", fake_run_worker)
 
-    app = create_app(settings=Settings(dispatcher_in_process_enabled=True))
+    app = create_app(
+        settings=Settings(dispatcher_in_process_enabled=True, dispatcher_mode="inprocess")
+    )
 
     with TestClient(app):
         assert entered["called"] is True

@@ -228,6 +228,8 @@ services:
       # uvicorn --workers 1; the startCommand above satisfies that constraint.
       - key: DISPATCHER_IN_PROCESS_ENABLED
         value: "true"
+      - key: DISPATCHER_MODE
+        value: "inprocess"
       # Web worker count (ARCH-P1 #824): templated into the startCommand with a
       # default of 1. Keep at 1 while DISPATCHER_IN_PROCESS_ENABLED=true so the
       # single-poll-loop rule (worker-outbox-runbook Rule 1) holds.

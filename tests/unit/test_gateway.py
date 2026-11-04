@@ -1131,6 +1131,7 @@ def test_settings_dispatcher_in_process_defaults_off() -> None:
 def test_settings_dispatcher_in_process_reads_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("DISPATCHER_MODE", "inprocess")
     monkeypatch.setenv("DISPATCHER_IN_PROCESS_ENABLED", "true")
 
     settings = get_settings()
@@ -1147,7 +1148,7 @@ def test_settings_ai_async_flags_default_off() -> None:
 
 def test_settings_ai_async_requires_standalone_or_coordinated_mode() -> None:
     with pytest.raises(ValueError, match="AI_ASYNC_ENABLED"):
-        Settings(ai_async_enabled=True)
+        Settings(ai_async_enabled=True, dispatcher_mode="inprocess")
 
 
 def test_settings_ai_async_requires_mode_standalone_or_coordinated() -> None:

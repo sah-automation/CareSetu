@@ -42,6 +42,10 @@ from app.gateway.security_headers import SecurityHeadersMiddleware
 from app.gateway.sharding import ShardingMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
 from app.redis import close_redis_client, init_redis_client
+
+# Type-only import to avoid a heavy dependency at module load? Keep runtime
+# since DispatcherConfig is a simple dataclass and is needed for the annotation.
+from bus.dispatcher import DispatcherConfig
 from modules.audit.adapters.routes import router as audit_router
 from modules.audit.facade import AuditFacade
 from modules.care.adapters.routes import (
@@ -102,7 +106,7 @@ from observability.langfuse_client import flush_langfuse, get_langfuse_client
 from observability.logging import SERVICE_API, configure_logging
 from observability.otel import flush_otel, init_otel
 from observability.sentry import flush_sentry, init_sentry
-from worker.main import run_worker_until_stopped
+from worker.main import build_dispatcher_config, run_worker_until_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +192,7 @@ async def _run_in_process_dispatcher(
     stop_event: asyncio.Event,
     settings: Settings,
     *,
+    config: DispatcherConfig | None = None,
     restart_delay_seconds: float = 5.0,
 ) -> None:
     """Run the outbox poll loop in-process, restarting it after a crash.
@@ -203,7 +208,8 @@ async def _run_in_process_dispatcher(
     """
     while not stop_event.is_set():
         try:
-            await run_worker_until_stopped(stop_event, settings=settings)
+            resolved_config = config if config is not None else build_dispatcher_config(settings)
+            await run_worker_until_stopped(stop_event, settings=settings, config=resolved_config)
             return
         except asyncio.CancelledError:
             raise
@@ -406,13 +412,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # more than one uvicorn worker.
         dispatcher_task: asyncio.Task[None] | None = None
         dispatcher_stop = asyncio.Event()
-        if resolved_settings.dispatcher_in_process_enabled:
+        _inprocess_mode = (
+            resolved_settings.dispatcher_in_process_enabled
+            or resolved_settings.dispatcher_mode.strip().lower() == "inprocess"
+        )
+        if _inprocess_mode:
             logger.warning(
                 "in-process dispatcher enabled; single poll loop under uvicorn --workers 1"
             )
             dispatcher_task = asyncio.create_task(
-                _run_in_process_dispatcher(dispatcher_stop, resolved_settings)
+                _run_in_process_dispatcher(
+                    dispatcher_stop,
+                    resolved_settings,
+                    config=build_dispatcher_config(resolved_settings),
+                )
             )
+
         try:
             yield
         finally:

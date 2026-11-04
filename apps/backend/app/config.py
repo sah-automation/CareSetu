@@ -341,7 +341,7 @@ _DEV_TEST_ENVIRONMENTS = frozenset({"dev", "test"})
 
 DEFAULT_UVICORN_WORKERS = 1
 # ARCH-P1 #824: process identity, worker count, and reserved scale settings.
-DEFAULT_DISPATCHER_MODE = "inprocess"
+DEFAULT_DISPATCHER_MODE = "standalone"
 DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS = 60.0
 DEFAULT_DISPATCHER_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_DISPATCHER_BATCH_SIZE = 100
@@ -1217,12 +1217,26 @@ class Settings:
         # ARCH-P1 #824: worker count and reserved scale settings.
         if self.uvicorn_workers < 1:
             raise ValueError("uvicorn_workers must be >= 1")
-        if self.dispatcher_in_process_enabled and self.uvicorn_workers > 1:
+        _effective_inprocess = (
+            self.dispatcher_in_process_enabled
+            or self.dispatcher_mode.strip().lower() == "inprocess"
+        )
+        if _effective_inprocess and self.uvicorn_workers > 1:
             raise ValueError(
-                "dispatcher_in_process_enabled requires uvicorn_workers == 1 "
+                "in-process dispatcher requires uvicorn_workers == 1 "
                 "(in-process dispatcher plus multiple workers would create more "
                 "than one poll loop)"
             )
+        # Backward-compatible alias: DISPATCHER_IN_PROCESS_ENABLED forces inprocess.
+        if self.dispatcher_in_process_enabled:
+            _dispatcher_mode_initial = self.dispatcher_mode.strip().lower()
+            if _dispatcher_mode_initial not in {"inprocess"}:
+                raise ValueError(
+                    "DISPATCHER_IN_PROCESS_ENABLED=true "
+                    "(dispatcher_in_process_enabled) conflicts with "
+                    f"DISPATCHER_MODE={self.dispatcher_mode!r}; "
+                    "the alias forces 'inprocess' mode"
+                )
         _dispatcher_mode = self.dispatcher_mode.strip().lower()
         if _dispatcher_mode not in {"inprocess", "standalone", "coordinated"}:
             raise ValueError(
