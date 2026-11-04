@@ -56,7 +56,8 @@ describe("NAV_CONFIG", () => {
         // #708: the operator's Observability entry joins them - the console has
         // a live overview page behind it, so it may not read as coming-soon.
         const isLiveOperatorTab =
-          role === "operator" && item.key === "observability";
+          role === "operator" &&
+          (item.key === "observability" || item.key === "profile");
         expect(item.soon, `${role}/${item.key}`).toBe(
           isLiveDoctorTab || isLiveOperatorTab ? undefined : true,
         );
@@ -271,6 +272,7 @@ describe("operator Observability group (#744)", () => {
     expect(sections.map((section) => section.labelKey)).toEqual([
       "work",
       "observability",
+      "account",
     ]);
     expect(sections[0].items.map((item) => item.key)).toEqual([
       "home",
@@ -281,6 +283,7 @@ describe("operator Observability group (#744)", () => {
     expect(sections[1].items.map((item) => item.key)).toEqual([
       "observability",
     ]);
+    expect(sections[2].items.map((item) => item.key)).toEqual(["profile"]);
   });
 });
 
@@ -367,6 +370,7 @@ describe("splitMobileTabs", () => {
       "verifications",
       "disputes",
       "audit",
+      "profile",
     ]);
     expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
     expect(hasMore).toBe(true);
