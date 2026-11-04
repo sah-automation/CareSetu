@@ -366,7 +366,7 @@ export async function updateOperatorActive(
   );
 }
 
-// ---- the calling operator's own private profile ----
+// ---- the calling operator's own private profile (#863, parent #862) ----
 
 export interface OperatorProfileView {
   identity_id: number;
@@ -377,8 +377,6 @@ export interface OperatorProfileView {
   photo_ref: string | null;
   created_at: string;
 }
-
-export type OperatorProfileTier = OperatorProfileView["tier"];
 
 export interface OperatorProfileUpdate {
   name: string | null;
