@@ -209,6 +209,16 @@ A `pending` row is never dropped: it is polled until delivered or dead-lettered 
 
 ---
 
+## 3.5 ARCH-P3 AI async topology (event-type partitioning, no broker)
+
+ARCH-P3 adds AI async processing on top of the outbox without a second transport. The flags are `AI_ASYNC_ENABLED` (default false) and `AI_QUEUE_WORKER_ENABLED` (default false, requires the former); both ship off so the pre-ARCH-P3 behaviour is unchanged.
+
+- **Topology:** The regular poll loop excludes `intake.captured` and `intake.retry_requested` when AI async is on; the AI poll loop (started only when both flags are on) includes exactly those two event types. Both loops share the same `*_outbox` tables, claim filters, lease recovery, and subscriber ledger. Every process still registers the full handler registry, so partitioning decides which rows a loop may claim and never splits one event's handler set.
+- **Host placement:** AI async requires `DISPATCHER_MODE` of `standalone` or `coordinated` with `DISPATCHER_IN_PROCESS_ENABLED=false`; the web process therefore hosts no general loop and the worker process hosts both the regular loop and the AI loop. The AI loop is a separate task (`outbox-ai-loop`) cancelled together with the regular loop on the stop event.
+- **Single-loop rule (extended):** Rule 1 still holds per event partition - exactly one general loop and, when enabled, exactly one AI loop across the deployment. Two loops are safe only because their claim filters are disjoint; they must never claim the same event type. Never run an AI loop in more than one process, and never run the general loop twice.
+- **Failure mode when AI async is on without an AI worker:** `AI_ASYNC_ENABLED=true` with `AI_QUEUE_WORKER_ENABLED=false` logs a misconfiguration warning at worker build time ("AI async misconfiguration: ... the triggers would otherwise have no claimer and would stall"). `intake.captured` and `intake.retry_requested` rows are then excluded from the regular loop but never claimed by an AI loop, so intakes stall at captured. Remediation: set `AI_QUEUE_WORKER_ENABLED=true`, or unset `AI_ASYNC_ENABLED` to restore the pre-ARCH-P3 single-loop behaviour.
+- **Rollback:** unset `AI_ASYNC_ENABLED`, `AI_QUEUE_WORKER_ENABLED`, and any `AI_WEBHOOK_*` variables (and revert `DISPATCHER_MODE`/`DISPATCHER_IN_PROCESS_ENABLED` if changed). All-flags-off is byte-for-byte pre-ARCH-P3 behaviour; no broker is introduced.
+
 ## 4. Manual verification record
 
 Every repair is verified against the live stack, never against a test seam. The checks below are the verification procedure.

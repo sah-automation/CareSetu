@@ -72,6 +72,7 @@ class ShardingMiddleware(BaseHTTPMiddleware):
 
         identity = self.shard_key if self.shard_key is not None else ""
         import contextlib
+
         for attr in _REQUEST_STATE_ATTRS:
             with contextlib.suppress(Exception):
                 if attr == "shard_count":

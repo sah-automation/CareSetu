@@ -1,10 +1,6 @@
 """Unit tests for ARCH-P3 #856: inert sharding + multi-region stubs."""
 
-import io
-import contextlib
-import logging
-
-from fastapi import FastAPI, Request
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -35,7 +31,9 @@ def test_sharding_attaches_identity_to_request_state_and_is_inert() -> None:
 
 
 def test_multi_region_records_region_and_replication_in_health() -> None:
-    settings = Settings(multi_region_enabled=True, region="us-east-1", cross_region_replication=True)
+    settings = Settings(
+        multi_region_enabled=True, region="us-east-1", cross_region_replication=True
+    )
     app = create_app(settings=settings)
     client = TestClient(app)
     response = client.get("/health")
