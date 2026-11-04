@@ -2750,6 +2750,10 @@ const en = {
     save: "Save",
     saved: "Saved",
     saveFailed: "Could not save. Try again.",
+    loadFailed: "Could not load your profile.",
+    sections: "Sections",
+    tierAdmin: "Admin",
+    tierOperator: "Operator",
   },
 };
 
@@ -5185,6 +5189,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
       save: "सहेजें",
       saved: "सहेजा गया",
       saveFailed: "सहेजा नहीं जा सका। फिर कोशिश करें।",
+      loadFailed: "आपका प्रोफ़ाइल लोड नहीं हो सका।",
+      sections: "खंड",
+      tierAdmin: "एडमिन",
+      tierOperator: "ऑपरेटर",
     },
   },
 };

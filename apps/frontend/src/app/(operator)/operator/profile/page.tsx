@@ -7,21 +7,17 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import {
-  ProfileSectionShell,
-  type SectionFailure,
-} from "@/components/doctor/profile/ProfileSectionShell";
+import { ProfileSectionShell } from "@/components/doctor/profile/ProfileSectionShell";
 import { useSectionEditBuffer } from "@/components/doctor/profile/useSectionEditBuffer";
 import { OperatorProfilePhotoCard } from "@/components/operator/profile/OperatorProfilePhotoCard";
 import { ApiError } from "@/lib/api-errors";
 import {
-  fetchOperatorProfilePhoto,
   updateOperatorProfile,
   type OperatorProfileView,
 } from "@/lib/operator/api";
 import { useOperatorProfile } from "@/lib/operator/OperatorProfileContext";
 import { idempotencyKey } from "@/lib/idempotency";
-import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
+
 import Link from "next/link";
 
 function LoadingSkeleton() {
@@ -40,7 +36,6 @@ export default function OperatorProfilePage() {
   const { profile, status, errorTraceId, reload, adoptProfile } =
     useOperatorProfile();
 
-  const [photoFailure, setPhotoFailure] = useState<SectionFailure | null>(null);
   const [photoBusy] = useState(false);
   const nameAttemptKey = useRef<string | null>(null);
 
@@ -57,11 +52,6 @@ export default function OperatorProfilePage() {
     if (current === null) return;
     adoptProfile({ ...current, [field]: value });
   }
-
-  const { src: photoUrl, absent: mediaAbsent } = useProfilePhotoSource(
-    profile?.photo_ref ?? null,
-    fetchOperatorProfilePhoto,
-  );
 
   const [bannerOpen, setBannerOpen] = useState(false);
   useEffect(() => {
@@ -113,7 +103,6 @@ export default function OperatorProfilePage() {
         }).format(new Date(profile.created_at))
       : "";
 
-  const tierLabel = profile?.tier === "admin" ? "Admin" : "Operator";
   const mfaEnabled = profile?.mfa_enabled ?? false;
 
   const anchors = [
@@ -131,7 +120,7 @@ export default function OperatorProfilePage() {
         <>
           <PageHeader title={t.title} description={t.description} />
           <ErrorBanner
-            message="Could not load your profile."
+            message={t.loadFailed}
             traceId={errorTraceId}
             onRetry={retryLoad}
             onDismiss={() => setBannerOpen(false)}
@@ -147,7 +136,7 @@ export default function OperatorProfilePage() {
             data-testid="profile-section-index"
           >
             <summary className="cursor-pointer text-sm font-medium">
-              Sections
+              {t.sections}
             </summary>
             <nav className="mt-2 flex flex-wrap gap-2">
               {anchors.map((anchor) => (
@@ -198,7 +187,7 @@ export default function OperatorProfilePage() {
                 id="profile-name"
                 data-testid="profile-name"
                 type="text"
-                className="block h-11 w-full rounded-md border border-input bg-background px-3 text-sm text-txt shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="block min-h-11 w-full rounded-md border border-input bg-background px-3 text-sm text-txt shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 placeholder={t.namePlaceholder}
                 value={identityBuffer.value?.name ?? ""}
                 onChange={(e) =>
@@ -211,9 +200,13 @@ export default function OperatorProfilePage() {
               <span className="text-sm text-txt-muted">{t.tierLabel}</span>
               <span
                 data-testid="operator-tier-badge"
-                className="rounded px-1.5 py-0.5 text-xs font-medium bg-accent-soft text-accent"
+                className={
+                  profile?.tier === "admin"
+                    ? "rounded px-1.5 py-0.5 text-xs font-medium bg-accent-soft text-accent"
+                    : "rounded px-1.5 py-0.5 text-xs font-medium bg-muted-soft text-muted"
+                }
               >
-                {tierLabel}
+                {profile?.tier === "admin" ? t.tierAdmin : t.tierOperator}
               </span>
             </div>
 
@@ -233,9 +226,12 @@ export default function OperatorProfilePage() {
             <div className="flex flex-col gap-3">
               <div>
                 <p className="text-sm text-txt-muted">{t.phoneLabel}</p>
-                <p data-testid="operator-phone" className="text-sm text-txt">
-                  {profile?.phone}
-                </p>
+                <input
+                  data-testid="operator-phone"
+                  readOnly
+                  value={profile?.phone ?? ""}
+                  className="block min-h-11 w-full rounded-md border border-input bg-muted/30 px-3 text-sm text-txt"
+                />
               </div>
               <div>
                 <p className="text-sm text-txt-muted">{t.createdLabel}</p>
