@@ -293,20 +293,15 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
 
   const tierBadgeFor = (tier: "admin" | "operator" | undefined) => {
     const isAdmin = tier === "admin";
-    const label = isAdmin ? "Admin" : "Operator";
-    const badgeClass = cn(
-      "shrink-0 rounded px-1.5 py-0.5 text-xs font-medium",
-      isAdmin ? "bg-accent-soft text-accent" : "bg-muted-soft text-muted",
-    );
     return (
-      <span className={badgeClass} data-testid="account-menu-role-badge">
-        {label}
-        <span
-          className={cn(badgeClass, "sr-only")}
-          data-testid="account-menu-tier-badge"
-        >
-          {label}
-        </span>
+      <span
+        className={cn(
+          "shrink-0 rounded px-1.5 py-0.5 text-xs font-medium",
+          isAdmin ? "bg-accent-soft text-accent" : "bg-muted-soft text-muted",
+        )}
+        data-testid="account-menu-role-badge"
+      >
+        {isAdmin ? "Admin" : "Operator"}
       </span>
     );
   };
