@@ -412,10 +412,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # more than one uvicorn worker.
         dispatcher_task: asyncio.Task[None] | None = None
         dispatcher_stop = asyncio.Event()
-        _inprocess_mode = (
-            resolved_settings.dispatcher_in_process_enabled
-            or resolved_settings.dispatcher_mode.strip().lower() == "inprocess"
-        )
+        _inprocess_mode = resolved_settings.dispatcher_runs_in_process
         if _inprocess_mode:
             logger.warning(
                 "in-process dispatcher enabled; single poll loop under uvicorn --workers 1"

@@ -735,10 +735,6 @@ async def run_worker_until_stopped(
     effective_dispatcher_config = (
         config if config is not None else build_dispatcher_config(resolved_settings)
     )
-    _inprocess_mode = (
-        resolved_settings.dispatcher_in_process_enabled
-        or resolved_settings.dispatcher_mode.strip().lower() == "inprocess"
-    )
     # PHASE-14A A3a (#697): wire the OTel SDK at the worker composition root and
     # instrument the worker's engine (DB spans) + httpx outbound spans when
     # OTEL_ENABLED is on; inert when off. Never raises.
@@ -788,26 +784,20 @@ async def run_worker_until_stopped(
             logger.warning("alert delivery enabled but no channel adapters configured")
 
     try:
-        if _inprocess_mode:
-            # In-process mode hosts the poll loop in the web process; a worker
-            # process started in this mode is a no-op for the poll loop (avoid
-            # a second loop and duplicated claims).
-            pass
-        else:
-            async with engine.connect() as connection:
-                tables: tuple[OutboxTable, ...] = await discover_outbox_tables(
-                    connection, MODULE_SCHEMAS
-                )
-            scheduler.start()
-            try:
-                await run_poll_loop(
-                    engine, tables, registry, effective_dispatcher_config, stop_event=stop_event
-                )
-            finally:
-                # The poll loop returned (stop_event set) or raised; stop the
-                # scheduler before the engine/loop tear down so no timer wakes after
-                # return (wait=False: never block the drain on a mid-fire job).
-                scheduler.shutdown(wait=False)
+        async with engine.connect() as connection:
+            tables: tuple[OutboxTable, ...] = await discover_outbox_tables(
+                connection, MODULE_SCHEMAS
+            )
+        scheduler.start()
+        try:
+            await run_poll_loop(
+                engine, tables, registry, effective_dispatcher_config, stop_event=stop_event
+            )
+        finally:
+            # The poll loop returned (stop_event set) or raised; stop the
+            # scheduler before the engine/loop tear down so no timer wakes after
+            # return (wait=False: never block the drain on a mid-fire job).
+            scheduler.shutdown(wait=False)
     finally:
         await engine.dispose()
         # PHASE-14A A4 (#696): flush queued Sentry events on shutdown; no-op

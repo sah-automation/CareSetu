@@ -1214,29 +1214,26 @@ class Settings:
                 "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
                 "environment (fail-closed)."
             )
-        # ARCH-P1 #824: worker count and reserved scale settings.
-        if self.uvicorn_workers < 1:
-            raise ValueError("uvicorn_workers must be >= 1")
-        _effective_inprocess = (
-            self.dispatcher_in_process_enabled
-            or self.dispatcher_mode.strip().lower() == "inprocess"
-        )
-        if _effective_inprocess and self.uvicorn_workers > 1:
-            raise ValueError(
-                "in-process dispatcher requires uvicorn_workers == 1 "
-                "(in-process dispatcher plus multiple workers would create more "
-                "than one poll loop)"
-            )
-        # Backward-compatible alias: DISPATCHER_IN_PROCESS_ENABLED forces inprocess.
+        _effective_inprocess = self.dispatcher_runs_in_process
+        # Backward-compatible alias: DISPATCHER_IN_PROCESS_ENABLED forces inprocess;
+        # an explicit conflicting mode is rejected at construction.
         if self.dispatcher_in_process_enabled:
             _dispatcher_mode_initial = self.dispatcher_mode.strip().lower()
-            if _dispatcher_mode_initial not in {"inprocess"}:
+            if _dispatcher_mode_initial != "inprocess":
                 raise ValueError(
                     "DISPATCHER_IN_PROCESS_ENABLED=true "
                     "(dispatcher_in_process_enabled) conflicts with "
                     f"DISPATCHER_MODE={self.dispatcher_mode!r}; "
                     "the alias forces 'inprocess' mode"
                 )
+        if self.uvicorn_workers < 1:
+            raise ValueError("uvicorn_workers must be >= 1")
+        if _effective_inprocess and self.uvicorn_workers > 1:
+            raise ValueError(
+                "in-process dispatcher requires uvicorn_workers == 1 "
+                "(in-process dispatcher plus multiple workers would create more "
+                "than one poll loop)"
+            )
         _dispatcher_mode = self.dispatcher_mode.strip().lower()
         if _dispatcher_mode not in {"inprocess", "standalone", "coordinated"}:
             raise ValueError(
@@ -1283,6 +1280,12 @@ class Settings:
                 "AI_QUEUE_WORKER_ENABLED=true (ai_queue_worker_enabled) "
                 "requires AI_ASYNC_ENABLED=true (ai_async_enabled)"
             )
+
+    @property
+    def dispatcher_runs_in_process(self) -> bool:
+        return self.dispatcher_in_process_enabled or (
+            self.dispatcher_mode.strip().lower() == "inprocess"
+        )
 
     @property
     def mock_otp_readback_enabled(self) -> bool:
@@ -1547,7 +1550,14 @@ def get_settings() -> Settings:
         ai_queue_worker_enabled=_env_bool("AI_QUEUE_WORKER_ENABLED", False),
         instance_id=os.environ.get("INSTANCE_ID", ""),
         uvicorn_workers=_env_int("UVICORN_WORKERS", DEFAULT_UVICORN_WORKERS),
-        dispatcher_mode=os.environ.get("DISPATCHER_MODE", DEFAULT_DISPATCHER_MODE),
+        dispatcher_mode=(
+            "inprocess"
+            if (
+                _env_bool("DISPATCHER_IN_PROCESS_ENABLED", False)
+                and os.environ.get("DISPATCHER_MODE") is None
+            )
+            else os.environ.get("DISPATCHER_MODE", DEFAULT_DISPATCHER_MODE)
+        ),
         dispatcher_claim_timeout_seconds=_env_float(
             "DISPATCHER_CLAIM_TIMEOUT_SECONDS", DEFAULT_DISPATCHER_CLAIM_TIMEOUT_SECONDS
         ),
