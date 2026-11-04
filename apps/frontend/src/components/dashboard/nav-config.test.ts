@@ -266,7 +266,7 @@ describe("operator Observability group (#744)", () => {
     expect(settings?.soon).toBeUndefined();
   });
 
-  it("keeps the Work entries as they were and adds Observability as a second section", () => {
+  it("keeps the Work entries as they were and adds Observability and Account sections", () => {
     const sections = sidebarSections(NAV_CONFIG.operator);
 
     expect(sections.map((section) => section.labelKey)).toEqual([
