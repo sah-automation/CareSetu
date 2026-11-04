@@ -39,6 +39,7 @@ from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware, RedisRateLimitMiddleware
 from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
+from app.gateway.sharding import ShardingMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
 from app.redis import close_redis_client, init_redis_client
 from modules.audit.adapters.routes import router as audit_router
@@ -139,9 +140,16 @@ class SeedEgressResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Payload of the ``/health`` route."""
+    """Payload of the ``/health`` route.
+
+    Multi-region (ARCH-P3 #856) records its region and replication intent here;
+    nothing about routing changes in this shape.
+    """
 
     status: Literal["ok"]
+    region: str = ""
+    multi_region_enabled: bool = False
+    cross_region_replication: bool = False
 
 
 class MeResponse(BaseModel):
@@ -319,6 +327,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "degraded mode enabled; reduced capabilities: %s",
             ", ".join(_reduced_capabilities),
             extra={"reduced_capabilities": _reduced_capabilities, "event": "degraded_mode"},
+        )
+    if resolved_settings.sharding_enabled:
+        logger.warning(
+            "sharding enabled (inert, ARCH-P3 #856): no routing performed; "
+            "shard identity %r recorded on request state",
+            resolved_settings.shard_key,
+            extra={
+                "event": "sharding",
+                "sharding_enabled": True,
+                "shard_key": resolved_settings.shard_key,
+                "shard_count": resolved_settings.shard_count,
+            },
+        )
+    if resolved_settings.multi_region_enabled or resolved_settings.cross_region_replication:
+        logger.warning(
+            "multi-region enabled (inert, ARCH-P3 #856): region=%r replication=%s; "
+            "no region selection, failover, or cross-region replication performed",
+            resolved_settings.region,
+            resolved_settings.cross_region_replication,
+            extra={
+                "event": "multi_region",
+                "multi_region_enabled": resolved_settings.multi_region_enabled,
+                "region": resolved_settings.region,
+                "cross_region_replication": resolved_settings.cross_region_replication,
+            },
         )
 
     @asynccontextmanager
@@ -751,7 +784,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         router=engine,
     )
     app.add_middleware(SecurityHeadersMiddleware)
-    # PHASE-14A B9 (#727): count every ANSWERED request into the in-process
+    # ARCH-P3 #856: no-op sharding middleware, installed only when enabled.
+    if resolved_settings.sharding_enabled:
+        app.add_middleware(
+            ShardingMiddleware,
+            settings=resolved_settings,
+            shard_key=resolved_settings.shard_key,
+            shard_count=resolved_settings.shard_count,
+            enabled=True,
+        )  # PHASE-14A B9 (#727): count every ANSWERED request into the in-process
     # per-minute bucket the worker folds into `observability_http_minute`. The
     # OUTERMOST user middleware, so a gateway rejection - a 401 from jwt_verify, a
     # 429 from rate_limit - is counted like any other served request; an inner
@@ -851,7 +892,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok")
+        return HealthResponse(
+            status="ok",
+            region=resolved_settings.region,
+            multi_region_enabled=resolved_settings.multi_region_enabled,
+            cross_region_replication=resolved_settings.cross_region_replication,
+        )
 
     @app.get("/v1/me", response_model=MeResponse)
     async def me(
