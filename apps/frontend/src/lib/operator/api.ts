@@ -366,13 +366,15 @@ export async function updateOperatorActive(
   );
 }
 
-// ---- the calling operator's own private profile (#863, parent #862) ----
+// ---- the calling operator's own private profile (FEAT-015, #863, parent #862) ----
+
+export type OperatorTier = "admin" | "operator";
 
 export interface OperatorProfileView {
   identity_id: number;
   name: string | null;
   phone: string;
-  tier: "admin" | "operator";
+  tier: OperatorTier;
   mfa_enabled: boolean;
   photo_ref: string | null;
   created_at: string;

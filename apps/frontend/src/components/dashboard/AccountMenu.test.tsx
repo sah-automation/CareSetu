@@ -54,8 +54,10 @@ import {
   DoctorProfileProvider,
   useOptionalDoctorProfile,
 } from "@/lib/doctor/DoctorProfileContext";
+import { OperatorProfileProvider } from "@/lib/operator/OperatorProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import type { DoctorProfileView } from "@/lib/doctor/api";
+import type { OperatorProfileView } from "@/lib/operator/api";
 import { ApiError } from "@/lib/api-errors";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 import { maskedPhone } from "./BottomTabs";
@@ -91,6 +93,24 @@ vi.mock("@/lib/doctor/api", () => ({
   fetchDoctorProfile: doctorApi.fetchDoctorProfile,
   fetchDoctorProfilePhoto: doctorApi.fetchDoctorProfilePhoto,
 }));
+
+// #868: the operator's shared profile source and private photo bytes, mocked at
+// the module boundary for the same reason as the doctor's. The operator shell
+// mounts the source in production; this suite stands it in so the account menu's
+// operator branch can be seeded with a name, tier and photo without HTTP.
+const operatorApi = vi.hoisted(() => ({
+  fetchOperatorProfile: vi.fn(),
+  fetchOperatorProfilePhoto: vi.fn(),
+}));
+
+vi.mock("@/lib/operator/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/operator/api")>();
+  return {
+    ...mod,
+    fetchOperatorProfile: operatorApi.fetchOperatorProfile,
+    fetchOperatorProfilePhoto: operatorApi.fetchOperatorProfilePhoto,
+  };
+});
 
 const VALID_SESSION: StoredSession = {
   jwt: "test-jwt-token",
@@ -187,6 +207,21 @@ function doctorProfileWith(
     consulting_hours: null,
     credentials: [],
     notification_preferences: {},
+  };
+}
+
+function operatorProfileWith(
+  overrides: Partial<OperatorProfileView> = {},
+): OperatorProfileView {
+  return {
+    identity_id: 42,
+    name: "Asha Admin",
+    phone: "+911234567890",
+    tier: "operator",
+    mfa_enabled: true,
+    photo_ref: null,
+    created_at: "2025-01-01T00:00:00Z",
+    ...overrides,
   };
 }
 
@@ -454,6 +489,10 @@ beforeEach(() => {
   doctorApi.fetchDoctorProfile.mockResolvedValue(doctorProfileWith(null));
   doctorApi.fetchDoctorProfilePhoto.mockResolvedValue(
     new Blob(["doctor-photo-bytes"], { type: "image/png" }),
+  );
+  operatorApi.fetchOperatorProfile.mockResolvedValue(operatorProfileWith());
+  operatorApi.fetchOperatorProfilePhoto.mockResolvedValue(
+    new Blob(["operator-photo-bytes"], { type: "image/png" }),
   );
 });
 
@@ -1368,25 +1407,27 @@ describe("AccountMenu doctor dropdown parity (#570)", () => {
     expect(menu.querySelector("svg")).toBeNull();
   });
 
-  it("leaves the operator's account menu exactly as it was", async () => {
-    // Pinned rather than assumed: the operator shares the staff branch, so
-    // "unchanged" has to be a claim about the operator's own session, not an
-    // inference from the partner shell's case.
+  it("gives the operator a real account menu: identity header, tier badge, profile link and accent logout", async () => {
+    // #865/#868: the operator is no longer a staff-branch surface. Its menu is
+    // the patient/doctor shape: a wider content column, an identity header, a
+    // live Profile & Settings row and the red accented sign-out.
     await renderClosedTrigger(ME_RESPONSE_OPERATOR, "operator");
     await openViaKeyboard();
 
     const menu = screen.getByRole("menu");
-    expect(menu.className).toContain("w-52");
+    expect(menu.className).toContain("w-60");
+    expect(screen.getByTestId("account-menu-identity")).toBeInTheDocument();
     expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
       "Operator",
     );
-    const operatorLogout = screen.getByTestId("logout-button");
-    expect(operatorLogout.className).not.toContain("text-danger");
-    expect(operatorLogout.className).not.toContain("min-h-11");
-    // Still the two-part phone/badge header: the phone on its own, no identity
-    // line, no avatar.
+    expect(screen.getByTestId("account-menu-operator-profile")).toHaveAttribute(
+      "href",
+      "/operator/profile",
+    );
+    const operatorLogout = screen.getByTestId("account-menu-operator-logout");
+    expect(operatorLogout.className).toContain("text-danger");
+    // The full E.164 stays on the identity header's second line.
     expect(screen.getByText("+911234567890")).toBeInTheDocument();
-    expect(screen.queryByTestId("account-menu-identity")).toBeNull();
     expect(menu.querySelector("img")).toBeNull();
   });
 });
@@ -1588,6 +1629,18 @@ describe("AccountMenu surface belongs to the shell, not the session (#584)", () 
     );
   }
 
+  function expectOperatorTreatment(trigger: HTMLElement) {
+    // The operator disc replaces the staff digits with the person icon, and its
+    // menu is the real account menu's width with the red sign-out.
+    expect(trigger).not.toHaveTextContent("?");
+    expect(trigger.querySelector("img")).toBeNull();
+    expect(trigger.querySelector("svg")).not.toBeNull();
+    expect(screen.getByRole("menu")).toHaveClass("w-60");
+    expect(screen.getByTestId("account-menu-operator-logout")).toHaveClass(
+      "text-danger",
+    );
+  }
+
   it("keeps a lab or chemist partner on the staff menu under both identity states", async () => {
     let trigger = await openInShell("partner", { kind: "unresolved" });
     expectRows(DOCTOR_ROWS, false);
@@ -1601,17 +1654,57 @@ describe("AccountMenu surface belongs to the shell, not the session (#584)", () 
     expectStaffTreatment(trigger, "90");
   });
 
-  it("keeps the operator on the staff menu under both identity states", async () => {
+  it("keeps the operator's trigger an avatar under both identity states", async () => {
+    // #865: the operator now draws the same 36px avatar disc as the patient and
+    // doctor surfaces - not the phone digits - and its menu is the wider real
+    // account menu with the accented sign-out, in every identity state.
     let trigger = await openInShell("operator", { kind: "unresolved" });
     expectRows(DOCTOR_ROWS, false);
     expectRows(PATIENT_ROWS, false);
-    expectStaffTreatment(trigger, "?");
+    expectOperatorTreatment(trigger);
     cleanup();
 
     trigger = await openInShell("operator", { kind: "stale-patient" });
     expectRows(DOCTOR_ROWS, false);
     expectRows(PATIENT_ROWS, false);
-    expectStaffTreatment(trigger, "90");
+    expectOperatorTreatment(trigger);
+  });
+
+  it("reads the operator's name, tier and photo from the shared operator profile", async () => {
+    setStoredSession(VALID_SESSION);
+    operatorApi.fetchOperatorProfile.mockResolvedValue(
+      operatorProfileWith({
+        name: "Asha Admin",
+        tier: "admin",
+        photo_ref: "operator/42/photo-1.enc",
+      }),
+    );
+    mockMeResponse(ME_RESPONSE_OPERATOR);
+    render(
+      <AuthProvider>
+        <OperatorProfileProvider>
+          <AccountMenu shellRole="operator" />
+        </OperatorProfileProvider>
+      </AuthProvider>,
+    );
+    await waitFor(() =>
+      expect(operatorApi.fetchOperatorProfile).toHaveBeenCalled(),
+    );
+
+    // The trigger hydrates from the same source the page reads, so the photo
+    // arrives on the disc before the menu is opened.
+    await imageIn(screen.getByTestId("account-menu"));
+    await openViaKeyboard();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("account-menu-identity")).toHaveTextContent(
+        "Asha Admin",
+      ),
+    );
+    expect(screen.getByTestId("account-menu-role-badge")).toHaveTextContent(
+      "Admin",
+    );
+    expect(operatorApi.fetchOperatorProfile).toHaveBeenCalledTimes(1);
   });
 
   it("opens a doctor menu at the wider real-account width, not the staff one", async () => {

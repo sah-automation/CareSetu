@@ -1,5 +1,12 @@
 "use client";
 
+// FEAT-015 (operator console) / #862, #866, #868: the operator's own private
+// profile page behind the Profile & Settings entry. Three zones - identity,
+// account, security - each saving through the shared ProfileSectionShell, with
+// the same shared profile source the account-menu chrome reads. Operator can
+// edit their name and photo; phone, tier and created date are read-only.
+// Mobile-first single column with touch-sized anchors and fields.
+
 import { useEffect, useRef, useState } from "react";
 
 import { ErrorBanner } from "@/components/layout/ErrorBanner";
@@ -10,11 +17,9 @@ import { useLang } from "@/lib/i18n/LangContext";
 import { ProfileSectionShell } from "@/components/doctor/profile/ProfileSectionShell";
 import { useSectionEditBuffer } from "@/components/doctor/profile/useSectionEditBuffer";
 import { OperatorProfilePhotoCard } from "@/components/operator/profile/OperatorProfilePhotoCard";
+import { OperatorTierBadge } from "@/components/operator/profile/OperatorTierBadge";
 import { ApiError } from "@/lib/api-errors";
-import {
-  updateOperatorProfile,
-  type OperatorProfileView,
-} from "@/lib/operator/api";
+import { updateOperatorProfile } from "@/lib/operator/api";
 import { useOperatorProfile } from "@/lib/operator/OperatorProfileContext";
 import { idempotencyKey } from "@/lib/idempotency";
 
@@ -36,22 +41,7 @@ export default function OperatorProfilePage() {
   const { profile, status, errorTraceId, reload, adoptProfile } =
     useOperatorProfile();
 
-  const [photoBusy] = useState(false);
   const nameAttemptKey = useRef<string | null>(null);
-
-  const newestProfile = useRef<OperatorProfileView | null>(null);
-  useEffect(() => {
-    newestProfile.current = profile;
-  }, [profile]);
-
-  function adoptRef<K extends keyof OperatorProfileView>(
-    field: K,
-    value: OperatorProfileView[K],
-  ) {
-    const current = newestProfile.current;
-    if (current === null) return;
-    adoptProfile({ ...current, [field]: value });
-  }
 
   const [bannerOpen, setBannerOpen] = useState(false);
   useEffect(() => {
@@ -97,10 +87,9 @@ export default function OperatorProfilePage() {
 
   const createdLabel =
     profile != null
-      ? new Intl.DateTimeFormat(lang, {
-          dateStyle: "medium",
-          timeStyle: "short",
-        }).format(new Date(profile.created_at))
+      ? new Intl.DateTimeFormat(lang, { dateStyle: "medium" }).format(
+          new Date(profile.created_at),
+        )
       : "";
 
   const mfaEnabled = profile?.mfa_enabled ?? false;
@@ -132,13 +121,13 @@ export default function OperatorProfilePage() {
       {ready && (
         <div className="space-y-4" data-testid="operator-profile-page">
           <details
-            className="rounded-md border border-hairline bg-surface p-2"
+            className="rounded-md border border-hairline bg-surface p-2 md:hidden"
             data-testid="profile-section-index"
           >
             <summary className="cursor-pointer text-sm font-medium">
               {t.sections}
             </summary>
-            <nav className="mt-2 flex flex-wrap gap-2">
+            <nav aria-label={t.sections} className="mt-2 flex flex-wrap gap-2">
               {anchors.map((anchor) => (
                 <a
                   key={anchor.id}
@@ -151,6 +140,26 @@ export default function OperatorProfilePage() {
               ))}
             </nav>
           </details>
+
+          <nav
+            aria-label={t.sections}
+            data-testid="profile-section-index-desktop"
+            className="sticky top-14 z-30 -mx-4 hidden border-b border-hairline bg-surface/95 px-4 py-2 backdrop-blur md:block"
+          >
+            <ul className="flex flex-wrap items-center gap-2">
+              {anchors.map((anchor) => (
+                <li key={anchor.id}>
+                  <a
+                    href={`#${anchor.id}`}
+                    data-testid={`profile-anchor-desktop-${anchor.id}`}
+                    className="inline-flex min-h-11 items-center rounded-full border border-hairline px-3 text-sm text-txt hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong"
+                  >
+                    {anchor.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
 
           <ProfileSectionShell
             title={t.identityHeading}
@@ -173,7 +182,11 @@ export default function OperatorProfilePage() {
             <OperatorProfilePhotoCard
               photoRef={profile?.photo_ref ?? null}
               name={profile?.name ?? ""}
-              onPhotoRefChange={(ref) => adoptRef("photo_ref", ref)}
+              onPhotoRefChange={(ref) => {
+                if (profile !== null) {
+                  adoptProfile({ ...profile, photo_ref: ref });
+                }
+              }}
             />
 
             <div className="mt-4 flex flex-col gap-2">
@@ -198,16 +211,10 @@ export default function OperatorProfilePage() {
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <span className="text-sm text-txt-muted">{t.tierLabel}</span>
-              <span
-                data-testid="operator-tier-badge"
-                className={
-                  profile?.tier === "admin"
-                    ? "rounded px-1.5 py-0.5 text-xs font-medium bg-accent-soft text-accent"
-                    : "rounded px-1.5 py-0.5 text-xs font-medium bg-muted-soft text-muted"
-                }
-              >
-                {profile?.tier === "admin" ? t.tierAdmin : t.tierOperator}
-              </span>
+              <OperatorTierBadge
+                tier={profile?.tier}
+                testId="operator-tier-badge"
+              />
             </div>
 
             <div className="mt-2 flex flex-wrap items-center gap-2">

@@ -69,7 +69,9 @@ import { useProfilePhotoSource } from "@/lib/profile/useProfilePhotoSource";
 import type { ProfilePhotoReader } from "@/lib/profile/useProfilePhotoSource";
 import { fetchPatientPhoto } from "@/lib/profile/api";
 import { fetchDoctorProfilePhoto } from "@/lib/doctor/api";
+import type { OperatorTier } from "@/lib/operator/api";
 import { fetchOperatorProfilePhoto } from "@/lib/operator/api";
+import { OperatorTierBadge } from "@/components/operator/profile/OperatorTierBadge";
 import type { StoredPatientProfile } from "@/lib/profile/api";
 import {
   basicsComplete,
@@ -291,20 +293,9 @@ export function AccountMenu({ shellRole }: { shellRole: Role }) {
     </span>
   );
 
-  const tierBadgeFor = (tier: "admin" | "operator" | undefined) => {
-    const isAdmin = tier === "admin";
-    return (
-      <span
-        className={cn(
-          "shrink-0 rounded px-1.5 py-0.5 text-xs font-medium",
-          isAdmin ? "bg-accent-soft text-accent" : "bg-muted-soft text-muted",
-        )}
-        data-testid="account-menu-role-badge"
-      >
-        {isAdmin ? "Admin" : "Operator"}
-      </span>
-    );
-  };
+  const tierBadgeFor = (tier: OperatorTier | undefined) => (
+    <OperatorTierBadge tier={tier} testId="account-menu-role-badge" />
+  );
 
   return (
     <DropdownMenu>

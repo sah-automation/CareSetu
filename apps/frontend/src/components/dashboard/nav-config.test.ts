@@ -285,6 +285,19 @@ describe("operator Observability group (#744)", () => {
     ]);
     expect(sections[2].items.map((item) => item.key)).toEqual(["profile"]);
   });
+
+  it("points the operator account entry at the live profile page", () => {
+    // #867/#868: the entry is a real destination in the account group, not a
+    // coming-soon placeholder, and it matches the route the AccountMenu links to.
+    const profile = NAV_CONFIG.operator.find((item) => item.key === "profile");
+
+    expect(profile).toMatchObject({
+      labelKey: "profile",
+      href: "/operator/profile",
+      group: "account",
+    });
+    expect(profile?.soon).toBeUndefined();
+  });
 });
 
 describe("splitMobileTabs", () => {

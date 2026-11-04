@@ -1,5 +1,11 @@
 "use client";
 
+// FEAT-015 (operator console) / #862, #866, #868: the operator profile photo
+// control. The host passes the current ref and is told when it moves; object
+// URLs, streams and idempotency keys stay inside. A missing or unreadable photo
+// degrades to the avatar fallback rather than an error surface, and every write
+// answers the new ref so a rejected write can never look like a success.
+
 import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -83,7 +89,7 @@ export function OperatorProfilePhotoCard({
       <div className="mt-3 flex flex-wrap items-center gap-4">
         <Avatar
           photoRef={photoUrl}
-          name={name || "Operator"}
+          name={name || t.tierOperator}
           data-testid="operator-profile-photo"
           className="h-16 w-16 bg-accent-soft text-lg font-semibold text-accent-strong"
         />
@@ -94,7 +100,7 @@ export function OperatorProfilePhotoCard({
             accept="image/jpeg,image/png,image/webp"
             className="sr-only"
             tabIndex={-1}
-            data-testid="ps-photo-input"
+            data-testid="operator-photo-input"
             aria-label={hasPhoto ? t.photoReplace : t.photoUpload}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -107,7 +113,7 @@ export function OperatorProfilePhotoCard({
             size="sm"
             disabled={busy}
             loading={busy}
-            data-testid="ps-photo-upload"
+            data-testid="operator-photo-upload"
             onClick={() => inputRef.current?.click()}
           >
             {hasPhoto ? t.photoReplace : t.photoUpload}
@@ -119,7 +125,7 @@ export function OperatorProfilePhotoCard({
               variant="ghost"
               disabled={busy}
               onClick={() => void removePhoto()}
-              data-testid="ps-photo-remove"
+              data-testid="operator-photo-remove"
             >
               {t.photoRemove}
             </Button>
@@ -130,7 +136,7 @@ export function OperatorProfilePhotoCard({
       {failure && (
         <p
           role="alert"
-          data-testid="ps-photo-failed"
+          data-testid="operator-photo-failed"
           className="mt-3 rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-sm text-danger"
         >
           {t.photoFailed}
