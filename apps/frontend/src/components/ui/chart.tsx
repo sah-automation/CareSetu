@@ -525,6 +525,8 @@ export {
   CartesianGrid,
   Cell,
   LabelList,
+  Line,
+  LineChart,
   XAxis,
   YAxis,
 };
