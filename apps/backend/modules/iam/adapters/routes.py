@@ -1030,7 +1030,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "OPERATOR_PROFILE_PHOTO_STORE_UNAVAILABLE",
             str(exc),
-            log_tag="iam_rejection",
+            log_tag="iam_upstream_failure",
             request=request,
         )
 

@@ -21,8 +21,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TABLE iam.iam_operator_profiles ADD COLUMN name VARCHAR(200)")
-    op.execute("ALTER TABLE iam.iam_operator_profiles ADD COLUMN photo_ref VARCHAR(255)")
+    op.execute("ALTER TABLE iam.iam_operator_profiles ADD COLUMN IF NOT EXISTS name VARCHAR(200)")
+    op.execute(
+        "ALTER TABLE iam.iam_operator_profiles ADD COLUMN IF NOT EXISTS photo_ref VARCHAR(255)"
+    )
 
 
 def downgrade() -> None:

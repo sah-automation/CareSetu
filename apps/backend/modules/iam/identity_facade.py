@@ -966,7 +966,6 @@ class IdentityFacade:
             validate_profile_photo(media_type, data, max_bytes=self._photo_max_bytes)
         except ProfilePhotoValidationError as exc:
             raise OperatorProfilePhotoValidationError(str(exc)) from exc
-        await self.get_operator_profile(identity_id)
         media_store = self._media_store
         try:
             try:
