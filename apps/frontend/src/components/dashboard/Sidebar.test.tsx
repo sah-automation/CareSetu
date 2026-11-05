@@ -587,10 +587,15 @@ describe("Sidebar #745 operator groups and disclosure", () => {
     );
   });
 
-  it("separates the two operator sections with a hairline divider", () => {
+  it("separates every operator section with a hairline divider", () => {
     renderOperator();
-    const divider = screen.getByTestId("sidebar-section-divider");
-    expect(divider.className).toContain("border-hairline");
+    // #867/#868: Work, Observability and Account are three sections, so there
+    // are two dividers between them.
+    const dividers = screen.getAllByTestId("sidebar-section-divider");
+    expect(dividers).toHaveLength(2);
+    for (const divider of dividers) {
+      expect(divider.className).toContain("border-hairline");
+    }
   });
 
   it("renders the nine sub-destinations under their parent behind a guide rail", () => {

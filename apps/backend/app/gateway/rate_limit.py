@@ -63,7 +63,9 @@ _INTAKE_RE_RECORD_PATH_SUFFIX = "/re-record"
 # intake read shapes; that is why these match on the write METHOD, not the path
 # alone (``/v1/me/photo`` serves a GET on the very same path).
 _MEDIA_WRITE_METHOD = "PUT"
-_PROFILE_PHOTO_UPLOAD_PATHS = frozenset({"/v1/me/photo", "/v1/doctor/profile/photo"})
+_PROFILE_PHOTO_UPLOAD_PATHS = frozenset(
+    {"/v1/me/photo", "/v1/doctor/profile/photo", "/v1/operator/profile/photo"}
+)
 # Upper bound on tracked buckets: once exceeded, stale windows are pruned and,
 # if the dict is still over the cap, the oldest live buckets are evicted so an
 # attacker spraying many keys cannot grow the dict without bound.

@@ -56,7 +56,8 @@ describe("NAV_CONFIG", () => {
         // #708: the operator's Observability entry joins them - the console has
         // a live overview page behind it, so it may not read as coming-soon.
         const isLiveOperatorTab =
-          role === "operator" && item.key === "observability";
+          role === "operator" &&
+          (item.key === "observability" || item.key === "profile");
         expect(item.soon, `${role}/${item.key}`).toBe(
           isLiveDoctorTab || isLiveOperatorTab ? undefined : true,
         );
@@ -265,12 +266,13 @@ describe("operator Observability group (#744)", () => {
     expect(settings?.soon).toBeUndefined();
   });
 
-  it("keeps the Work entries as they were and adds Observability as a second section", () => {
+  it("keeps the Work entries as they were and adds Observability and Account sections", () => {
     const sections = sidebarSections(NAV_CONFIG.operator);
 
     expect(sections.map((section) => section.labelKey)).toEqual([
       "work",
       "observability",
+      "account",
     ]);
     expect(sections[0].items.map((item) => item.key)).toEqual([
       "home",
@@ -281,6 +283,20 @@ describe("operator Observability group (#744)", () => {
     expect(sections[1].items.map((item) => item.key)).toEqual([
       "observability",
     ]);
+    expect(sections[2].items.map((item) => item.key)).toEqual(["profile"]);
+  });
+
+  it("points the operator account entry at the live profile page", () => {
+    // #867/#868: the entry is a real destination in the account group, not a
+    // coming-soon placeholder, and it matches the route the AccountMenu links to.
+    const profile = NAV_CONFIG.operator.find((item) => item.key === "profile");
+
+    expect(profile).toMatchObject({
+      labelKey: "profile",
+      href: "/operator/profile",
+      group: "account",
+    });
+    expect(profile?.soon).toBeUndefined();
   });
 });
 
@@ -367,6 +383,7 @@ describe("splitMobileTabs", () => {
       "verifications",
       "disputes",
       "audit",
+      "profile",
     ]);
     expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
     expect(hasMore).toBe(true);

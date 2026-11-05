@@ -67,7 +67,7 @@ from modules.doctor.facade import DoctorConsoleFacade
 from modules.health.adapters.routes import register_error_handlers as register_health_error_handlers
 from modules.health.adapters.routes import router as health_router
 from modules.health.facade import HealthFacade
-from modules.iam.adapters.routes import register_error_handlers
+from modules.iam.adapters.routes import operator_profile_router, register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
 from modules.iam.facade import IamFacade, PatientProfile
@@ -823,6 +823,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.add_middleware(HttpCounterMiddleware)
 
     app.include_router(iam_router)
+    app.include_router(operator_profile_router)
     app.include_router(health_router)
     app.include_router(consent_router)
     if resolved_settings.module_audit_enabled:

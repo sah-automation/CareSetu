@@ -1,35 +1,9 @@
 "use client";
 
-// #743: the Product lens page's presentational parts. Split out of the page for
-// the reason BusinessCharts.tsx exists: the page owns which read feeds which
-// panel, and the charts and tables own how one loaded read is read.
-//
-// Three deliberate choices, all about not inventing a fact:
-//   * The adoption trend plots ONE field - active users per day - because
-//     requests and people are different quantities and a second axis would let
-//     a traffic spike or a quiet day look like an adoption change. The load per
-//     head lives in the panel's figures, where it carries its own denominator.
-//   * A day with nothing recorded is ABSENT from the series (the facade's own
-//     rule), so a quiet stretch is a gap rather than a drawn dip to zero.
-//   * A retention horizon that has not arrived prints the dash, never "0%". A
-//     three-day-old cohort has not been given the chance to return on day
-//     thirty; writing zero would fabricate a collapse at the newest end of the
-//     only table where a real decline would be read next to it.
-//
-// Every import here is a named re-export from components/ui/chart.tsx, never
-// `recharts` directly: the boundary is what stops two panels growing two
-// palettes (chart.tsx §"the bundle boundary").
+// #743: the Product lens page's NON-CHART presentational parts - tables, filters.
+// Chart components are in ProductChartsDynamic.tsx to enable dynamic import
+// and keep the recharts runtime out of the initial page bundle.
 
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ChartFigure,
-  ChartTooltip,
-  ChartTooltipContent,
-  XAxis,
-  YAxis,
-} from "@/components/ui/chart";
 import { cn } from "@/lib/utils";
 import {
   DASH,
@@ -37,96 +11,10 @@ import {
   formatRate,
 } from "@/lib/operator/observability-format";
 import type {
-  ActiveUsersDayPoint,
   FunnelStepRow,
   ProductOutcome,
   RetentionCohortDay,
 } from "@/lib/operator/observability";
-
-/**
- * The day label on the x-axis. Formatted at UTC for the same reason the
- * throughput chart is: the API stamps UTC, and a server-local reading would
- * shift the bars against the deployment's own logs.
- */
-const DAY_FORMAT = new Intl.DateTimeFormat("en-GB", {
-  day: "2-digit",
-  month: "short",
-  timeZone: "UTC",
-});
-
-function dayLabel(day: string): string {
-  return DAY_FORMAT.format(new Date(`${day}T00:00:00Z`));
-}
-
-/**
- * The trend's text alternative. It says how many days were recorded and how
- * many were absent, because a short series and a sparse one read the same to a
- * screen reader otherwise.
- */
-function trendDescription(points: ActiveUsersDayPoint[]): string {
-  if (points.length === 0) return "No days with recorded activity to plot.";
-  const total = points.reduce((sum, point) => sum + point.active_users, 0);
-  return (
-    `Daily active users over ${points.length} recorded day(s): ${formatCount(
-      total,
-    )} actor-days in total. Days with no recorded activity are absent from the ` +
-    "series rather than plotted as zero."
-  );
-}
-
-/** Daily active users, one bar per recorded day. */
-export function ActiveUsersTrendChart({
-  points,
-  testId,
-}: {
-  points: ActiveUsersDayPoint[];
-  testId: string;
-}) {
-  const data = points.map((point) => ({
-    label: dayLabel(point.day),
-    active: point.active_users,
-  }));
-  const config = {
-    active: { label: "Active users", color: "var(--accent)" },
-  };
-
-  return (
-    <ChartFigure
-      config={config}
-      testId={testId}
-      ariaLabel="Daily active users"
-      description={trendDescription(points)}
-    >
-      <BarChart data={data} margin={{ left: 8, right: 8, top: 8 }}>
-        <CartesianGrid vertical={false} />
-        <XAxis
-          dataKey="label"
-          interval="preserveStartEnd"
-          tickLine={false}
-          axisLine={false}
-          fontSize={12}
-        />
-        <YAxis
-          tickLine={false}
-          axisLine={false}
-          fontSize={12}
-          width={40}
-          allowDecimals={false}
-        />
-        <ChartTooltip
-          cursor={{ fill: "var(--hairline-soft)" }}
-          content={<ChartTooltipContent />}
-        />
-        <Bar
-          dataKey="active"
-          fill="var(--color-active)"
-          radius={[4, 4, 0, 0]}
-          isAnimationActive={false}
-        />
-      </BarChart>
-    </ChartFigure>
-  );
-}
 
 /** The outcomes the funnel control offers, in the registry's closed order. */
 export const OUTCOME_FILTERS: { id: ProductOutcome | "all"; label: string }[] =

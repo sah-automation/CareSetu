@@ -6,7 +6,8 @@
 // (EnrollMfaResult), and modules/partner/facade.py (PartnerQueue /
 // PartnerVerificationDetail / PartnerView).
 
-import { guardShape, request } from "@/lib/request";
+import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
+import { guardShape, request, requestBlob, requestVoid } from "@/lib/request";
 import type { SessionResult } from "@/lib/auth/api";
 import { isPartnerView } from "@/lib/partner/api";
 import type { PartnerView } from "@/lib/partner/api";
@@ -363,4 +364,107 @@ export async function updateOperatorActive(
     isOperatorSummary,
     "The API returned an unexpected operator active update shape",
   );
+}
+
+// ---- the calling operator's own private profile (FEAT-015, #863, parent #862) ----
+
+export type OperatorTier = "admin" | "operator";
+
+export interface OperatorProfileView {
+  identity_id: number;
+  name: string | null;
+  phone: string;
+  tier: OperatorTier;
+  mfa_enabled: boolean;
+  photo_ref: string | null;
+  created_at: string;
+}
+
+export interface OperatorProfileUpdate {
+  name: string | null;
+}
+
+export interface OperatorProfilePhotoRef {
+  photo_ref: string;
+}
+
+function isOperatorProfileView(value: unknown): value is OperatorProfileView {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.identity_id === "number" &&
+    (row.name === null || typeof row.name === "string") &&
+    typeof row.phone === "string" &&
+    (row.tier === "admin" || row.tier === "operator") &&
+    typeof row.mfa_enabled === "boolean" &&
+    (row.photo_ref === null || typeof row.photo_ref === "string") &&
+    typeof row.created_at === "string"
+  );
+}
+
+function isOperatorProfilePhotoRef(
+  value: unknown,
+): value is OperatorProfilePhotoRef {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return typeof row.photo_ref === "string";
+}
+
+export async function fetchOperatorProfile(): Promise<OperatorProfileView> {
+  const data = await request<unknown>("/v1/operator/profile");
+  return guardShape(
+    data,
+    isOperatorProfileView,
+    "The API returned an unexpected operator profile shape",
+  );
+}
+
+export async function updateOperatorProfile(
+  update: OperatorProfileUpdate,
+  retryKey?: string,
+): Promise<OperatorProfileView> {
+  const data = await request<unknown>("/v1/operator/profile", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isOperatorProfileView,
+    "The API returned an unexpected operator profile shape",
+  );
+}
+
+export async function uploadOperatorProfilePhoto(
+  file: File,
+  retryKey?: string,
+): Promise<OperatorProfilePhotoRef> {
+  const body = new FormData();
+  body.append("file", file);
+  const data = await request<unknown>("/v1/operator/profile/photo", {
+    method: "PUT",
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey) },
+    body,
+  });
+  return guardShape(
+    data,
+    isOperatorProfilePhotoRef,
+    "The API returned an unexpected operator photo shape",
+  );
+}
+
+export async function fetchOperatorProfilePhoto(): Promise<Blob> {
+  return requestBlob("/v1/operator/profile/photo");
+}
+
+export async function deleteOperatorProfilePhoto(
+  retryKey?: string,
+): Promise<void> {
+  await requestVoid("/v1/operator/profile/photo", {
+    method: "DELETE",
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey) },
+  });
 }

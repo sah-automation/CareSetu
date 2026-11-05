@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, File, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,6 +37,11 @@ from modules.iam.domain.exceptions import (
     OperatorLastAdminError,
     OperatorMfaError,
     OperatorMfaLockedError,
+    OperatorProfileNotFoundError,
+    OperatorProfilePhotoNotFoundError,
+    OperatorProfilePhotoStoreUnavailableError,
+    OperatorProfilePhotoTransferError,
+    OperatorProfilePhotoValidationError,
     OperatorSelfChangeError,
     PatientProfileNotSetError,
     ProfilePhotoTransferError,
@@ -51,6 +56,8 @@ from modules.iam.facade import (
     EnrollMfaResult,
     IamFacade,
     OperatorInvitedResult,
+    OperatorProfilePhotoView,
+    OperatorProfileView,
     OperatorSummary,
     PartnerLoginOtpResult,
     PartnerVerifyOtpResult,
@@ -63,7 +70,19 @@ from modules.iam.facade import (
 if TYPE_CHECKING:
     from modules.partner.facade import PartnerFacade
 
+
+class OperatorProfileUpdateRequest(BaseModel):
+    """Body of ``PUT /v1/operator/profile``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=200)
+
+
 router = APIRouter(prefix="/v1/auth", tags=["iam"])
+
+# Dedicated self-service operator profile router (#869). Mounted at /v1/operator.
+operator_profile_router = APIRouter(prefix="/v1/operator", tags=["iam"])
 
 
 class RegisterPatientRequest(BaseModel):
@@ -696,6 +715,100 @@ def _redact_phone(message: str) -> str:
     )
 
 
+@operator_profile_router.get(
+    "/profile",
+    response_model=OperatorProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the caller's operator profile",
+)
+async def get_operator_profile(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+) -> OperatorProfileView:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.get_operator_profile(int(operator.subject_id))
+
+
+@operator_profile_router.put(
+    "/profile",
+    response_model=OperatorProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Update the caller's operator display name",
+)
+async def update_operator_profile(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    body: OperatorProfileUpdateRequest,
+) -> OperatorProfileView:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    identity_id = int(operator.subject_id)
+    return await run_idempotent(
+        request,
+        lambda: facade.update_operator_profile_name(identity_id, body.name),
+        namespace=f"operator:{identity_id}",
+    )
+
+
+@operator_profile_router.put(
+    "/profile/photo",
+    response_model=OperatorProfilePhotoView,
+    status_code=status.HTTP_200_OK,
+    summary="Upload or replace the caller's operator photo",
+)
+async def upload_operator_profile_photo(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    file: UploadFile = File(...),  # noqa: B008
+) -> OperatorProfilePhotoView:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    identity_id = int(operator.subject_id)
+    data = await file.read()
+    return await run_idempotent(
+        request,
+        lambda: facade.save_operator_photo(
+            identity_id=identity_id, data=data, media_type=file.content_type
+        ),
+        namespace=f"operator:{identity_id}",
+    )
+
+
+@operator_profile_router.get(
+    "/profile/photo",
+    status_code=status.HTTP_200_OK,
+    summary="Stream the caller's operator photo",
+)
+async def get_operator_profile_photo(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+) -> Response:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    photo = await facade.get_operator_photo(identity_id=int(operator.subject_id))
+    return Response(
+        content=photo.data,
+        media_type=photo.media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@operator_profile_router.delete(
+    "/profile/photo",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove the caller's operator photo",
+)
+async def delete_operator_profile_photo(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+) -> Response:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    identity_id = int(operator.subject_id)
+    await run_idempotent(
+        request,
+        lambda: facade.delete_operator_photo(identity_id=identity_id),
+        namespace=f"operator:{identity_id}",
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-001 error envelope to every expected iam failure.
 
@@ -875,6 +988,59 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
     app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)
+
+    async def _op_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "OPERATOR_PROFILE_NOT_FOUND",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _op_photo_not_found(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "OPERATOR_PROFILE_PHOTO_NOT_FOUND",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _op_photo_invalid(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "OPERATOR_PROFILE_PHOTO_INVALID",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _op_photo_transfer_failed(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "OPERATOR_PROFILE_PHOTO_TRANSFER_FAILED",
+            str(exc),
+            log_tag="iam_upstream_failure",
+            request=request,
+        )
+
+    async def _op_photo_store_unavailable(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "OPERATOR_PROFILE_PHOTO_STORE_UNAVAILABLE",
+            str(exc),
+            log_tag="iam_upstream_failure",
+            request=request,
+        )
+
+    app.add_exception_handler(OperatorProfileNotFoundError, _op_profile_not_found)
+    app.add_exception_handler(OperatorProfilePhotoNotFoundError, _op_photo_not_found)
+    app.add_exception_handler(OperatorProfilePhotoValidationError, _op_photo_invalid)
+    app.add_exception_handler(OperatorProfilePhotoTransferError, _op_photo_transfer_failed)
+    app.add_exception_handler(
+        OperatorProfilePhotoStoreUnavailableError, _op_photo_store_unavailable
+    )
     app.add_exception_handler(ProfilePhotoValidationError, _profile_photo_invalid)
     app.add_exception_handler(PatientProfileNotSetError, _profile_not_set)
     app.add_exception_handler(ProfilePhotoTransferError, _photo_transfer_failed)

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
+from cryptography.exceptions import InvalidTag
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -31,6 +32,11 @@ from modules.iam.domain import events
 from modules.iam.domain.exceptions import (
     IamError,
     OperatorLastAdminError,
+    OperatorProfileNotFoundError,
+    OperatorProfilePhotoNotFoundError,
+    OperatorProfilePhotoStoreUnavailableError,
+    OperatorProfilePhotoTransferError,
+    OperatorProfilePhotoValidationError,
     OperatorSelfChangeError,
     PatientProfileNotSetError,
     ProfilePhotoTransferError,
@@ -59,7 +65,12 @@ from modules.iam.schema.models import (
     iam_sessions,
 )
 from modules.iam.session_facade import grant_operator_role
-from modules.profile_media.facade import PATIENT_PREFIX, ProfileMediaStore
+from modules.profile_media.facade import (
+    OPERATOR_PREFIX,
+    PATIENT_PREFIX,
+    ProfileMediaStore,
+    ProfileMediaStoreError,
+)
 
 _IAM_SCHEMA = "iam"
 
@@ -151,6 +162,30 @@ class OperatorSummary(BaseModel):
     is_active: bool
     mfa_enabled: bool
     created_at: datetime
+
+
+class OperatorProfileView(BaseModel):
+    """The caller's own operator self-service profile (ticket #869).
+
+    Read from the operator profile row joined to the identity and the MFA
+    factor. ``phone`` is the canonical E.164 - this is a self-service route, so
+    the caller's own number is never masked. ``created_at`` is the identity's
+    creation time, so a backfilled operator keeps its real join date.
+    """
+
+    identity_id: int
+    name: str | None = None
+    phone: str
+    tier: Literal["admin", "operator"]
+    mfa_enabled: bool
+    photo_ref: str | None = None
+    created_at: datetime
+
+
+class OperatorProfilePhotoView(BaseModel):
+    """Response shape for an operator profile photo upload (#869)."""
+
+    photo_ref: str
 
 
 class PatientProfile(BaseModel):
@@ -802,6 +837,270 @@ class IdentityFacade:
             return await _run(connection)
         async with self._engine.begin() as connection:
             return await _run(connection)
+
+    async def get_operator_profile(self, identity_id: int) -> OperatorProfileView:
+        """Read the caller's own operator profile (self-service, #869).
+
+        Resolves from the operator profile row joined to the identity and the
+        MFA factor. A missing or inactive profile (or an inactive identity)
+        raises :class:`OperatorProfileNotFoundError`; no row is ever created.
+        """
+        async with self._engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        iam_operator_profiles.c.identity_id,
+                        iam_operator_profiles.c.tier,
+                        iam_operator_profiles.c.is_active,
+                        iam_operator_profiles.c.name,
+                        iam_operator_profiles.c.photo_ref,
+                        iam_identities.c.status,
+                        iam_identities.c.phone_e164,
+                        iam_identities.c.created_at,
+                        func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                    )
+                    .select_from(
+                        iam_operator_profiles.join(
+                            iam_identities,
+                            iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                        ).outerjoin(
+                            iam_operator_mfa,
+                            iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                        )
+                    )
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                )
+            ).first()
+        if row is None or not bool(row[2]) or str(row[5]) != "Active":
+            raise OperatorProfileNotFoundError(identity_id)
+        return OperatorProfileView(
+            identity_id=int(row[0]),
+            name=row[3],
+            phone=str(row[6]),
+            tier=str(row[1]),
+            mfa_enabled=bool(row[8]),
+            photo_ref=row[4],
+            created_at=row[7],
+        )
+
+    async def update_operator_profile_name(
+        self, identity_id: int, name: str | None
+    ) -> OperatorProfileView:
+        """Set or clear the caller's display name (#869).
+
+        Trims surrounding whitespace; empty-after-trim becomes ``None``. Bumps
+        ``updated_at`` only on a real change. A missing/inactive profile raises
+        :class:`OperatorProfileNotFoundError`.
+        """
+        normalised = name.strip() if isinstance(name, str) else name
+        if normalised == "":
+            normalised = None
+        async with self._engine.begin() as connection:
+            locked = (
+                await connection.execute(
+                    select(
+                        iam_operator_profiles.c.tier,
+                        iam_operator_profiles.c.is_active,
+                        iam_operator_profiles.c.name,
+                        iam_operator_profiles.c.photo_ref,
+                        iam_identities.c.status,
+                        iam_identities.c.phone_e164,
+                        iam_identities.c.created_at,
+                        func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                    )
+                    .select_from(
+                        iam_operator_profiles.join(
+                            iam_identities,
+                            iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                        ).outerjoin(
+                            iam_operator_mfa,
+                            iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                        )
+                    )
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .with_for_update()
+                )
+            ).first()
+            if locked is None or not bool(locked[1]) or str(locked[4]) != "Active":
+                raise OperatorProfileNotFoundError(identity_id)
+            if locked[2] != normalised:
+                await connection.execute(
+                    update(iam_operator_profiles)
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .values(name=normalised, updated_at=self._clock())
+                )
+            tier = locked[0]
+            photo_ref = locked[3]
+            phone = locked[5]
+            created_at = locked[6]
+            mfa_enabled = locked[7]
+        return OperatorProfileView(
+            identity_id=identity_id,
+            name=normalised,
+            phone=str(phone),
+            tier=tier,
+            mfa_enabled=bool(mfa_enabled),
+            photo_ref=photo_ref,
+            created_at=created_at,
+        )
+
+    async def save_operator_photo(
+        self,
+        *,
+        identity_id: int,
+        data: bytes,
+        media_type: str | None,
+    ) -> OperatorProfilePhotoView:
+        """Upload or replace the caller's operator profile photo (#869).
+
+        Validates type and size first, saves the new object, locks the profile
+        row, swaps ``photo_ref`` + ``updated_at``, commits, then deletes the
+        previous object. Any failure after the save deletes the new object and
+        re-raises so the previous photo survives.
+        """
+        if self._media_store is None:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store is not configured"
+            )
+        try:
+            validate_profile_photo(media_type, data, max_bytes=self._photo_max_bytes)
+        except ProfilePhotoValidationError as exc:
+            raise OperatorProfilePhotoValidationError(str(exc)) from exc
+        media_store = self._media_store
+        try:
+            try:
+                new_key = await media_store.save(
+                    data=data,
+                    subject_id=identity_id,
+                    prefix=OPERATOR_PREFIX,
+                )
+            except ProfileMediaStoreError as exc:
+                if getattr(exc, "retries_exhausted", False):
+                    raise OperatorProfilePhotoTransferError(
+                        "operator profile photo upload failed"
+                    ) from exc
+                raise OperatorProfilePhotoStoreUnavailableError(
+                    "operator profile media store is unavailable"
+                ) from exc
+            except InvalidTag as exc:
+                raise OperatorProfilePhotoStoreUnavailableError(
+                    "operator profile media store returned unreadable data"
+                ) from exc
+            except OSError as exc:
+                raise OperatorProfilePhotoTransferError(
+                    "operator profile photo upload failed"
+                ) from exc
+            try:
+                previous_key = await self._set_operator_photo_ref(identity_id, new_key)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    await media_store.delete(object_key=new_key)
+                raise
+        except OperatorProfileNotFoundError:
+            raise
+        # Delete the previous object only after the swap committed.
+        if previous_key is not None and previous_key != new_key:
+            with contextlib.suppress(Exception):
+                await media_store.delete(object_key=previous_key)
+        # Invalidate profile cache? operator profile has no redis cache currently.
+        return OperatorProfilePhotoView(photo_ref=new_key)
+
+    async def get_operator_photo(self, identity_id: int) -> PhotoContent:
+        """Stream the caller's operator profile photo (#869)."""
+        media_store = self._media_store
+        if media_store is None:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store is not configured"
+            )
+        profile = await self.get_operator_profile(identity_id)
+        if profile.photo_ref is None:
+            raise OperatorProfilePhotoNotFoundError(identity_id)
+        try:
+            data = await media_store.read(object_key=profile.photo_ref)
+        except FileNotFoundError as exc:
+            raise OperatorProfilePhotoNotFoundError(identity_id) from exc
+        except ProfileMediaStoreError as exc:
+            if getattr(exc, "retries_exhausted", False):
+                raise OperatorProfilePhotoTransferError(
+                    "operator profile photo read failed"
+                ) from exc
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store is unavailable"
+            ) from exc
+        except InvalidTag as exc:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store returned unreadable data"
+            ) from exc
+        except OSError as exc:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile photo storage read failed"
+            ) from exc
+        return PhotoContent(data=data, media_type=_sniff_image_media_type(data))
+
+    async def delete_operator_photo(self, identity_id: int) -> None:
+        """Remove the caller's operator profile photo (#869). Idempotent."""
+        media_store = self._media_store
+        if media_store is None:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store is not configured"
+            )
+        # Validate profile exists/active.
+        await self.get_operator_profile(identity_id)
+        # Lock + clear.
+        old_key: str | None = None
+        async with self._engine.begin() as connection:
+            locked = (
+                await connection.execute(
+                    select(iam_operator_profiles.c.photo_ref, iam_operator_profiles.c.is_active)
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .with_for_update()
+                )
+            ).first()
+            if locked is None or not bool(locked[1]):
+                raise OperatorProfileNotFoundError(identity_id)
+            old_key = locked[0]
+            if old_key is not None:
+                await connection.execute(
+                    update(iam_operator_profiles)
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .values(photo_ref=None, updated_at=self._clock())
+                )
+        if old_key is not None:
+            with contextlib.suppress(Exception):
+                await media_store.delete(object_key=old_key)
+
+    async def _set_operator_photo_ref(self, identity_id: int, photo_ref: str) -> str | None:
+        """Persist ``photo_ref`` on operator profile row under lock (#869).
+
+        Returns the previous photo_ref (or None).
+        """
+        async with self._engine.begin() as connection:
+            locked = (
+                await connection.execute(
+                    select(
+                        iam_operator_profiles.c.is_active,
+                        iam_operator_profiles.c.photo_ref,
+                        iam_identities.c.status,
+                    )
+                    .select_from(
+                        iam_operator_profiles.join(
+                            iam_identities,
+                            iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                        )
+                    )
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .with_for_update()
+                )
+            ).first()
+            if locked is None or not bool(locked[0]) or str(locked[2]) != "Active":
+                raise OperatorProfileNotFoundError(identity_id)
+            previous = locked[1]
+            await connection.execute(
+                update(iam_operator_profiles)
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(photo_ref=photo_ref, updated_at=self._clock())
+            )
+        return str(previous) if previous is not None else None
 
     async def save_patient_profile(
         self,

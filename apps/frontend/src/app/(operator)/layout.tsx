@@ -4,11 +4,16 @@
 import type { ReactNode } from "react";
 
 import { AppShell } from "@/components/dashboard/AppShell";
+import { OperatorProfileProvider } from "@/lib/operator/OperatorProfileContext";
 
 export default function OperatorGroupLayout({
   children,
 }: {
   children: ReactNode;
 }) {
-  return <AppShell role="operator">{children}</AppShell>;
+  return (
+    <OperatorProfileProvider>
+      <AppShell role="operator">{children}</AppShell>
+    </OperatorProfileProvider>
+  );
 }

@@ -46,6 +46,7 @@ import { fetchPatientPhoto } from "@/lib/profile/api";
 const PHOTO_NOT_FOUND_CODES: ReadonlySet<string> = new Set([
   "PROFILE_PHOTO_NOT_FOUND",
   "DOCTOR_PROFILE_PHOTO_NOT_FOUND",
+  "OPERATOR_PROFILE_PHOTO_NOT_FOUND",
 ]);
 
 /**
