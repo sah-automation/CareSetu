@@ -38,18 +38,19 @@
 //
 // Every visible string on this page comes from the `operatorBusiness`
 // dictionary, in both locales.
+//
+// Chart components are dynamically imported to reduce initial bundle size and
+// stay within the NFR-003 page budget (1.5 MB).
 
-import { useState } from "react";
+import { useState, Suspense } from "react";
+import dynamic from "next/dynamic";
 
 import {
   HeavyActorList,
   ModelSpendTable,
   PeriodSelector,
   ProviderSpendTable,
-  SpendAgainstCapChart,
-  SpendByTaskTypeChart,
   TokenCostList,
-  TokenVolumeChart,
   UnitCostsList,
 } from "@/components/observability/BusinessCharts";
 import { DeeplinksPanel } from "@/components/observability/DeeplinksPanel";
@@ -77,6 +78,30 @@ import {
   formatPct,
 } from "@/lib/operator/observability-format";
 import { useKeyedRead, usePanelRead } from "@/lib/operator/usePanelRead";
+
+const SpendAgainstCapChart = dynamic(
+  () =>
+    import("@/components/observability/BusinessCharts").then(
+      (mod) => mod.SpendAgainstCapChart,
+    ),
+  { ssr: false, loading: () => null },
+);
+
+const SpendByTaskTypeChart = dynamic(
+  () =>
+    import("@/components/observability/BusinessCharts").then(
+      (mod) => mod.SpendByTaskTypeChart,
+    ),
+  { ssr: false, loading: () => null },
+);
+
+const TokenVolumeChart = dynamic(
+  () =>
+    import("@/components/observability/BusinessCharts").then(
+      (mod) => mod.TokenVolumeChart,
+    ),
+  { ssr: false, loading: () => null },
+);
 
 /**
  * The window the page opens on: the route's own default (`month_to_date`), so
@@ -295,7 +320,12 @@ export default function ObservabilityBusinessPage() {
               >
                 {windowLine(data, t)}
               </p>
-              <SpendAgainstCapChart read={data} testId="business-spend-chart" />
+              <Suspense fallback={null}>
+                <SpendAgainstCapChart
+                  read={data}
+                  testId="business-spend-chart"
+                />
+              </Suspense>
             </>
           )}
         </ReadPanel>
@@ -311,10 +341,12 @@ export default function ObservabilityBusinessPage() {
           takeaway={read ? breakdownTakeaway(read, t) : undefined}
         >
           {(data) => (
-            <SpendByTaskTypeChart
-              rows={data.by_task_type}
-              testId="business-breakdown-chart"
-            />
+            <Suspense fallback={null}>
+              <SpendByTaskTypeChart
+                rows={data.by_task_type}
+                testId="business-breakdown-chart"
+              />
+            </Suspense>
           )}
         </ReadPanel>
 
@@ -374,10 +406,12 @@ export default function ObservabilityBusinessPage() {
           {(data) => (
             <div className="flex flex-col gap-4">
               <TokenCostList read={data} testId="business-tokens-figures" />
-              <TokenVolumeChart
-                rows={data.by_provider}
-                testId="business-tokens-chart"
-              />
+              <Suspense fallback={null}>
+                <TokenVolumeChart
+                  rows={data.by_provider}
+                  testId="business-tokens-chart"
+                />
+              </Suspense>
             </div>
           )}
         </ReadPanel>

@@ -22,8 +22,12 @@
 // truncation or an invention; the product event ledger in Postgres is the one
 // source that can answer a thirty-day question, and the panel says so beside
 // the number rather than leaving an operator to assume it.
+//
+// Chart component is dynamically imported to reduce initial bundle size and
+// stay within the NFR-003 page budget (1.5 MB).
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, Suspense } from "react";
+import dynamic from "next/dynamic";
 
 import { DeeplinksPanel } from "@/components/observability/DeeplinksPanel";
 import {
@@ -31,7 +35,6 @@ import {
   ReadPanel,
 } from "@/components/observability/ObservabilityPanelPage";
 import {
-  ActiveUsersTrendChart,
   FunnelStepsTable,
   OutcomeFilter,
   RetentionCohortsTable,
@@ -53,6 +56,14 @@ import {
   formatRate,
 } from "@/lib/operator/observability-format";
 import { usePanelRead, type PanelRead } from "@/lib/operator/usePanelRead";
+
+const ActiveUsersTrendChart = dynamic(
+  () =>
+    import("@/components/observability/ProductCharts").then(
+      (mod) => mod.ActiveUsersTrendChart,
+    ),
+  { ssr: false, loading: () => null },
+);
 
 /** No active actor in any window and no recorded day: nothing to plot. */
 const NO_ACTIVE_USERS_BODY =
@@ -299,10 +310,12 @@ export default function ObservabilityProductPage() {
                 the rolling thirty days above. It is not truncated to the
                 fourteen-day retention of the vendor metrics tier.
               </p>
-              <ActiveUsersTrendChart
-                points={data.trend}
-                testId="product-active-users-chart"
-              />
+              <Suspense fallback={null}>
+                <ActiveUsersTrendChart
+                  points={data.trend}
+                  testId="product-active-users-chart"
+                />
+              </Suspense>
             </div>
           )}
         </ReadPanel>
