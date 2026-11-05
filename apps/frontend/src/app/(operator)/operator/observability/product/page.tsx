@@ -59,7 +59,7 @@ import { usePanelRead, type PanelRead } from "@/lib/operator/usePanelRead";
 
 const ActiveUsersTrendChart = dynamic(
   () =>
-    import("@/components/observability/ProductCharts").then(
+    import("@/components/observability/ProductChartsDynamic").then(
       (mod) => mod.ActiveUsersTrendChart,
     ),
   { ssr: false, loading: () => null },

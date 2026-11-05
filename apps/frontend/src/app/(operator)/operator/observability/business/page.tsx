@@ -81,7 +81,7 @@ import { useKeyedRead, usePanelRead } from "@/lib/operator/usePanelRead";
 
 const SpendAgainstCapChart = dynamic(
   () =>
-    import("@/components/observability/BusinessCharts").then(
+    import("@/components/observability/BusinessChartsDynamic").then(
       (mod) => mod.SpendAgainstCapChart,
     ),
   { ssr: false, loading: () => null },
@@ -89,7 +89,7 @@ const SpendAgainstCapChart = dynamic(
 
 const SpendByTaskTypeChart = dynamic(
   () =>
-    import("@/components/observability/BusinessCharts").then(
+    import("@/components/observability/BusinessChartsDynamic").then(
       (mod) => mod.SpendByTaskTypeChart,
     ),
   { ssr: false, loading: () => null },
@@ -97,7 +97,7 @@ const SpendByTaskTypeChart = dynamic(
 
 const TokenVolumeChart = dynamic(
   () =>
-    import("@/components/observability/BusinessCharts").then(
+    import("@/components/observability/BusinessChartsDynamic").then(
       (mod) => mod.TokenVolumeChart,
     ),
   { ssr: false, loading: () => null },
