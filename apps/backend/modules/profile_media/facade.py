@@ -14,6 +14,7 @@ it does for intake media.
 
 from modules.profile_media.adapters.media_store import (
     DOCTOR_PREFIX,
+    OPERATOR_PREFIX,
     PATIENT_PREFIX,
     ProfileMediaRetryPolicy,
     ProfileMediaStore,
@@ -23,6 +24,7 @@ from modules.profile_media.adapters.media_store import (
 
 __all__ = [
     "DOCTOR_PREFIX",
+    "OPERATOR_PREFIX",
     "PATIENT_PREFIX",
     "ProfileMediaRetryPolicy",
     "ProfileMediaStore",

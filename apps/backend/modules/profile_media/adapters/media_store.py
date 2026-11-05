@@ -63,8 +63,13 @@ PATIENT_PREFIX: Final[str] = "patient"
 #: Object-storage prefix under which every doctor profile photo is filed.
 DOCTOR_PREFIX: Final[str] = "doctor"
 
+#: Object-storage prefix under which every operator profile photo is filed.
+OPERATOR_PREFIX: Final[str] = "operator"
+
 #: The only object-storage prefixes this store admits for write/read/delete.
-_SUPPORTED_PREFIXES: Final[frozenset[str]] = frozenset({PATIENT_PREFIX, DOCTOR_PREFIX})
+_SUPPORTED_PREFIXES: Final[frozenset[str]] = frozenset(
+    {PATIENT_PREFIX, DOCTOR_PREFIX, OPERATOR_PREFIX}
+)
 
 #: Private Supabase Storage bucket holding the ciphertext (ADR-0020 D1). The
 #: bucket is created private at provisioning with no public-read policies, so a

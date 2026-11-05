@@ -183,3 +183,42 @@ class OperatorLastAdminError(IamError):
     Raised when demoting or deactivating the last active admin operator. The
     message is human-safe for the 409 envelope.
     """
+
+
+class OperatorProfileNotFoundError(IamError):
+    """The caller has no operator profile row, or it is inactive (self-service).
+
+    Raised by the operator self-service profile and photo routes for a missing
+    or deactivated operator authority profile. The route maps it to 404
+    ``OPERATOR_PROFILE_NOT_FOUND`` so a revoked account fails closed.
+    """
+
+    def __init__(self, identity_id: int | None = None) -> None:
+        if identity_id is None:
+            super().__init__("operator profile not found or inactive")
+        else:
+            super().__init__(f"operator profile {identity_id} not found or inactive")
+        self.identity_id = identity_id
+
+
+class OperatorProfilePhotoNotFoundError(IamError):
+    """The operator profile has no readable photo (or the object is gone)."""
+
+    def __init__(self, identity_id: int | None = None) -> None:
+        if identity_id is None:
+            super().__init__("operator has no profile photo")
+        else:
+            super().__init__(f"operator {identity_id} has no profile photo")
+        self.identity_id = identity_id
+
+
+class OperatorProfilePhotoValidationError(IamError):
+    """An operator profile photo upload failed the content-type or size contract."""
+
+
+class OperatorProfilePhotoTransferError(IamError):
+    """The operator profile media store write stayed failed after the retry ladder."""
+
+
+class OperatorProfilePhotoStoreUnavailableError(IamError):
+    """The operator profile media store is unavailable or returned bad data."""

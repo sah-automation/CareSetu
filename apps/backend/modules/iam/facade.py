@@ -56,6 +56,12 @@ from modules.iam.identity_facade import (
     OperatorInvitedResult as OperatorInvitedResult,
 )
 from modules.iam.identity_facade import (
+    OperatorProfilePhotoView as OperatorProfilePhotoView,
+)
+from modules.iam.identity_facade import (
+    OperatorProfileView as OperatorProfileView,
+)
+from modules.iam.identity_facade import (
     OperatorSummary as OperatorSummary,
 )
 from modules.iam.identity_facade import (
@@ -270,6 +276,36 @@ class IamFacade:
         return await self._identity.update_operator_active(
             identity_id, is_active, actor_identity_id, connection=connection
         )
+
+    async def get_operator_profile(self, identity_id: int) -> OperatorProfileView:
+        """Read the caller's own operator profile (#869)."""
+        return await self._identity.get_operator_profile(identity_id)
+
+    async def update_operator_profile_name(
+        self, identity_id: int, name: str | None
+    ) -> OperatorProfileView:
+        """Set or clear the caller's operator display name (#869)."""
+        return await self._identity.update_operator_profile_name(identity_id, name)
+
+    async def save_operator_photo(
+        self,
+        *,
+        identity_id: int,
+        data: bytes,
+        media_type: str | None,
+    ) -> OperatorProfilePhotoView:
+        """Upload or replace the caller's operator profile photo (#869)."""
+        return await self._identity.save_operator_photo(
+            identity_id=identity_id, data=data, media_type=media_type
+        )
+
+    async def get_operator_photo(self, *, identity_id: int) -> PhotoContent:
+        """Stream the caller's operator profile photo (#869)."""
+        return await self._identity.get_operator_photo(identity_id)
+
+    async def delete_operator_photo(self, *, identity_id: int) -> None:
+        """Remove the caller's operator profile photo (#869)."""
+        await self._identity.delete_operator_photo(identity_id=identity_id)
 
     async def save_patient_profile(
         self,

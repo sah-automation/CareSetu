@@ -86,6 +86,8 @@ iam_operator_profiles = Table(
     Column("tier", String(20), nullable=False, server_default=text("'operator'")),
     Column("is_active", Boolean, nullable=False, server_default=text("true")),
     Column("mfa_failed_attempts", Integer, nullable=False, server_default=text("0")),
+    Column("name", String(200), nullable=True),
+    Column("photo_ref", String(255), nullable=True),
     Column("mfa_locked_until", DateTime(timezone=True), nullable=True),
     Column(
         "created_by",
