@@ -24,7 +24,10 @@ import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 type Draft = string | boolean;
 
-function sourceLabel(source: SettingSource, t: OperatorSettingsStrings["ai"]) {
+function sourceLabel(
+  source: SettingSource,
+  t: OperatorSettingsStrings["ai"],
+): string {
   switch (source) {
     case "database":
       return t.sources.database;
@@ -47,7 +50,7 @@ function formatValue(value: unknown, t: OperatorSettingsStrings["ai"]): string {
   return String(value);
 }
 
-function formatTimestamp(iso: string) {
+function formatTimestamp(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
       year: "numeric",
@@ -61,11 +64,11 @@ function formatTimestamp(iso: string) {
   }
 }
 
-function isArraySetting(setting: EffectiveSetting) {
+function isArraySetting(setting: EffectiveSetting): boolean {
   return Array.isArray(setting.value);
 }
 
-function isBooleanSetting(setting: EffectiveSetting) {
+function isBooleanSetting(setting: EffectiveSetting): boolean {
   return (
     typeof setting.value === "boolean" ||
     setting.key.endsWith("_enabled") ||
@@ -73,7 +76,10 @@ function isBooleanSetting(setting: EffectiveSetting) {
   );
 }
 
-function draftFor(setting: EffectiveSetting, drafts: Record<string, Draft>) {
+function draftFor(
+  setting: EffectiveSetting,
+  drafts: Record<string, Draft>,
+): Draft {
   const draft = drafts[setting.key];
   if (draft !== undefined) return draft;
   if (isBooleanSetting(setting)) return Boolean(setting.value);
