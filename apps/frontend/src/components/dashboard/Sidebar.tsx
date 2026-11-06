@@ -213,6 +213,21 @@ export function Sidebar({
   );
 }
 
+function readSectionState(storageKey: string): Record<string, unknown> {
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { ...(parsed as Record<string, unknown>) };
+    }
+    return {};
+  } catch {
+    // Fall back to empty state (defaults all expanded) on malformed storage.
+    return {};
+  }
+}
+
 function SidebarSectionGroup({
   section,
   collapsed,
@@ -233,17 +248,9 @@ function SidebarSectionGroup({
 
   useEffect(() => {
     if (!sectionKey) return;
-    try {
-      const raw = window.localStorage.getItem(storageKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const value = (parsed as Record<string, unknown>)[sectionKey];
-        if (typeof value === "boolean") setExpanded(value);
-      }
-    } catch {
-      // Fall back to the default (all expanded) on malformed storage.
-    }
+    const state = readSectionState(storageKey);
+    const value = state[sectionKey];
+    if (typeof value === "boolean") setExpanded(value);
   }, [storageKey, sectionKey]);
 
   function toggle() {
@@ -251,18 +258,7 @@ function SidebarSectionGroup({
       const next = !value;
       if (sectionKey) {
         try {
-          let state: Record<string, unknown> = {};
-          const raw = window.localStorage.getItem(storageKey);
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (
-              parsed &&
-              typeof parsed === "object" &&
-              !Array.isArray(parsed)
-            ) {
-              state = { ...parsed };
-            }
-          }
+          const state = readSectionState(storageKey);
           state[sectionKey] = next;
           window.localStorage.setItem(storageKey, JSON.stringify(state));
         } catch {
