@@ -2735,6 +2735,16 @@ const en = {
       inviteErrorExpected: "The API refused this invite.",
       editError: "Could not save this change. Check your connection and retry.",
       editErrorExpected: "The API refused this change.",
+      historyTitle: "Operator history",
+      historyDescription:
+        "Tier, active and invite changes recorded in the audit ledger.",
+      historyEmpty: "No operator changes recorded yet.",
+      historyError: "Could not load operator history.",
+      historyErrorExpected: "The API refused this change.",
+      historyRetry: "Retry",
+      historyChangedBy: "Changed by",
+      historyChangedAt: "Changed at",
+      historyUnknownActor: "Unknown",
     },
   },
   operatorProfile: {
@@ -5184,6 +5194,15 @@ export const STRINGS: Record<Lang, Dictionary> = {
         editError:
           "यह बदलाव सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
         editErrorExpected: "API ने यह बदलाव अस्वीकार कर दिया।",
+        historyTitle: "ऑपरेटर इतिहास",
+        historyDescription: "टियर, सक्रिय और आमंत्रण बदलाव ऑडिट लेजर में दर्ज।",
+        historyEmpty: "अभी तक कोई ऑपरेटर बदलाव दर्ज नहीं।",
+        historyError: "ऑपरेटर इतिहास लोड नहीं हो सका।",
+        historyErrorExpected: "API ने यह बदलाव अस्वीकार कर दिया।",
+        historyRetry: "पुनः प्रयास",
+        historyChangedBy: "बदला",
+        historyChangedAt: "बदला गया",
+        historyUnknownActor: "अज्ञात",
       },
     },
     operatorProfile: {

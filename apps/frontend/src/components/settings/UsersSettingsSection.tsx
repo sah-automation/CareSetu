@@ -22,6 +22,9 @@ import {
   type OperatorSummary,
 } from "@/lib/operator/api";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
+import type { AuditEventView } from "@/lib/audit/api";
+import * as auditApi from "@/lib/audit/api";
+import * as operatorApi from "@/lib/operator/api";
 
 import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 
@@ -44,9 +47,144 @@ function mfaLabel(enabled: boolean, t: UsersStrings): string {
   return enabled ? t.mfaEnabled : t.mfaDisabled;
 }
 
+function formatTimestamp(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function UsersHistory({
+  entries,
+  t,
+  status,
+  errorMessage,
+  onRetry,
+}: {
+  entries: AuditEventView[];
+  t: UsersStrings;
+  status: "loading" | "ready" | "error";
+  errorMessage: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      className="mt-5 border-t border-hairline pt-4"
+      data-testid="settings-users-history"
+    >
+      <h3
+        className="text-sm font-medium text-txt-sub"
+        data-testid="settings-users-history-title"
+      >
+        {t.historyTitle}
+      </h3>
+      <p className="mt-0.5 text-xs text-txt-muted">{t.historyDescription}</p>
+
+      {status === "loading" && (
+        <div className="mt-2" data-testid="settings-users-history-loading">
+          <Skeleton className="h-16 w-full" />
+        </div>
+      )}
+
+      {status === "error" && (
+        <div
+          role="alert"
+          className="mt-2 rounded-md border border-danger-border bg-danger-soft px-3 py-2"
+          data-testid="settings-users-history-error"
+        >
+          <p className="text-sm text-danger">{errorMessage}</p>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="mt-2 inline-flex min-h-9 items-center rounded-md border border-danger-border px-3 text-xs font-medium text-danger hover:bg-danger-soft/60"
+            data-testid="settings-users-history-retry"
+          >
+            {t.historyRetry}
+          </button>
+        </div>
+      )}
+
+      {status === "ready" && entries.length === 0 && (
+        <p
+          className="mt-2 text-sm text-txt-muted"
+          data-testid="settings-users-history-empty"
+        >
+          {t.historyEmpty}
+        </p>
+      )}
+
+      {status === "ready" && entries.length > 0 && (
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-hairline text-xs text-txt-muted">
+                <th scope="col" className="py-2 pr-3 font-medium">
+                  Event
+                </th>
+                <th scope="col" className="py-2 pr-3 font-medium">
+                  {t.historyChangedBy}
+                </th>
+                <th scope="col" className="py-2 font-medium">
+                  {t.historyChangedAt}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((entry) => (
+                <tr
+                  key={entry.id}
+                  className="border-b border-hairline last:border-0"
+                  data-testid={`settings-users-history-row-${entry.id}`}
+                >
+                  <th
+                    scope="row"
+                    className="py-2 pr-3 font-mono text-xs font-normal text-txt"
+                  >
+                    {entry.event_type}
+                  </th>
+                  <td className="py-2 pr-3 text-txt">
+                    {entry.actor_id ?? t.historyUnknownActor}
+                  </td>
+                  <td className="py-2 text-txt">
+                    {formatTimestamp(entry.timestamp)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
   const u = t.users;
   const operatorsRead = usePanelRead(() => fetchOperators());
+  const historyRead = usePanelRead<AuditEventView[]>(() => {
+    const auditResult = auditApi.fetchOperatorChangeHistory?.();
+    if (
+      auditResult &&
+      typeof (auditResult as Promise<unknown>).then === "function"
+    ) {
+      return auditResult as Promise<AuditEventView[]>;
+    }
+    const operatorResult = operatorApi.fetchOperatorChangeHistory?.();
+    if (
+      operatorResult &&
+      typeof (operatorResult as Promise<unknown>).then === "function"
+    ) {
+      return operatorResult as Promise<AuditEventView[]>;
+    }
+    return Promise.resolve([] as AuditEventView[]);
+  });
   const [draftTier, setDraftTier] = useState<
     Record<number, "admin" | "operator">
   >({});
@@ -110,6 +248,7 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
         return next;
       });
       operatorsRead.reload();
+      historyRead.reload();
     } catch (error) {
       setSaveStates((current) => ({
         ...current,
@@ -152,6 +291,7 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
         return next;
       });
       operatorsRead.reload();
+      historyRead.reload();
     } catch (error) {
       setSaveStates((current) => ({
         ...current,
@@ -176,6 +316,7 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
       setInvitePhone("");
       setInviteTier("operator");
       operatorsRead.reload();
+      historyRead.reload();
       setTimeout(() => {
         setShowInviteModal(false);
         setInviteState("idle");
@@ -408,6 +549,18 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
             </table>
           </div>
         )}
+
+      <UsersHistory
+        entries={(historyRead.data ?? []) as AuditEventView[]}
+        t={u}
+        status={historyRead.status}
+        errorMessage={
+          historyRead.error?.expected
+            ? t.users.historyErrorExpected
+            : t.users.historyError
+        }
+        onRetry={historyRead.reload}
+      />
 
       {showInviteModal && (
         <div
