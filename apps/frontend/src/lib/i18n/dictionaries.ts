@@ -2533,10 +2533,13 @@ const en = {
     permissionDeniedBody: "You do not have permission to access Settings.",
     retry: "Retry",
     sections: {
-      ai: "AI",
+      ai: "AI & LLM",
       notifications: "Notifications",
-      featureFlags: "Feature flags",
+      featureFlags: "Feature Flags",
       users: "Users",
+      cache: "Cache & Redis",
+      scaling: "Scaling & Performance",
+      observabilityTuning: "Observability Tuning",
     },
     ai: {
       description:
@@ -2746,6 +2749,7 @@ const en = {
     mfaLabel: "MFA",
     mfaEnabled: "Enabled",
     mfaDisabled: "Disabled",
+    mfaManage: "Manage MFA",
     phoneLabel: "Phone",
     createdLabel: "Created",
     photoHeading: "Profile photo",
@@ -4975,10 +4979,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       permissionDeniedBody: "आपके पास सेटिंग्स देखने की अनुमति नहीं है।",
       retry: "फिर कोशिश करें",
       sections: {
-        ai: "AI",
-        notifications: "सूचनाएँ",
-        featureFlags: "फ़ीचर फ़्लैग",
+        ai: "एआई और एलएलएम",
+        notifications: "सूचनाएं",
+        featureFlags: "फीचर फ्लैग्स",
         users: "उपयोगकर्ता",
+        cache: "कैश और रेडिस",
+        scaling: "स्केलिंग और परफॉरमेंस",
+        observabilityTuning: "ऑब्जर्वेबिलिटी ट्यूनिंग",
       },
       ai: {
         description:
@@ -5191,6 +5198,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
       mfaLabel: "MFA",
       mfaEnabled: "सक्षम",
       mfaDisabled: "अक्षम",
+      mfaManage: "MFA प्रबंधित करें",
       phoneLabel: "फ़ोन",
       createdLabel: "बनाया गया",
       photoHeading: "प्रोफ़ाइल फ़ोटो",
