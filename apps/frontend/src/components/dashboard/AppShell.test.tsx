@@ -918,13 +918,11 @@ describe("AppShell operator grouped sidebar (#745)", () => {
 
   it("renders every sub-destination as a live link inside the sub-menu", () => {
     renderShell("operator", "/operator/observability/business");
-
-    const settingsEntry = NAV_CONFIG.operator.find(
-      (item) => item.key === "settings",
-    );
-    void settingsEntry;
-    // settings lives under the Account group now, not the Metrics group.
-    expect(true).toBe(true);
+    fireEvent.click(screen.getByTestId("more-trigger"));
+    const sheet = screen.getByTestId("more-sheet");
+    const settings = within(sheet).getByTestId("more-settings");
+    expect(settings.tagName).toBe("A");
+    expect(settings).toHaveAttribute("href", "/operator/settings");
   });
 
   it("keeps the collapsed rail a route into the group", () => {

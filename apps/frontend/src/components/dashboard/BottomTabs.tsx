@@ -157,7 +157,7 @@ export function BottomTabs({
                 />
               ))
             )}
-            {isPatient && (
+            {(isPatient || role === "operator") && (
               <LogoutRow
                 label={strings.logOut}
                 onLogout={() => {
@@ -348,5 +348,3 @@ function TabColumn({
     </Link>
   );
 }
-
-// kept empty placeholder

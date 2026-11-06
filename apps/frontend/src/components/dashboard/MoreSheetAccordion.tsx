@@ -3,7 +3,6 @@
 import { Fragment, useEffect, useId, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ChevronRight } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { STRINGS } from "@/lib/i18n/dictionaries";
@@ -19,14 +18,6 @@ import {
 } from "./nav-config";
 import { CountPill, SoonBadge } from "./NavItemLink";
 import type { Role } from "./types";
-
-function useAuthOrNull() {
-  try {
-    return useAuth() as { user?: { roles?: string[]; tier?: string } } | null;
-  } catch {
-    return null;
-  }
-}
 
 const ACCORDION_SECTION_KEYS = new Set([
   "metrics",
@@ -150,7 +141,7 @@ export function MoreSheetAccordion({
   onNavigate,
 }: MoreSheetAccordionProps) {
   const { lang } = useLang();
-  const auth = useAuthOrNull();
+  const auth = useAuth() as { user?: { roles?: string[]; tier?: string } };
   const isAdmin =
     auth?.user?.roles?.includes("operator") === true &&
     auth?.user?.tier === "admin";
@@ -270,7 +261,7 @@ function AccordionPanel({
         type="button"
         id={headerId}
         onClick={(event) => {
-          if (event.detail !== 0) onToggle();
+          if (!event.defaultPrevented) onToggle();
         }}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
