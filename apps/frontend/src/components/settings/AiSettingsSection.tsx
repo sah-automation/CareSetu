@@ -24,7 +24,8 @@ import {
 } from "@/lib/operator/settings";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
-import { SettingsSection } from "./SettingsSection";
+import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
+import { isSecretKey } from "@/lib/operator/config-filter";
 
 type AiStrings = OperatorSettingsStrings["ai"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -165,7 +166,7 @@ function AiSettingsTable({
                   className="py-2 pr-3 text-txt"
                   data-testid={`settings-ai-value-${setting.key}`}
                 >
-                  {setting.editable ? (
+                  {setting.editable && !setting.restart_required ? (
                     isBooleanSetting(setting) ? (
                       <input
                         type="checkbox"
@@ -219,7 +220,7 @@ function AiSettingsTable({
                   )}
                 </td>
                 <td className="py-2">
-                  {setting.editable ? (
+                  {setting.editable && !setting.restart_required ? (
                     <div className="flex flex-col gap-1">
                       <button
                         type="button"
@@ -388,7 +389,9 @@ export function AiSettingsSection({ t }: { t: OperatorSettingsStrings }) {
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
 
   const ai =
-    read.data?.filter((setting) => setting.key.startsWith("ai.")) ?? [];
+    read.data?.filter(
+      (setting) => setting.key.startsWith("ai.") && !isSecretKey(setting.key),
+    ) ?? [];
   const aiHistory =
     history.data?.filter((entry) => entry.setting_key.startsWith("ai.")) ?? [];
 
@@ -446,7 +449,8 @@ export function AiSettingsSection({ t }: { t: OperatorSettingsStrings }) {
   }
 
   return (
-    <SettingsSection
+    <CollapsibleSettingsSection
+      sectionKey="ai"
       testId="settings-ai"
       title={t.sections.ai}
       description={t.ai.description}
@@ -526,6 +530,6 @@ export function AiSettingsSection({ t }: { t: OperatorSettingsStrings }) {
           />
         </>
       )}
-    </SettingsSection>
+    </CollapsibleSettingsSection>
   );
 }

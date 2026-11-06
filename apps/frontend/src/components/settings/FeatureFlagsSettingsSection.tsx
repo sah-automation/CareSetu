@@ -22,7 +22,7 @@ import { usePanelRead } from "@/lib/operator/usePanelRead";
 
 import { FeatureFlagsHistory } from "./FeatureFlagsHistory";
 import { FeatureFlagsTable } from "./FeatureFlagsTable";
-import { SettingsSection } from "./SettingsSection";
+import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 
 type FeatureFlagsStrings = OperatorSettingsStrings["featureFlags"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -84,7 +84,8 @@ export function FeatureFlagsSettingsSection({
   }
 
   return (
-    <SettingsSection
+    <CollapsibleSettingsSection
+      sectionKey="featureFlags"
       testId="settings-feature-flags"
       title={t.sections.featureFlags}
       description={t.featureFlags.description}
@@ -168,6 +169,6 @@ export function FeatureFlagsSettingsSection({
             />
           </>
         )}
-    </SettingsSection>
+    </CollapsibleSettingsSection>
   );
 }

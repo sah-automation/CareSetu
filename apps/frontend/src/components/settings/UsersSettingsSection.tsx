@@ -23,7 +23,7 @@ import {
 } from "@/lib/operator/api";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
-import { SettingsSection } from "./SettingsSection";
+import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 
 type UsersStrings = OperatorSettingsStrings["users"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -191,7 +191,8 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
   }
 
   return (
-    <SettingsSection
+    <CollapsibleSettingsSection
+      sectionKey="users"
       testId="settings-users"
       title={t.sections.users}
       description={t.users.description}
@@ -493,6 +494,6 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
           </div>
         </div>
       )}
-    </SettingsSection>
+    </CollapsibleSettingsSection>
   );
 }

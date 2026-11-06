@@ -22,7 +22,7 @@ import {
 } from "@/lib/operator/settings";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
-import { SettingsSection } from "./SettingsSection";
+import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 
 type NotificationsStrings = OperatorSettingsStrings["notifications"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -669,7 +669,8 @@ export function NotificationsSettingsSection({
     (Array.isArray(recipientsValue) ? recipientsValue.join(", ") : "");
 
   return (
-    <SettingsSection
+    <CollapsibleSettingsSection
+      sectionKey="notifications"
       testId="settings-notifications"
       title={t.sections.notifications}
       description={t.notifications.description}
@@ -774,6 +775,6 @@ export function NotificationsSettingsSection({
           </div>
         </div>
       )}
-    </SettingsSection>
+    </CollapsibleSettingsSection>
   );
 }
