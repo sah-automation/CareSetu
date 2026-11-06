@@ -11,7 +11,6 @@
 
 import type { ComponentType } from "react";
 import {
-  Activity,
   BadgeCheck,
   BarChart3,
   Boxes,
@@ -24,7 +23,6 @@ import {
   History,
   Home,
   Inbox,
-  LayoutDashboard,
   Mic,
   Package,
   Scale,
@@ -269,35 +267,13 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       soon: true,
       group: "work",
     },
-    // #744 (spec #717 decisions 27-29): the console is now its own section and
-    // a disclosure parent - its nine sub-destinations are declared here once
-    // and read by both the sidebar disclosure (#745) and the mobile More sheet
-    // (#746). Overview is the group landing (same route as the parent), the
-    // three lenses and the four AI panels have live pages, and Settings is the
-    // #747 placeholder shell: a real page carrying no configuration until the
-    // Batch 2 settings surface ships, so it is live rather than Soon.
-    //
-    // Decision 28 says the parent has "no destination of its own"; decision 29
-    // and ticket criterion 2 make parent highlighting key off "its own
-    // destination". Resolved by giving the parent the console landing route as
-    // its href and making Overview a child that points at that same route: the
-    // parent's href is a real page (so the collapsed rail and the disclosure
-    // header have somewhere to go, and the prefix match has an anchor), while
-    // Overview remains the destination an operator reads as current. The
-    // duplication is deliberate and pinned by the contract tests.
     {
-      key: "observability",
-      labelKey: "observability",
-      href: "/operator/observability",
-      icon: Activity,
-      group: "observability",
+      key: "metrics",
+      labelKey: "metrics",
+      href: "/operator/observability/business",
+      icon: BarChart3,
+      group: "metrics",
       children: [
-        {
-          key: "overview",
-          labelKey: "overview",
-          href: "/operator/observability",
-          icon: LayoutDashboard,
-        },
         {
           key: "business",
           labelKey: "business",
@@ -311,28 +287,25 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
           icon: Boxes,
         },
         {
-          key: "reliability",
-          labelKey: "reliability",
-          href: "/operator/observability/reliability",
-          icon: ShieldCheck,
-        },
-        {
-          key: "cost",
-          labelKey: "cost",
-          href: "/operator/observability/cost",
-          icon: Coins,
-        },
-        {
           key: "usage",
           labelKey: "usage",
           href: "/operator/observability/usage",
           icon: BarChart3,
         },
+      ],
+    },
+    {
+      key: "reliability",
+      labelKey: "reliability",
+      href: "/operator/observability/reliability",
+      icon: ShieldCheck,
+      group: "reliability",
+      children: [
         {
-          key: "quality",
-          labelKey: "quality",
-          href: "/operator/observability/quality",
-          icon: BadgeCheck,
+          key: "reliability",
+          labelKey: "reliability",
+          href: "/operator/observability/reliability",
+          icon: ShieldCheck,
         },
         {
           key: "health",
@@ -341,17 +314,31 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
           icon: HeartPulse,
         },
         {
+          key: "cost",
+          labelKey: "cost",
+          href: "/operator/observability/cost",
+          icon: Coins,
+        },
+      ],
+    },
+    {
+      key: "qualitySecurity",
+      labelKey: "qualitySecurity",
+      href: "/operator/observability/quality",
+      icon: BadgeCheck,
+      group: "qualitySecurity",
+      children: [
+        {
+          key: "quality",
+          labelKey: "quality",
+          href: "/operator/observability/quality",
+          icon: BadgeCheck,
+        },
+        {
           key: "security",
           labelKey: "security",
           href: "/operator/observability/security",
           icon: ShieldCheck,
-        },
-        {
-          key: "settings",
-          labelKey: "settings",
-          href: "/operator/observability/settings",
-          icon: Settings,
-          adminOnly: true,
         },
         {
           key: "evals",
@@ -362,11 +349,20 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       ],
     },
     {
+      key: "settings",
+      labelKey: "settings",
+      href: "/operator/settings",
+      icon: Settings,
+      group: "account",
+      adminOnly: true,
+    },
+    {
       key: "profile",
       labelKey: "profile",
       href: "/operator/profile",
       icon: User,
       group: "account",
+      mobileOverflow: true,
     },
   ],
 };

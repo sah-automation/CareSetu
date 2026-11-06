@@ -1065,6 +1065,10 @@ const en = {
     // #738: the Reliability lens destination, on the same terms as `business`
     // above - both locales ship together or the parity test fails.
     reliability: "Reliability",
+    // #874 / #876: metrics + quality & security section labels. Both locales
+    // ship together (bilingual parity gate).
+    metrics: "Metrics",
+    qualitySecurity: "Quality & Security",
     // #743: the Product lens destination. Same both-locales gate as the two
     // labels above (#717 decision 34).
     product: "Product",
@@ -1090,6 +1094,10 @@ const en = {
       // #744: the operator console's Observability section (spec #717
       // decision 28) - the disclosure parent's group membership.
       observability: "Observability",
+      // #874 / #876: new sidebar section groups for the split observability IA.
+      metrics: "Metrics",
+      reliability: "Reliability",
+      qualitySecurity: "Quality & Security",
     },
     // #574: the sidebar's collapse control. Two flat keys, not one conditional
     // function - this namespace carries plain strings only, like `logOut`,
@@ -2738,7 +2746,6 @@ const en = {
     mfaLabel: "MFA",
     mfaEnabled: "Enabled",
     mfaDisabled: "Disabled",
-    mfaManage: "Manage MFA",
     phoneLabel: "Phone",
     createdLabel: "Created",
     photoHeading: "Profile photo",
@@ -3371,6 +3378,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
       business: "व्यवसाय",
       // #738: the Reliability lens destination, on the same terms as `business`.
       reliability: "विश्वसनीयता",
+      // #874 / #876: metrics + quality & security section labels in Hindi.
+      metrics: "मीट्रिक्स",
+      qualitySecurity: "गुणवत्ता और सुरक्षा",
       // #743: the Product lens destination, on the same both-locales terms.
       product: "उत्पाद",
       // #744: the Observability group's sub-destination labels, shipping with
@@ -3389,6 +3399,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
         account: "खाता",
         // #744: the operator console's Observability section label.
         observability: "प्रेक्षण",
+        // #874 / #876: new sidebar section groups in Hindi.
+        metrics: "मीट्रिक्स",
+        reliability: "विश्वसनीयता",
+        qualitySecurity: "गुणवत्ता और सुरक्षा",
       },
       // #574: the sidebar's collapse control, action-named like the English
       // pair above. Blueprint §9.2 line 578: neither locale ships alone.
@@ -5177,7 +5191,6 @@ export const STRINGS: Record<Lang, Dictionary> = {
       mfaLabel: "MFA",
       mfaEnabled: "सक्षम",
       mfaDisabled: "अक्षम",
-      mfaManage: "MFA प्रबंधित करें",
       phoneLabel: "फ़ोन",
       createdLabel: "बनाया गया",
       photoHeading: "प्रोफ़ाइल फ़ोटो",
