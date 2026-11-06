@@ -4,8 +4,8 @@ import { EmptyState } from "@/components/layout/EmptyState";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { AiSettingsSection } from "@/components/settings/AiSettingsSection";
 import { CacheRedisSettingsSection } from "@/components/settings/CacheRedisSettingsSection";
-import { CollapsibleSettingsSection } from "@/components/settings/CollapsibleSettingsSection";
 import { ScalingSettingsSection } from "@/components/settings/ScalingSettingsSection";
+import { ObservabilityTuningSettingsSection } from "@/components/settings/ObservabilityTuningSettingsSection";
 import { FeatureFlagsSettingsSection } from "@/components/settings/FeatureFlagsSettingsSection";
 import { NotificationsSettingsSection } from "@/components/settings/NotificationsSettingsSection";
 import { UsersSettingsSection } from "@/components/settings/UsersSettingsSection";
@@ -57,13 +57,7 @@ export default function SettingsPage() {
 
         <ScalingSettingsSection t={t} />
 
-        <CollapsibleSettingsSection
-          sectionKey="observability"
-          testId="settings-observability"
-          title={t.sections.observabilityTuning}
-        >
-          <div data-testid="settings-observability-body" />
-        </CollapsibleSettingsSection>
+        <ObservabilityTuningSettingsSection t={t} />
       </div>
     </>
   );
