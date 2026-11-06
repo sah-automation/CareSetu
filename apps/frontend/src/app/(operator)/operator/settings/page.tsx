@@ -3,6 +3,7 @@
 import { EmptyState } from "@/components/layout/EmptyState";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { AiSettingsSection } from "@/components/settings/AiSettingsSection";
+import { CacheRedisSettingsSection } from "@/components/settings/CacheRedisSettingsSection";
 import { CollapsibleSettingsSection } from "@/components/settings/CollapsibleSettingsSection";
 import { FeatureFlagsSettingsSection } from "@/components/settings/FeatureFlagsSettingsSection";
 import { NotificationsSettingsSection } from "@/components/settings/NotificationsSettingsSection";
@@ -51,14 +52,7 @@ export default function SettingsPage() {
 
         <UsersSettingsSection t={t} />
 
-        <CollapsibleSettingsSection
-          sectionKey="cache"
-          testId="settings-cache"
-          title={t.sections.cache}
-        >
-          <div data-testid="settings-cache-body" />
-        </CollapsibleSettingsSection>
-
+        <CacheRedisSettingsSection t={t} />
         <CollapsibleSettingsSection
           sectionKey="scaling"
           testId="settings-scaling"
