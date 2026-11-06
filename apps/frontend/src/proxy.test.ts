@@ -105,6 +105,33 @@ describe("proxy - cookie presence is the only signal", () => {
   });
 });
 
+describe("proxy - legacy settings route migration (#886)", () => {
+  it("redirects /operator/observability/settings to /operator/settings with 301", () => {
+    const response = proxy(makeRequest("/operator/observability/settings"));
+    expect(response.status).toBe(301);
+    expect(redirectLocation(response)).toBe("/operator/settings");
+  });
+
+  it("preserves query parameters on the redirect target", () => {
+    const response = proxy(
+      makeRequest("/operator/observability/settings?tab=ai"),
+    );
+    expect(response.status).toBe(301);
+    expect(redirectLocation(response)).toBe("/operator/settings?tab=ai");
+  });
+
+  it("redirects before the cookie-presence guard", () => {
+    const response = proxy(
+      makeRequest(
+        "/operator/observability/settings",
+        `${COOKIE_NAME}=some.jwt.value`,
+      ),
+    );
+    expect(response.status).toBe(301);
+    expect(redirectLocation(response)).toBe("/operator/settings");
+  });
+});
+
 describe("proxy - matcher table", () => {
   it("guards exactly the four app prefixes", () => {
     expect(config.matcher).toEqual([
