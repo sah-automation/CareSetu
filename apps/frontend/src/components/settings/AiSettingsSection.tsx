@@ -393,7 +393,10 @@ export function AiSettingsSection({ t }: { t: OperatorSettingsStrings }) {
       (setting) => setting.key.startsWith("ai.") && !isSecretKey(setting.key),
     ) ?? [];
   const aiHistory =
-    history.data?.filter((entry) => entry.setting_key.startsWith("ai.")) ?? [];
+    history.data?.filter(
+      (entry) =>
+        entry.setting_key.startsWith("ai.") && !isSecretKey(entry.setting_key),
+    ) ?? [];
 
   function handleDraft(key: string, draft: Draft) {
     setDrafts((current) => ({ ...current, [key]: draft }));
