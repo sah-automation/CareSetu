@@ -62,6 +62,7 @@ import {
   NAV_CONFIG,
   isNavItemActive,
   sidebarSections,
+  sidebarStorageKey,
 } from "./nav-config";
 import {
   ActiveIndicator,
@@ -178,7 +179,11 @@ export function Sidebar({
                 data-testid="sidebar-section-divider"
               />
             )}
-            <SidebarSectionGroup section={section} collapsed={collapsed} />
+            <SidebarSectionGroup
+              section={section}
+              collapsed={collapsed}
+              role={role}
+            />
           </Fragment>
         ))}
       </nav>
@@ -211,39 +216,136 @@ export function Sidebar({
 function SidebarSectionGroup({
   section,
   collapsed,
+  role,
 }: {
   section: SidebarSection;
   collapsed: boolean;
+  role: Role;
 }) {
   const { lang } = useLang();
   const label = section.labelKey
     ? STRINGS[lang].nav.sections[section.labelKey]
     : null;
+  const sectionKey = section.labelKey;
+  const [expanded, setExpanded] = useState(true);
+  const contentId = useId();
+  const storageKey = `${sidebarStorageKey(role)}.sections`;
 
-  return (
-    <div className="space-y-1">
-      {!collapsed && label && (
-        <p className="px-3 pt-2 text-[11px] font-semibold tracking-wide text-txt-muted uppercase">
-          {label}
-        </p>
-      )}
-      {section.items.map((item) => {
-        // #745: an item carrying children is a disclosure parent. Expanded it
-        // is a toggle + sub-menu; collapsed it is an icon whose flyout lists
-        // its sub-destinations so the group stays navigable in the rail.
-        if (collapsed) {
+  useEffect(() => {
+    if (!sectionKey) return;
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const value = (parsed as Record<string, unknown>)[sectionKey];
+        if (typeof value === "boolean") setExpanded(value);
+      }
+    } catch {
+      // Fall back to the default (all expanded) on malformed storage.
+    }
+  }, [storageKey, sectionKey]);
+
+  function toggle() {
+    setExpanded((value) => {
+      const next = !value;
+      if (sectionKey) {
+        try {
+          let state: Record<string, unknown> = {};
+          const raw = window.localStorage.getItem(storageKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (
+              parsed &&
+              typeof parsed === "object" &&
+              !Array.isArray(parsed)
+            ) {
+              state = { ...parsed };
+            }
+          }
+          state[sectionKey] = next;
+          window.localStorage.setItem(storageKey, JSON.stringify(state));
+        } catch {
+          // Ignore storage write failures.
+        }
+      }
+      return next;
+    });
+  }
+
+  // Collapsed rail: header and section grouping disappear, just the icon rows.
+  if (collapsed) {
+    return (
+      <div className="space-y-1">
+        {section.items.map((item) => {
+          // #745: an item carrying children is a disclosure parent. Expanded it
+          // is a toggle + sub-menu; collapsed it is an icon whose flyout lists
+          // its sub-destinations so the group stays navigable in the rail.
           return item.children?.length ? (
             <CollapsedGroupNavItem key={item.key} item={item} />
           ) : (
             <CollapsedNavItem key={item.key} item={item} />
           );
-        }
-        return item.children?.length ? (
-          <DisclosureNavItem key={item.key} item={item} />
-        ) : (
-          <NavItemLink key={item.key} item={item} variant="sidebar" />
-        );
-      })}
+        })}
+      </div>
+    );
+  }
+
+  // Ungrouped (patient flat) sections stay label-free and non-collapsible.
+  if (!label) {
+    return (
+      <div className="space-y-1">
+        {section.items.map((item) => {
+          return item.children?.length ? (
+            <DisclosureNavItem key={item.key} item={item} />
+          ) : (
+            <NavItemLink key={item.key} item={item} variant="sidebar" />
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={expanded}
+        aria-controls={contentId}
+        data-testid={`sidebar-section-${sectionKey}-toggle`}
+        className="flex w-full items-center justify-between px-3 pt-2 text-[11px] font-semibold tracking-wide text-txt-muted uppercase hover:text-txt"
+      >
+        <span>{label}</span>
+        <ChevronDown
+          size={12}
+          aria-hidden="true"
+          data-testid={`${sectionKey}-section-chevron`}
+          className={cn(
+            "shrink-0 transition-transform",
+            expanded && "rotate-180",
+          )}
+        />
+      </button>
+      <ul
+        id={contentId}
+        data-testid={`sidebar-section-${sectionKey}-content`}
+        className={cn(
+          "space-y-1 overflow-hidden transition-[max-height] duration-200 ease-in-out",
+          expanded ? "max-h-[2000px]" : "max-h-0",
+        )}
+        style={{ maxHeight: expanded ? "2000px" : "0px" }}
+      >
+        {section.items.map((item) => (
+          <li key={item.key}>
+            {item.children?.length ? (
+              <DisclosureNavItem item={item} />
+            ) : (
+              <NavItemLink item={item} variant="sidebar" />
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
