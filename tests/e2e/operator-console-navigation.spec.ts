@@ -132,7 +132,7 @@ const DESTINATIONS: Destination[] = [
   },
   {
     key: "settings",
-    href: "/operator/observability/settings",
+    href: "/operator/settings",
     heading: "Settings",
     panels: ["settings-shell"],
   },

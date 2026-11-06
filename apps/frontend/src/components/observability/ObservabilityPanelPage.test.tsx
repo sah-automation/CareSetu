@@ -49,13 +49,12 @@ describe("ObservabilityPanelPage", () => {
     // The strip used to be pinned here; the destinations now live once in the
     // nav configuration's children, so the same reachability guarantee is
     // pinned against that declaration.
-    const parent = NAV_CONFIG.operator.find(
-      (item) => item.key === "observability",
-    );
+    const children = ["metrics", "reliability", "qualitySecurity"]
+      .map((key) => NAV_CONFIG.operator.find((item) => item.key === key))
+      .flatMap((parent) => parent?.children?.map((child) => child.href) ?? []);
 
-    expect(parent?.children?.map((child) => child.href)).toEqual(
+    expect(children).toEqual(
       expect.arrayContaining([
-        "/operator/observability",
         "/operator/observability/cost",
         "/operator/observability/usage",
         "/operator/observability/quality",
@@ -63,7 +62,6 @@ describe("ObservabilityPanelPage", () => {
         "/operator/observability/business",
         "/operator/observability/reliability",
         "/operator/observability/product",
-        "/operator/observability/settings",
       ]),
     );
   });
