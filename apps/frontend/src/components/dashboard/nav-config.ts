@@ -417,7 +417,8 @@ export function filterNavItems(
       if (!item.children?.length) return item;
       const filteredChildren = filterNavItems(item.children, isAdmin);
       if (filteredChildren.length === 0) {
-        const { children: _children, ...rest } = item;
+        const rest = { ...item };
+        delete rest.children;
         return rest;
       }
       return { ...item, children: filteredChildren };

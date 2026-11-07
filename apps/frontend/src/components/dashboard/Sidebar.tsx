@@ -40,14 +40,7 @@
 // doctor and partner rails keep #575's 208px, and the collapsed `w-16` (and
 // therefore the flyout's `left-16`) is untouched for all roles.
 
-import {
-  Fragment,
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  type FocusEvent,
-} from "react";
+import { Fragment, useId, useRef, useState, type FocusEvent } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronDown, ChevronLeft, ChevronRight, LogOut } from "lucide-react";
@@ -73,14 +66,6 @@ import {
 import type { NavItemDef, SidebarSection } from "./nav-config";
 import type { Role } from "./types";
 
-function useAuthOrNull() {
-  try {
-    return useAuth();
-  } catch {
-    return null;
-  }
-}
-
 interface SidebarProps {
   role: Role;
   collapsed: boolean;
@@ -96,13 +81,13 @@ export function Sidebar({
   onToggleCollapse,
   items,
 }: SidebarProps) {
-  const auth = useAuthOrNull();
+  const auth = useAuth();
   const isAdmin =
-    auth?.user?.roles?.includes("operator") === true &&
-    auth?.user?.tier === "admin";
+    auth.user?.roles?.includes("operator") === true &&
+    auth.user?.tier === "admin";
   const navItems = filterNavItems(items ?? NAV_CONFIG[role], isAdmin);
   const sections = sidebarSections(navItems);
-  const { logout } = useAuth();
+  const { logout } = auth;
   const { lang } = useLang();
   const strings = STRINGS[lang].nav;
 
@@ -242,16 +227,17 @@ function SidebarSectionGroup({
     ? STRINGS[lang].nav.sections[section.labelKey]
     : null;
   const sectionKey = section.labelKey;
-  const [expanded, setExpanded] = useState(true);
-  const contentId = useId();
   const storageKey = `${sidebarStorageKey(role)}.sections`;
-
-  useEffect(() => {
-    if (!sectionKey) return;
-    const state = readSectionState(storageKey);
-    const value = state[sectionKey];
-    if (typeof value === "boolean") setExpanded(value);
-  }, [storageKey, sectionKey]);
+  const [expanded, setExpanded] = useState(() => {
+    if (!sectionKey || typeof window === "undefined") return true;
+    try {
+      const value = readSectionState(storageKey)[sectionKey];
+      return typeof value === "boolean" ? value : true;
+    } catch {
+      return true;
+    }
+  });
+  const contentId = useId();
 
   function toggle() {
     setExpanded((value) => {
@@ -370,9 +356,7 @@ function DisclosureNavItem({ item }: { item: NavItemDef }) {
   const submenuId = useId();
   const children = item.children ?? [];
 
-  useEffect(() => {
-    if (active) setOpen(true);
-  }, [active]);
+  if (active && !open) setOpen(true);
 
   return (
     <div data-testid={`sidebar-group-${item.key}`}>

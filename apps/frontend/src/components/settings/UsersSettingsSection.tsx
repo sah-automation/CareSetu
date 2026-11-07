@@ -31,18 +31,6 @@ import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 type UsersStrings = OperatorSettingsStrings["users"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 
-function tierBadgeVariant(tier: string): "default" | "destructive" {
-  return tier === "admin" ? "destructive" : "default";
-}
-
-function tierLabel(tier: string, t: UsersStrings): string {
-  return tier === "admin" ? t.tierAdmin : t.tierOperator;
-}
-
-function activeLabel(isActive: boolean, t: UsersStrings): string {
-  return isActive ? t.active : t.inactive;
-}
-
 function mfaLabel(enabled: boolean, t: UsersStrings): string {
   return enabled ? t.mfaEnabled : t.mfaDisabled;
 }

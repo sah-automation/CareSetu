@@ -13,19 +13,11 @@ import { useAuth } from "@/lib/auth/AuthContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
-function useAuthOrNull() {
-  try {
-    return useAuth();
-  } catch {
-    return null;
-  }
-}
-
 export default function SettingsPage() {
-  const auth = useAuthOrNull();
+  const auth = useAuth();
   const { lang } = useLang();
   const t = STRINGS[lang].operatorSettings;
-  const isAdmin = auth?.user?.tier === "admin";
+  const isAdmin = auth.user?.tier === "admin";
 
   if (!isAdmin) {
     return (

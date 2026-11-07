@@ -14,7 +14,6 @@ import { FolderOpen, Home } from "lucide-react";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 
 import { Sidebar } from "./Sidebar";
-import type { Role } from "./types";
 
 // ---------------------------------------------------------------------------
 // Mocks

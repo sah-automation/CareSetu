@@ -16,7 +16,6 @@ import {
   fetchFeatureFlagHistory,
   writeFeatureFlag,
   type FeatureFlag,
-  type FeatureFlagHistoryEntry,
 } from "@/lib/operator/settings";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
@@ -24,7 +23,6 @@ import { FeatureFlagsHistory } from "./FeatureFlagsHistory";
 import { FeatureFlagsTable } from "./FeatureFlagsTable";
 import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 
-type FeatureFlagsStrings = OperatorSettingsStrings["featureFlags"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 
 export function FeatureFlagsSettingsSection({

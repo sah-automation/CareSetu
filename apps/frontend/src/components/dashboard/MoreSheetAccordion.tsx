@@ -149,15 +149,14 @@ export function MoreSheetAccordion({
   const sections = sidebarSections(filtered);
 
   const storageKey = `caresetu.moreSheet.${role}.openPanel`;
-  const [openPanel, setOpenPanel] = useState<string | null>(null);
-
-  useEffect(() => {
+  const [openPanel, setOpenPanel] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
     try {
-      setOpenPanel(sessionStorage.getItem(storageKey));
+      return sessionStorage.getItem(storageKey);
     } catch {
-      setOpenPanel(null);
+      return null;
     }
-  }, [storageKey]);
+  });
 
   useEffect(() => {
     try {

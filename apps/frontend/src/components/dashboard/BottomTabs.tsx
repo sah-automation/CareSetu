@@ -28,18 +28,11 @@ import { cn } from "@/lib/utils";
 
 import {
   hasNestedDestinations,
-  isGroupParent,
   isNavItemActive,
   NAV_CONFIG,
-  sidebarSections,
   splitMobileTabs,
 } from "./nav-config";
-import { CountPill, SoonBadge } from "./NavItemLink";
-import {
-  MoreSheetAccordion,
-  OverflowRow,
-  SheetGroupNavItem,
-} from "./MoreSheetAccordion";
+import { MoreSheetAccordion, OverflowRow } from "./MoreSheetAccordion";
 import type { NavItemDef } from "./nav-config";
 import type { Role } from "./types";
 
