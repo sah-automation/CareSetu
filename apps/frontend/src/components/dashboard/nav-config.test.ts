@@ -385,7 +385,6 @@ describe("splitMobileTabs", () => {
       "verifications",
       "disputes",
       "audit",
-      "settings",
     ]);
     expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
     expect(hasMore).toBe(true);
@@ -393,6 +392,7 @@ describe("splitMobileTabs", () => {
       "metrics",
       "reliability",
       "qualitySecurity",
+      "settings",
       "profile",
     ]);
   });

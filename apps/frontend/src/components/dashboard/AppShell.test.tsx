@@ -737,13 +737,19 @@ describe.each(["doctor", "partner", "operator"] as const)(
       setup();
 
       const config = NAV_CONFIG[role];
+      // The sidebar flattens disclosure parents into their leaves (#889), so
+      // walk leaves (children) for sidebar testids while retaining parents for
+      // other surfaces.
+      const sidebarKeys = config.flatMap((item) =>
+        item.children?.length
+          ? item.children.map((child) => child.key)
+          : [item.key],
+      );
       // Walk the configuration rather than a hand-kept list: every destination
       // is in the sidebar (nav-<key>), and the phone bar columns are exactly
       // what the split helper keeps off the More sheet (#746).
-      for (const item of config) {
-        expect(screen.getAllByTestId(`nav-${item.key}`).length).toBeGreaterThan(
-          0,
-        );
+      for (const key of sidebarKeys) {
+        expect(screen.getAllByTestId(`nav-${key}`).length).toBeGreaterThan(0);
       }
       for (const item of splitMobileTabs(config).tabs) {
         expect(screen.getByTestId(`tab-${item.key}`)).toBeInTheDocument();
@@ -788,16 +794,12 @@ describe("AppShell operator Observability parent (#744)", () => {
     return screen.getByTestId("more-sheet");
   }
 
-  it("marks the parent current on a nested sub-destination in both surfaces", () => {
+  it("marks the flattened leaf current on a nested sub-destination in sidebar, and the group in the More sheet", () => {
     renderShell("operator", "/operator/observability/business");
 
-    // The group row is the current group ("true") in both surfaces; the
-    // destination row below it is the current page ("page"). One element per
-    // navigation set may claim the current page.
-    expect(screen.getByTestId("nav-metrics")).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
+    // Sidebar is flattened (#889): no group parent row, only the leaf is
+    // current. The More sheet still mirrors grouped navigation.
+    expect(screen.queryByTestId("nav-metrics")).toBeNull();
     expect(screen.getByTestId("nav-business")).toHaveAttribute(
       "aria-current",
       "page",
@@ -816,7 +818,7 @@ describe("AppShell operator Observability parent (#744)", () => {
   it("stays unlit on a sibling that merely shares a string prefix", () => {
     renderShell("operator", "/operator/observability-archive");
 
-    expect(screen.getByTestId("nav-metrics")).not.toHaveAttribute(
+    expect(screen.queryByTestId("nav-business")).not.toHaveAttribute(
       "aria-current",
     );
     const sheet = openMore();
@@ -902,21 +904,18 @@ describe("AppShell operator mobile More sheet (#746)", () => {
 // #745: the grouped operator sidebar end to end through the shell - the
 // disclosure's sub-destinations render under their parent while the operator is
 // inside the group, and the collapsed rail still offers a way back in.
-describe("AppShell operator grouped sidebar (#745)", () => {
-  it("renders the Metrics sub-destinations under their parent inside the group", () => {
+describe("AppShell operator flattened sidebar (#889)", () => {
+  it("renders the Metrics sub-destinations directly under their section", () => {
     renderShell("operator", "/operator/observability/business");
 
-    expect(screen.getByTestId("nav-metrics")).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
-    const group = screen.getByTestId("sidebar-group-metrics");
+    const content = screen.getByTestId("sidebar-section-metrics-content");
     for (const key of ["business", "product", "usage"]) {
-      expect(within(group).getByTestId(`nav-${key}`)).toBeInTheDocument();
+      expect(within(content).getByTestId(`nav-${key}`)).toBeInTheDocument();
     }
+    expect(screen.queryByTestId("sidebar-group-metrics")).toBeNull();
   });
 
-  it("renders every sub-destination as a live link inside the sub-menu", () => {
+  it("renders every sub-destination as a live link", () => {
     renderShell("operator", "/operator/observability/business");
     fireEvent.click(screen.getByTestId("more-trigger"));
     const sheet = screen.getByTestId("more-sheet");
@@ -925,20 +924,14 @@ describe("AppShell operator grouped sidebar (#745)", () => {
     expect(settings).toHaveAttribute("href", "/operator/settings");
   });
 
-  it("keeps the collapsed rail a route into the group", () => {
+  it("keeps the collapsed rail direct routes into flattened leaves", () => {
     localStorage.setItem("caresetu.sidebar.operator", "collapsed");
     renderShell("operator", "/operator");
 
-    const anchor = screen.getByTestId("nav-metrics");
-    expect(anchor.tagName).toBe("A");
-    expect(anchor).toHaveAttribute("href", "/operator/observability/business");
-
-    fireEvent.mouseEnter(screen.getByTestId("sidebar-group-metrics-collapsed"));
-    expect(
-      within(screen.getByTestId("sidebar-flyout")).getByRole("link", {
-        name: "Business",
-      }),
-    ).toHaveAttribute("href", "/operator/observability/business");
+    for (const key of ["business", "product", "usage"]) {
+      expect(screen.getByTestId(`nav-${key}`)).toBeInTheDocument();
+    }
+    expect(screen.queryByTestId("sidebar-group-metrics-collapsed")).toBeNull();
   });
 });
 

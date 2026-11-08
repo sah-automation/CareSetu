@@ -256,34 +256,30 @@ function SidebarSectionGroup({
   }
 
   // Collapsed rail: header and section grouping disappear, just the icon rows.
+  // Flattened at display time: any entry carrying children expands into its own
+  // leaves, so no destination depends on a disclosure flyout (#889).
   if (collapsed) {
     return (
       <div className="space-y-1">
-        {section.items.map((item) => {
-          // #745: an item carrying children is a disclosure parent. Expanded it
-          // is a toggle + sub-menu; collapsed it is an icon whose flyout lists
-          // its sub-destinations so the group stays navigable in the rail.
-          return item.children?.length ? (
-            <CollapsedGroupNavItem key={item.key} item={item} />
-          ) : (
-            <CollapsedNavItem key={item.key} item={item} />
-          );
-        })}
+        {section.items
+          .flatMap((item) => (item.children?.length ? item.children : [item]))
+          .map((child) => (
+            <CollapsedNavItem key={child.key} item={child} />
+          ))}
       </div>
     );
   }
 
   // Ungrouped (patient flat) sections stay label-free and non-collapsible.
+  // Flattened at display time: disclosure parents expand into their leaves (#889).
   if (!label) {
     return (
       <div className="space-y-1">
-        {section.items.map((item) => {
-          return item.children?.length ? (
-            <DisclosureNavItem key={item.key} item={item} />
-          ) : (
-            <NavItemLink key={item.key} item={item} variant="sidebar" />
-          );
-        })}
+        {section.items
+          .flatMap((item) => (item.children?.length ? item.children : [item]))
+          .map((child) => (
+            <NavItemLink key={child.key} item={child} variant="sidebar" />
+          ))}
       </div>
     );
   }
@@ -318,15 +314,13 @@ function SidebarSectionGroup({
         )}
         style={{ maxHeight: expanded ? "2000px" : "0px" }}
       >
-        {section.items.map((item) => (
-          <li key={item.key}>
-            {item.children?.length ? (
-              <DisclosureNavItem item={item} />
-            ) : (
-              <NavItemLink item={item} variant="sidebar" />
-            )}
-          </li>
-        ))}
+        {section.items
+          .flatMap((item) => (item.children?.length ? item.children : [item]))
+          .map((child) => (
+            <li key={child.key}>
+              <NavItemLink item={child} variant="sidebar" />
+            </li>
+          ))}
       </ul>
     </div>
   );

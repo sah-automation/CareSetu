@@ -355,6 +355,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       icon: Settings,
       group: "account",
       adminOnly: true,
+      mobileOverflow: true,
     },
     {
       key: "profile",
