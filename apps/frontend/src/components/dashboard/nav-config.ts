@@ -268,31 +268,28 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       group: "work",
     },
     {
-      key: "metrics",
-      labelKey: "metrics",
+      key: "business",
+      labelKey: "business",
       href: "/operator/observability/business",
+      icon: TrendingUp,
+      group: "metrics",
+      mobileOverflow: true,
+    },
+    {
+      key: "product",
+      labelKey: "product",
+      href: "/operator/observability/product",
+      icon: Boxes,
+      group: "metrics",
+      mobileOverflow: true,
+    },
+    {
+      key: "usage",
+      labelKey: "usage",
+      href: "/operator/observability/usage",
       icon: BarChart3,
       group: "metrics",
-      children: [
-        {
-          key: "business",
-          labelKey: "business",
-          href: "/operator/observability/business",
-          icon: TrendingUp,
-        },
-        {
-          key: "product",
-          labelKey: "product",
-          href: "/operator/observability/product",
-          icon: Boxes,
-        },
-        {
-          key: "usage",
-          labelKey: "usage",
-          href: "/operator/observability/usage",
-          icon: BarChart3,
-        },
-      ],
+      mobileOverflow: true,
     },
     {
       key: "reliability",
@@ -300,53 +297,47 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/operator/observability/reliability",
       icon: ShieldCheck,
       group: "reliability",
-      children: [
-        {
-          key: "reliability",
-          labelKey: "reliability",
-          href: "/operator/observability/reliability",
-          icon: ShieldCheck,
-        },
-        {
-          key: "health",
-          labelKey: "health",
-          href: "/operator/observability/health",
-          icon: HeartPulse,
-        },
-        {
-          key: "cost",
-          labelKey: "cost",
-          href: "/operator/observability/cost",
-          icon: Coins,
-        },
-      ],
+      mobileOverflow: true,
     },
     {
-      key: "qualitySecurity",
-      labelKey: "qualitySecurity",
+      key: "health",
+      labelKey: "health",
+      href: "/operator/observability/health",
+      icon: HeartPulse,
+      group: "reliability",
+      mobileOverflow: true,
+    },
+    {
+      key: "cost",
+      labelKey: "cost",
+      href: "/operator/observability/cost",
+      icon: Coins,
+      group: "reliability",
+      mobileOverflow: true,
+    },
+    {
+      key: "quality",
+      labelKey: "quality",
       href: "/operator/observability/quality",
       icon: BadgeCheck,
       group: "qualitySecurity",
-      children: [
-        {
-          key: "quality",
-          labelKey: "quality",
-          href: "/operator/observability/quality",
-          icon: BadgeCheck,
-        },
-        {
-          key: "security",
-          labelKey: "security",
-          href: "/operator/observability/security",
-          icon: ShieldCheck,
-        },
-        {
-          key: "evals",
-          labelKey: "evals",
-          href: "/operator/observability/evals",
-          icon: ClipboardList,
-        },
-      ],
+      mobileOverflow: true,
+    },
+    {
+      key: "security",
+      labelKey: "security",
+      href: "/operator/observability/security",
+      icon: ShieldCheck,
+      group: "qualitySecurity",
+      mobileOverflow: true,
+    },
+    {
+      key: "evals",
+      labelKey: "evals",
+      href: "/operator/observability/evals",
+      icon: ClipboardList,
+      group: "qualitySecurity",
+      mobileOverflow: true,
     },
     {
       key: "settings",
@@ -472,7 +463,15 @@ export function isGroupParent(item: NavItemDef): boolean {
 // sub-destinations alike - is reachable from the sheet. A config with no
 // nesting keeps the sheet as the overflow list it has always been.
 export function hasNestedDestinations(items: NavItemDef[]): boolean {
-  return items.some(isGroupParent);
+  if (items.some(isGroupParent)) return true;
+  // Operator navigation is section-grouped on mobile even after the observability
+  // disclosure parents were flattened into leaf destinations (#889).
+  return items.some(
+    (item) =>
+      item.group === "metrics" ||
+      item.group === "reliability" ||
+      item.group === "qualitySecurity",
+  );
 }
 
 // Collapse preference persists per role (spec decision 6): the storage key is

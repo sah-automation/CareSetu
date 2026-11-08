@@ -53,13 +53,18 @@ describe("NAV_CONFIG", () => {
           (item.key === "cases" ||
             item.key === "patients" ||
             item.key === "profile");
-        // #874: the operator's new top-level group entries (metrics,
-        // reliability, qualitySecurity) plus settings and profile are live.
+        // #889: the observability leaves, settings and profile are live entries.
         const isLiveOperatorTab =
           role === "operator" &&
-          (item.key === "metrics" ||
+          (item.key === "business" ||
+            item.key === "product" ||
+            item.key === "usage" ||
             item.key === "reliability" ||
-            item.key === "qualitySecurity" ||
+            item.key === "health" ||
+            item.key === "cost" ||
+            item.key === "quality" ||
+            item.key === "security" ||
+            item.key === "evals" ||
             item.key === "settings" ||
             item.key === "profile");
         expect(item.soon, `${role}/${item.key}`).toBe(
@@ -224,39 +229,54 @@ describe("isNavItemActive (#744)", () => {
 });
 
 describe("operator nav groups (#874)", () => {
-  it("has no observability parent and 4 new top-level entries", () => {
+  it("has observability leaves as top-level entries (#889)", () => {
     const keys = NAV_CONFIG.operator.map((item) => item.key);
     expect(keys).not.toContain("observability");
-    expect(keys).toContain("metrics");
-    expect(keys).toContain("reliability");
-    expect(keys).toContain("qualitySecurity");
-    expect(keys).toContain("settings");
-  });
-
-  it("declares the split sub-destinations in order", () => {
-    const metrics = NAV_CONFIG.operator.find((item) => item.key === "metrics");
-    const reliability = NAV_CONFIG.operator.find(
-      (item) => item.key === "reliability",
-    );
-    const qualitySecurity = NAV_CONFIG.operator.find(
-      (item) => item.key === "qualitySecurity",
-    );
-
-    expect(metrics?.children?.map((child) => child.key)).toEqual([
+    expect(keys).not.toContain("metrics");
+    expect(keys).not.toContain("qualitySecurity");
+    for (const key of [
       "business",
       "product",
       "usage",
-    ]);
-    expect(reliability?.children?.map((child) => child.key)).toEqual([
       "reliability",
       "health",
       "cost",
-    ]);
-    expect(qualitySecurity?.children?.map((child) => child.key)).toEqual([
       "quality",
       "security",
       "evals",
-    ]);
+      "settings",
+    ]) {
+      expect(keys).toContain(key);
+    }
+  });
+
+  it("declares the observability leaves with their group metadata (#889)", () => {
+    const byKey = Object.fromEntries(
+      NAV_CONFIG.operator.map((item) => [item.key, item]),
+    );
+    expect(byKey.business?.group).toBe("metrics");
+    expect(byKey.product?.group).toBe("metrics");
+    expect(byKey.usage?.group).toBe("metrics");
+    expect(byKey.reliability?.group).toBe("reliability");
+    expect(byKey.health?.group).toBe("reliability");
+    expect(byKey.cost?.group).toBe("reliability");
+    expect(byKey.quality?.group).toBe("qualitySecurity");
+    expect(byKey.security?.group).toBe("qualitySecurity");
+    expect(byKey.evals?.group).toBe("qualitySecurity");
+    for (const key of [
+      "business",
+      "product",
+      "usage",
+      "reliability",
+      "health",
+      "cost",
+      "quality",
+      "security",
+      "evals",
+    ]) {
+      expect(byKey[key]?.children).toBeUndefined();
+      expect(byKey[key]?.mobileOverflow).toBe(true);
+    }
   });
 
   it("keeps settings as a flat admin-only account entry", () => {
@@ -290,9 +310,17 @@ describe("operator nav groups (#874)", () => {
       "disputes",
       "audit",
     ]);
-    expect(itemsByKey("metrics")).toEqual(["metrics"]);
-    expect(itemsByKey("reliability")).toEqual(["reliability"]);
-    expect(itemsByKey("qualitySecurity")).toEqual(["qualitySecurity"]);
+    expect(itemsByKey("metrics")).toEqual(["business", "product", "usage"]);
+    expect(itemsByKey("reliability")).toEqual([
+      "reliability",
+      "health",
+      "cost",
+    ]);
+    expect(itemsByKey("qualitySecurity")).toEqual([
+      "quality",
+      "security",
+      "evals",
+    ]);
     expect(itemsByKey("account")).toEqual(["settings", "profile"]);
   });
 
@@ -389,9 +417,15 @@ describe("splitMobileTabs", () => {
     expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
     expect(hasMore).toBe(true);
     expect(overflow.map((item) => item.key)).toEqual([
-      "metrics",
+      "business",
+      "product",
+      "usage",
       "reliability",
-      "qualitySecurity",
+      "health",
+      "cost",
+      "quality",
+      "security",
+      "evals",
       "settings",
       "profile",
     ]);

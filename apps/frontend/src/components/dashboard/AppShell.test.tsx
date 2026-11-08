@@ -794,21 +794,15 @@ describe("AppShell operator Observability parent (#744)", () => {
     return screen.getByTestId("more-sheet");
   }
 
-  it("marks the flattened leaf current on a nested sub-destination in sidebar, and the group in the More sheet", () => {
+  it("marks the flattened leaf current on a nested sub-destination on every surface", () => {
     renderShell("operator", "/operator/observability/business");
 
-    // Sidebar is flattened (#889): no group parent row, only the leaf is
-    // current. The More sheet still mirrors grouped navigation.
     expect(screen.queryByTestId("nav-metrics")).toBeNull();
     expect(screen.getByTestId("nav-business")).toHaveAttribute(
       "aria-current",
       "page",
     );
     const sheet = openMore();
-    expect(within(sheet).getByTestId("more-metrics")).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
     expect(within(sheet).getByTestId("more-business")).toHaveAttribute(
       "aria-current",
       "page",
@@ -822,7 +816,7 @@ describe("AppShell operator Observability parent (#744)", () => {
       "aria-current",
     );
     const sheet = openMore();
-    expect(within(sheet).getByTestId("more-metrics")).not.toHaveAttribute(
+    expect(within(sheet).getByTestId("more-business")).not.toHaveAttribute(
       "aria-current",
     );
   });
@@ -862,9 +856,9 @@ describe("AppShell operator mobile More sheet (#746)", () => {
       "Metrics",
     );
 
-    // Indentation: the sub-destinations sit inside the parent group's menu.
-    const menu = within(sheet).getByTestId("more-group-metrics-menu");
-    expect(within(menu).getByTestId("more-business")).toHaveAttribute(
+    // Leaves sit inside the Metrics accordion panel.
+    const panel = within(sheet).getByTestId("more-panel-metrics");
+    expect(within(panel).getByTestId("more-business")).toHaveAttribute(
       "href",
       "/operator/observability/business",
     );
