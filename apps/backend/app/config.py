@@ -412,6 +412,9 @@ class Settings:
     redis_max_connections: int = DEFAULT_REDIS_MAX_CONNECTIONS
     redis_socket_connect_timeout_seconds: float = DEFAULT_REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS
     redis_socket_timeout_seconds: float = DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS
+    # Cache/Redis enable flags (MOD-014 #892): runtime switches for cache and redis.
+    cache_enabled: bool = True
+    redis_enabled: bool = False
     # Read-cache foundation (ARCH-P1 #816): per-cache TTLs, PHI gate flag,
     # and degraded-mode cap. Only profile and intake caches honour the PHI gate.
     phi_cache_enabled: bool = False
@@ -1522,6 +1525,8 @@ def get_settings() -> Settings:
         redis_socket_timeout_seconds=_env_float(
             "REDIS_SOCKET_TIMEOUT_SECONDS", DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS
         ),
+        cache_enabled=_env_bool("CACHE_ENABLED", True),
+        redis_enabled=_env_bool("REDIS_ENABLED", False),
         phi_cache_enabled=_env_bool("PHI_CACHE_ENABLED", False),
         profile_cache_ttl_seconds=_env_int(
             "PROFILE_CACHE_TTL_SECONDS", DEFAULT_PROFILE_CACHE_TTL_SECONDS
