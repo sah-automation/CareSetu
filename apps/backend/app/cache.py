@@ -10,6 +10,10 @@ the caller recomputes from SQL. A cache problem never fails a request.
 The helper takes a Redis client (or ``None``) so unit tests use a fake and
 callers can run without Redis. ``None`` is always a miss on read and a no-op
 on write/invalidate.
+
+Runtime toggles for cache/redis are consumed from ``ops.runtime_setting_changed``
+events and applied via in-process atomic flags so changes take effect within
+seconds without restart (ticket #895).
 """
 
 from __future__ import annotations
@@ -21,7 +25,14 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
+
 from app.config import Settings, get_settings
+from app.runtime_toggles import cache_enabled, set_cache_enabled, set_redis_enabled
+from bus.envelope import Envelope
+from bus.events import EVENT_OPS_RUNTIME_SETTING_CHANGED
+from bus.registry import HandlerRegistry
+from modules.ops.domain.events import OpsRuntimeSettingChangedPayload
 from observability import otel as _otel
 
 _LOG = logging.getLogger(__name__)
@@ -29,6 +40,42 @@ _LOG = logging.getLogger(__name__)
 _builtin_set = set
 
 _PHI_CACHE_NAMES = {"profile", "intake"}
+
+
+async def _handle_runtime_setting_changed(envelope: Envelope[BaseModel]) -> None:
+    """Handle ``ops.runtime_setting_changed`` event by flipping atomic flags.
+
+    The event carries the setting key (``cache.enabled`` or ``redis.enabled``),
+    the new boolean value, and the version. We update the corresponding flag
+    so subsequent cache/redis operations respect the new value immediately.
+    """
+
+    payload_raw = envelope.payload
+    payload = (
+        payload_raw
+        if isinstance(payload_raw, OpsRuntimeSettingChangedPayload)
+        else OpsRuntimeSettingChangedPayload.model_validate(payload_raw.model_dump())
+    )
+    key = payload.key
+    value = payload.value
+
+    if key == "cache.enabled":
+        set_cache_enabled(value)
+        _LOG.info(
+            "cache.enabled toggled to %s via runtime event (version=%d)", value, payload.version
+        )
+    elif key == "redis.enabled":
+        set_redis_enabled(value)
+        _LOG.info(
+            "redis.enabled toggled to %s via runtime event (version=%d)", value, payload.version
+        )
+    else:
+        _LOG.warning("Unknown runtime setting key in ops.runtime_setting_changed: %s", key)
+
+
+def register_handlers(registry: HandlerRegistry) -> None:
+    """Register cache module event handlers for runtime toggles (ticket #895)."""
+    registry.register(EVENT_OPS_RUNTIME_SETTING_CHANGED, _handle_runtime_setting_changed)
 
 
 @dataclass
@@ -460,6 +507,11 @@ async def get_cached(*args: Any, **kwargs: Any) -> Any:
     client, namespace, key, _value, rest = _normalise_call(args, kwargs)
     settings = _settings_from(rest)
     cache_name = _namespace_name(namespace)
+
+    # Runtime toggle: cache.enabled=false bypasses Redis entirely (ticket #895).
+    if not cache_enabled():
+        record_cache_miss(cache_name)
+        return None
 
     # PHI gate.
     phi = _phi_flag(namespace) or _had(rest, "phi", "phi_cache", "phi_enabled")
