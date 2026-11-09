@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.config import Settings
 from app.db import AsyncEngineLike
 from bus.events import EVENT_AUDIT_EVENT, EVENT_OPS_RUNTIME_SETTING_CHANGED
+from modules.ops.domain.events import OpsRuntimeSettingChangedPayload
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.settings import (
     ALL_EDITABLE_KEYS,
@@ -404,16 +405,14 @@ class OpsFacade:
 
             # Emit runtime setting changed event for cache/redis switches
             if setting_key in ("cache.enabled", "redis.enabled"):
-                runtime_payload = {
-                    "key": setting_key,
-                    "value": value,
-                    "version": new_version,
-                }
+                runtime_event = OpsRuntimeSettingChangedPayload(
+                    key=setting_key, value=value, version=new_version
+                )
                 await connection.execute(
                     ops_outbox.insert().values(
                         event_id=uuid4(),
                         event_type=EVENT_OPS_RUNTIME_SETTING_CHANGED,
-                        payload=runtime_payload,
+                        payload=runtime_event.model_dump(mode="json"),
                         occurred_at=datetime.now(UTC),
                         status="pending",
                         attempts=0,

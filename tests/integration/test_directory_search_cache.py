@@ -35,6 +35,7 @@ from sqlalchemy.pool import NullPool
 from test_directory_search import _activate_partner, _pending_partner
 
 import app.redis as shared_redis
+from app.runtime_toggles import set_redis_enabled
 from modules.iam.adapters.sms import MockSmsAdapter
 from modules.iam.facade import IamFacade
 from modules.partner.adapters.artifact_store import CredentialArtifactStore
@@ -92,6 +93,7 @@ async def clean_partner(database_url: str, migration: None) -> Iterator[None]:
         await engine.dispose()
     yield
     shared_redis._REDIS_CLIENT = None
+    set_redis_enabled(False)
 
 
 def _facade(database_url: str, tmp_path: Path) -> tuple[IamFacade, PartnerFacade]:
@@ -129,6 +131,7 @@ async def test_stale_cached_partner_never_surfaces(
     _, partner = _facade(database_url, tmp_path)
     cache = _FakeRedis()
     shared_redis._REDIS_CLIENT = cache
+    set_redis_enabled(True)
 
     await _activate_partner(
         database_url, partner, practice_name="Dr. Clinch Square", specialty="General Physician"
@@ -172,6 +175,7 @@ async def test_activation_flushes_namespace_and_new_partner_appears(
     _, partner = _facade(database_url, tmp_path)
     cache = _FakeRedis()
     shared_redis._REDIS_CLIENT = cache
+    set_redis_enabled(True)
 
     await _activate_partner(
         database_url, partner, practice_name="Dr. Clinch Square", specialty="General Physician"
@@ -204,6 +208,7 @@ async def test_credential_invalidated_reject_of_active_partner_flushes_cache(
     _, partner = _facade(database_url, tmp_path)
     cache = _FakeRedis()
     shared_redis._REDIS_CLIENT = cache
+    set_redis_enabled(True)
 
     active_id = await _activate_partner(
         database_url, partner, practice_name="Dr. Clinch Square", specialty="General Physician"
@@ -230,6 +235,7 @@ async def test_credential_purge_flushes_cache(
     _, partner = _facade(database_url, tmp_path)
     cache = _FakeRedis()
     shared_redis._REDIS_CLIENT = cache
+    set_redis_enabled(True)
 
     await _activate_partner(
         database_url, partner, practice_name="Dr. Clinch Square", specialty="General Physician"

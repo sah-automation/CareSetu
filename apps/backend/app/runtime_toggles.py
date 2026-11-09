@@ -7,16 +7,36 @@ to apply toggles without restart (threading.Event for atomic cross-thread reads)
 
 from __future__ import annotations
 
+import os
 import threading
 
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUE_VALUES
+
+
+def _seed_redis_enabled() -> bool:
+    env_value = os.environ.get("REDIS_ENABLED")
+    if env_value is not None:
+        return env_value.strip().lower() in _TRUE_VALUES
+    return bool(os.environ.get("REDIS_URL", "").strip())
+
+
 # Atomic flags for runtime toggles (threading.Event, atomic cross-thread reads).
-# Default to True (cache enabled, redis enabled) so existing behavior is preserved
-# until an event flips them.
+# Seeded from the environment at import so a booted process reflects the env-driven
+# defaults without waiting for an outbox event (#895).
 _cache_enabled_flag: threading.Event = threading.Event()
-_cache_enabled_flag.set()
+if _env_flag("CACHE_ENABLED", True):
+    _cache_enabled_flag.set()
 
 _redis_enabled_flag: threading.Event = threading.Event()
-_redis_enabled_flag.set()
+if _seed_redis_enabled():
+    _redis_enabled_flag.set()
 
 
 def cache_enabled() -> bool:
@@ -43,3 +63,11 @@ def set_redis_enabled(value: bool) -> None:
         _redis_enabled_flag.set()
     else:
         _redis_enabled_flag.clear()
+
+
+__all__ = [
+    "cache_enabled",
+    "redis_enabled",
+    "set_cache_enabled",
+    "set_redis_enabled",
+]

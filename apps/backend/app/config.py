@@ -1294,6 +1294,10 @@ class Settings:
                 "AI_QUEUE_WORKER_ENABLED=true (ai_queue_worker_enabled) "
                 "requires AI_ASYNC_ENABLED=true (ai_async_enabled)"
             )
+        # When REDIS_ENABLED is not explicitly configured, default from redis_url
+        # so the enable flag tracks the presence of a Redis deployment.
+        if "REDIS_ENABLED" not in os.environ:
+            object.__setattr__(self, "redis_enabled", bool(str(self.redis_url).strip()))
 
     @property
     def dispatcher_runs_in_process(self) -> bool:
@@ -1526,7 +1530,10 @@ def get_settings() -> Settings:
             "REDIS_SOCKET_TIMEOUT_SECONDS", DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS
         ),
         cache_enabled=_env_bool("CACHE_ENABLED", True),
-        redis_enabled=_env_bool("REDIS_ENABLED", False),
+        redis_enabled=_env_bool(
+            "REDIS_ENABLED",
+            bool(os.environ.get("REDIS_URL", DEFAULT_REDIS_URL).strip()),
+        ),
         phi_cache_enabled=_env_bool("PHI_CACHE_ENABLED", False),
         profile_cache_ttl_seconds=_env_int(
             "PROFILE_CACHE_TTL_SECONDS", DEFAULT_PROFILE_CACHE_TTL_SECONDS

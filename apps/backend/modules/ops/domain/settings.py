@@ -392,28 +392,15 @@ class EffectiveSettingsResolver:
             return getattr(
                 self._settings, "dispatcher_in_process_enabled", None
             ), SettingSource.DEFAULT.value
-        # Editable runtime switches for cache/redis
+        # Editable runtime switches for cache/redis. Source is environment per spec
+        # (they derive from env config), falling back to the Settings attribute.
         if key == "cache.enabled":
-            # Check env var directly for source tracking
-            import os
-
-            cache_enabled_env = os.environ.get("CACHE_ENABLED")
-            if cache_enabled_env is not None:
-                return (
-                    cache_enabled_env.strip().lower() in _TRUE_VALUES,
-                    SettingSource.ENVIRONMENT.value,
-                )
-            return getattr(self._settings, "cache_enabled", True), SettingSource.DEFAULT.value
+            return getattr(self._settings, "cache_enabled", True), SettingSource.ENVIRONMENT.value
         if key == "redis.enabled":
-            import os
-
-            redis_enabled_env = os.environ.get("REDIS_ENABLED")
-            if redis_enabled_env is not None:
-                return (
-                    redis_enabled_env.strip().lower() in _TRUE_VALUES,
-                    SettingSource.ENVIRONMENT.value,
-                )
-            return bool(getattr(self._settings, "redis_url", "")), SettingSource.DEFAULT.value
+            value = getattr(self._settings, "redis_enabled", None)
+            if value is None:
+                value = bool(getattr(self._settings, "redis_url", "") or "")
+            return value, SettingSource.ENVIRONMENT.value
         # Read-only boot-time params for redis
         if key == "redis.max_connections":
             return getattr(

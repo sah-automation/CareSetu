@@ -114,9 +114,11 @@ class FakeRedis:
 def install_fake_redis(client: FakeRedis | None = None) -> FakeRedis:
     """Install ``client`` (or a fresh FakeRedis) as the shared Redis client."""
     import app.redis as shared_redis
+    from app.runtime_toggles import set_redis_enabled
 
     chosen = client if client is not None else FakeRedis()
     shared_redis._REDIS_CLIENT = chosen
+    set_redis_enabled(True)
     return chosen
 
 
@@ -124,13 +126,16 @@ def install_fake_redis(client: FakeRedis | None = None) -> FakeRedis:
 def fake_redis(client: FakeRedis | None = None) -> Iterator[FakeRedis]:
     """Context manager that installs a fake Redis and restores the previous client."""
     import app.redis as shared_redis
+    from app.runtime_toggles import redis_enabled, set_redis_enabled
 
     previous = shared_redis._REDIS_CLIENT
+    previous_flag = redis_enabled()
     chosen = install_fake_redis(client)
     try:
         yield chosen
     finally:
         shared_redis._REDIS_CLIENT = previous
+        set_redis_enabled(previous_flag)
 
 
 # --- SQL counter -----------------------------------------------------------

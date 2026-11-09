@@ -254,10 +254,15 @@ def fake_redis() -> Iterator[FakeRedis]:
     import app.redis as shared_redis
 
     previous = shared_redis._REDIS_CLIENT
+    from app.runtime_toggles import redis_enabled, set_redis_enabled
+
+    previous_flag = redis_enabled()
     client = FakeRedis()
     shared_redis._REDIS_CLIENT = client
+    set_redis_enabled(True)
     yield client
     shared_redis._REDIS_CLIENT = previous
+    set_redis_enabled(previous_flag)
 
 
 @pytest.fixture

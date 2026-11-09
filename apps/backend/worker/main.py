@@ -752,6 +752,11 @@ async def run_worker_until_stopped(
     alone.
     """
     resolved_settings = settings if settings is not None else get_settings()
+    # Seed in-process runtime toggles from resolved settings for consistency.
+    from app.runtime_toggles import set_cache_enabled, set_redis_enabled
+
+    set_cache_enabled(resolved_settings.cache_enabled)
+    set_redis_enabled(resolved_settings.redis_enabled)
     # PHASE-14A A1 (#694): configure structured logging once at the worker
     # composition root so the dispatcher's lines are JSON/console-rendered and
     # carry the service identity + trace id. Never raises.
