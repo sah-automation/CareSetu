@@ -23,7 +23,7 @@ import { isSecretKey } from "@/lib/operator/config-filter";
 
 type AiStrings = OperatorSettingsStrings["ai"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
-type Draft = string;
+type Draft = string | boolean;
 
 function sourceLabel(source: SettingSource, t: AiStrings): string {
   switch (source) {
@@ -62,12 +62,23 @@ function formatTimestamp(iso: string): string {
   }
 }
 
+function isBooleanSetting(setting: EffectiveSetting): boolean {
+  return (
+    typeof setting.value === "boolean" ||
+    setting.key.endsWith("_enabled") ||
+    setting.key.endsWith(".enabled")
+  );
+}
+
 function draftFor(
   setting: EffectiveSetting,
   drafts: Record<string, Draft>,
 ): Draft {
   const draft = drafts[setting.key];
   if (draft !== undefined) return draft;
+  if (isBooleanSetting(setting)) {
+    return Boolean(setting.value);
+  }
   return setting.value === null || setting.value === undefined
     ? ""
     : String(setting.value);
@@ -78,6 +89,9 @@ function buildWriteValue(
   raw: Draft,
   t: AiStrings,
 ): { ok: true; value: SettingWriteValue } | { ok: false; message: string } {
+  if (isBooleanSetting(setting)) {
+    return { ok: true, value: Boolean(raw) };
+  }
   const text = typeof raw === "string" ? raw.trim() : "";
   if (text === "") return { ok: false, message: t.validationRequired };
   const numeric = Number(text);
@@ -155,17 +169,29 @@ function CacheSettingsTable({
                   data-testid={`settings-cache-value-${setting.key}`}
                 >
                   {isEditable ? (
-                    <input
-                      type="number"
-                      step="any"
-                      min={0}
-                      className="w-32 rounded-md border border-hairline px-2 py-1 text-sm text-txt"
-                      value={String(draftFor(setting, drafts))}
-                      onChange={(event) =>
-                        onDraft(setting.key, event.target.value)
-                      }
-                      data-testid={`settings-cache-input-${setting.key}`}
-                    />
+                    isBooleanSetting(setting) ? (
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-accent"
+                        checked={Boolean(draftFor(setting, drafts))}
+                        onChange={(event) =>
+                          onDraft(setting.key, event.target.checked)
+                        }
+                        data-testid={`settings-cache-input-${setting.key}`}
+                      />
+                    ) : (
+                      <input
+                        type="number"
+                        step="any"
+                        min={0}
+                        className="w-32 rounded-md border border-hairline px-2 py-1 text-sm text-txt"
+                        value={String(draftFor(setting, drafts))}
+                        onChange={(event) =>
+                          onDraft(setting.key, event.target.value)
+                        }
+                        data-testid={`settings-cache-input-${setting.key}`}
+                      />
+                    )
                   ) : (
                     formatValue(setting.value, t)
                   )}
