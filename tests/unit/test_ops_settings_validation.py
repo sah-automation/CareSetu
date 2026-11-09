@@ -8,6 +8,7 @@ from modules.ops.domain.settings import (
     EffectiveSetting,
     OpsSettingsCache,
     validate_ai_setting,
+    validate_cache_redis_setting,
 )
 
 
@@ -48,6 +49,45 @@ class TestValidateAiSetting:
     def test_rejects_out_of_bounds_values(self, key: str, value: object) -> None:
         with pytest.raises(ValueError):
             validate_ai_setting(key, value)
+
+
+class TestValidateCacheRedisSetting:
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("cache.enabled", True),
+            ("cache.enabled", False),
+            ("redis.enabled", True),
+            ("redis.enabled", False),
+        ],
+    )
+    def test_accepts_boolean_values(self, key: str, value: object) -> None:
+        validate_cache_redis_setting(key, value)
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("cache.enabled", "true"),
+            ("cache.enabled", "false"),
+            ("cache.enabled", 1),
+            ("cache.enabled", 0),
+            ("cache.enabled", None),
+            ("cache.enabled", {}),
+            ("redis.enabled", "true"),
+            ("redis.enabled", "false"),
+            ("redis.enabled", 1),
+            ("redis.enabled", 0),
+            ("redis.enabled", None),
+            ("redis.enabled", {}),
+        ],
+    )
+    def test_rejects_non_boolean_values(self, key: str, value: object) -> None:
+        with pytest.raises(ValueError):
+            validate_cache_redis_setting(key, value)
+
+    def test_rejects_unknown_key(self) -> None:
+        with pytest.raises(ValueError, match="Unknown cache/redis setting key"):
+            validate_cache_redis_setting("cache.unknown", True)
 
 
 class TestOpsSettingsCache:

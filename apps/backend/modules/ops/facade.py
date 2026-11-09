@@ -15,6 +15,7 @@ from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.settings import (
     ALL_EDITABLE_KEYS,
     EDITABLE_AI_KEYS,
+    EDITABLE_CACHE_REDIS_KEYS,
     EDITABLE_NOTIFICATION_KEYS,
     EffectiveSetting,
     EffectiveSettingsResolver,
@@ -26,6 +27,7 @@ from modules.ops.domain.settings import (
     OpsSettingsCache,
     SettingHistoryEntry,
     validate_ai_setting,
+    validate_cache_redis_setting,
     validate_feature_flag_write,
     validate_notification_setting,
 )
@@ -328,6 +330,8 @@ class OpsFacade:
                 validate_ai_setting(setting_key, value)
             elif setting_key in EDITABLE_NOTIFICATION_KEYS:
                 validate_notification_setting(setting_key, value)
+            elif setting_key in EDITABLE_CACHE_REDIS_KEYS:
+                validate_cache_redis_setting(setting_key, value)
         except ValueError as exc:
             raise InvalidSettingWriteError(setting_key, str(exc)) from exc
 

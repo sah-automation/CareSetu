@@ -642,3 +642,23 @@ def validate_notification_setting(key: str, value: object) -> None:
         validate_channel_enabled(value)
     else:
         raise ValueError(f"Unknown notification setting key: {key}")
+
+
+def validate_cache_redis_setting(key: str, value: object) -> None:
+    """Validate a cache/redis runtime switch write.
+
+    Args:
+        key: The setting key (must be "cache.enabled" or "redis.enabled").
+        value: The value to validate.
+
+    Raises:
+        ValueError: If the value is not a boolean.
+    """
+    if key == "cache.enabled":
+        if not isinstance(value, bool):
+            raise ValueError("cache.enabled must be a boolean (true/false)")
+    elif key == "redis.enabled":
+        if not isinstance(value, bool):
+            raise ValueError("redis.enabled must be a boolean (true/false)")
+    else:
+        raise ValueError(f"Unknown cache/redis setting key: {key}")
