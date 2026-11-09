@@ -159,6 +159,10 @@ EVENT_INTAKE_DOCTOR_ASSIGNED = "intake.doctor_assigned"
 # an arrival fact, never clinical content, deliberately NOT in
 # ``REGULATED_ACT_TYPES``.
 EVENT_INTAKE_COMPOSER_OPENED = "intake.composer_opened"
+# MOD-014 (ops): emitted when a runtime switch (cache.enabled / redis.enabled)
+# is written via PUT /v1/operator/settings. Carries key, value, version.
+# Inserted into ops.ops_outbox in the same transaction as the audit event.
+EVENT_OPS_RUNTIME_SETTING_CHANGED = "ops.runtime_setting_changed"
 
 # PHASE-4 T3 (#237): the canonical regulated-act whitelist. MOD-011 appends an
 # ``audit.event`` payload to the hash chain only when its ``event_type`` is
