@@ -90,6 +90,7 @@ function buildWriteValue(
 function CacheSettingsTable({
   settings,
   t,
+  labels,
   drafts,
   saveStates,
   saveErrors,
@@ -98,6 +99,7 @@ function CacheSettingsTable({
 }: {
   settings: EffectiveSetting[];
   t: AiStrings;
+  labels?: OperatorSettingsStrings["labels"];
   drafts: Record<string, Draft>;
   saveStates: Record<string, SaveStatus>;
   saveErrors: Record<string, string>;
@@ -138,11 +140,15 @@ function CacheSettingsTable({
                 data-testid={`settings-cache-row-${setting.key}`}
                 className="border-b border-hairline align-top last:border-0"
               >
-                <th
-                  scope="row"
-                  className="py-2 pr-3 font-mono text-xs font-normal text-txt"
-                >
-                  {setting.key}
+                <th scope="row" className="py-2 pr-3 font-normal text-txt">
+                  <span className="text-sm">
+                    {(
+                      labels as Record<string, { label?: string }> | undefined
+                    )?.[setting.key]?.label ?? setting.key}
+                  </span>
+                  <span className="block font-mono text-xs text-txt-muted">
+                    {setting.key}
+                  </span>
                 </th>
                 <td
                   className="py-2 pr-3 text-txt"
@@ -240,12 +246,14 @@ function CacheSettingsTable({
 function CacheHistory({
   entries,
   t,
+  labels,
   status,
   errorMessage,
   onRetry,
 }: {
   entries: SettingHistoryEntry[];
   t: AiStrings;
+  labels?: OperatorSettingsStrings["labels"];
   status: "loading" | "ready" | "error";
   errorMessage: string;
   onRetry: () => void;
@@ -492,6 +500,7 @@ export function CacheRedisSettingsSection({
           <CacheSettingsTable
             settings={cache}
             t={t.ai}
+            labels={t.labels}
             drafts={drafts}
             saveStates={saveStates}
             saveErrors={saveErrors}
@@ -501,6 +510,7 @@ export function CacheRedisSettingsSection({
           <CacheHistory
             entries={cacheHistory}
             t={t.ai}
+            labels={t.labels}
             status={history.status}
             errorMessage={
               history.error?.expected
