@@ -65,6 +65,8 @@ export function FeatureFlagsTable({
             const status = saveStates[flag.flag_key] ?? "idle";
             const error = saveErrors[flag.flag_key];
             const draft = drafts[flag.flag_key] ?? flag.enabled;
+            const canEdit =
+              flag.flag_kind === "runtime" && flag.editable === true;
             return (
               <tr
                 key={flag.flag_key}
@@ -81,7 +83,7 @@ export function FeatureFlagsTable({
                   className="py-2 pr-3 text-txt"
                   data-testid={`settings-feature-flags-enabled-${flag.flag_key}`}
                 >
-                  {flag.editable ? (
+                  {canEdit ? (
                     <label className="inline-flex items-center gap-2 cursor-pointer">
                       <input
                         type="checkbox"
@@ -117,7 +119,7 @@ export function FeatureFlagsTable({
                   {flag.updated_at}
                 </td>
                 <td className="py-2">
-                  {flag.editable ? (
+                  {canEdit ? (
                     <div className="flex flex-col gap-1">
                       <button
                         type="button"
@@ -154,12 +156,14 @@ export function FeatureFlagsTable({
                       >
                         {t.readOnly}
                       </span>
-                      <span
-                        className="text-xs text-txt-muted"
-                        data-testid={`settings-feature-flags-restart-explanation-${flag.flag_key}`}
-                      >
-                        {t.restartExplanation}
-                      </span>
+                      {flag.flag_kind === "restart_required" && (
+                        <span
+                          className="text-xs text-txt-muted"
+                          data-testid={`settings-feature-flags-restart-explanation-${flag.flag_key}`}
+                        >
+                          {t.restartExplanation}
+                        </span>
+                      )}
                     </div>
                   )}
                 </td>

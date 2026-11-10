@@ -14,7 +14,6 @@ import { FolderOpen, Home } from "lucide-react";
 import { __resetLangForTests } from "@/lib/i18n/LangContext";
 
 import { Sidebar } from "./Sidebar";
-import type { Role } from "./types";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -64,6 +63,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   mockPathname.mockReturnValue("/patient");
   mockLogout.mockClear();
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -166,34 +166,26 @@ describe("Sidebar", () => {
     expect(disputes).toHaveAttribute("aria-disabled", "true");
   });
 
-  it("lights a disclosure parent while inside its group, expanded and collapsed (#744)", () => {
+  it("marks the flattened leaf current while inside its destination (#744/#889)", () => {
     mockPathname.mockReturnValue("/operator/observability/business");
 
     const { unmount } = render(
       <Sidebar role="operator" collapsed={false} onToggleCollapse={vi.fn()} />,
-    );
-    // The parent row is the current group ("true"), the destination row under it
-    // is the current page ("page"). Two elements claiming the current page
-    // inside one navigation set announces the page twice.
-    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
-      "aria-current",
-      "true",
     );
     expect(screen.getByTestId("nav-business")).toHaveAttribute(
       "aria-current",
       "page",
     );
     expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
+    expect(screen.queryByTestId("nav-metrics")).toBeNull();
     unmount();
 
     render(
       <Sidebar role="operator" collapsed={true} onToggleCollapse={vi.fn()} />,
     );
-    // The collapsed icon rail reads the same predicate, so the group can never
-    // look inactive in one surface and current in the other.
-    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
+    expect(screen.getByTestId("nav-business")).toHaveAttribute(
       "aria-current",
-      "true",
+      "page",
     );
   });
 });
@@ -211,7 +203,7 @@ describe("Sidebar #538 redesigned chrome", () => {
 
     expect(screen.getByText("Work")).toBeInTheDocument();
     expect(screen.getByText("Account")).toBeInTheDocument();
-    const workSection = screen.getByText("Work").parentElement;
+    const workSection = screen.getByTestId("sidebar-section-work-content");
     expect(workSection).not.toBeNull();
     expect(
       within(workSection as HTMLElement).getByTestId("nav-queue"),
@@ -219,7 +211,9 @@ describe("Sidebar #538 redesigned chrome", () => {
     expect(
       within(workSection as HTMLElement).getByTestId("nav-cases"),
     ).toBeInTheDocument();
-    const accountSection = screen.getByText("Account").parentElement;
+    const accountSection = screen.getByTestId(
+      "sidebar-section-account-content",
+    );
     expect(
       within(accountSection as HTMLElement).getByTestId("nav-profile"),
     ).toBeInTheDocument();
@@ -592,124 +586,76 @@ describe("Sidebar #745 operator groups and disclosure", () => {
     // #867/#868: Work, Observability and Account are three sections, so there
     // are two dividers between them.
     const dividers = screen.getAllByTestId("sidebar-section-divider");
-    expect(dividers).toHaveLength(2);
+    expect(dividers).toHaveLength(4);
     for (const divider of dividers) {
       expect(divider.className).toContain("border-hairline");
     }
   });
 
-  it("renders the nine sub-destinations under their parent behind a guide rail", () => {
+  it("flattens observability groups into direct destination rows under their section", () => {
     renderOperator({ pathname: "/operator/observability/business" });
 
-    const group = screen.getByTestId("sidebar-group-observability");
-    const menu = within(group).getByTestId("sidebar-group-observability-menu");
-    expect(menu.className).toContain("border-hairline");
-    for (const key of [
-      "overview",
-      "business",
-      "product",
-      "reliability",
-      "cost",
-      "usage",
-      "quality",
-      "health",
-      "settings",
-    ]) {
-      expect(within(menu).getByTestId(`nav-${key}`)).toBeInTheDocument();
+    for (const [section, keys] of [
+      ["metrics", ["business", "product", "usage"]],
+      ["reliability", ["reliability", "health", "cost"]],
+      ["qualitySecurity", ["quality", "security", "evals"]],
+    ] as const) {
+      const content = screen.getByTestId(`sidebar-section-${section}-content`);
+      for (const key of keys) {
+        expect(within(content).getByTestId(`nav-${key}`)).toBeInTheDocument();
+      }
+      expect(screen.queryByTestId(`sidebar-group-${section}`)).toBeNull();
     }
   });
 
-  it("reports its expanded state to assistive technology and rotates its arrow", () => {
-    renderOperator();
+  it("marks the current leaf current after flattening", () => {
+    renderOperator({ pathname: "/operator/observability/business" });
 
-    const toggle = screen.getByTestId("nav-observability");
-    const chevron = screen.getByTestId("observability-disclosure-chevron");
-    const menu = screen.getByTestId("sidebar-group-observability-menu");
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(chevron.getAttribute("class")).not.toContain("rotate-180");
-    // The menu stays mounted while closed so `aria-controls` always resolves;
-    // a class hides it rather than the `hidden` attribute.
-    expect(toggle).toHaveAttribute("aria-controls", menu.id);
-    expect(menu).toHaveClass("hidden");
-
-    fireEvent.click(toggle);
-
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(chevron.getAttribute("class")).toContain("rotate-180");
-    expect(menu).not.toHaveClass("hidden");
-  });
-
-  it("opens itself when the operator lands inside the group", () => {
-    renderOperator({ pathname: "/operator/observability/reliability" });
-    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
-  });
-
-  it("highlights the parent while a sub-destination is current", () => {
-    renderOperator({ pathname: "/operator/observability/reliability" });
-
-    const toggle = screen.getByTestId("nav-observability");
-    // The toggle carries the same current-group marker #744 asserts on the
-    // collapsed rail, so both group forms agree on where the operator is. It
-    // is "true" and not "page": the destination row owns the page.
-    expect(toggle).toHaveAttribute("aria-current", "true");
-    expect(toggle).toHaveAttribute("data-active", "true");
-    expect(screen.getByTestId("nav-reliability")).toHaveAttribute(
+    expect(screen.getByTestId("nav-business")).toHaveAttribute(
       "aria-current",
       "page",
     );
+    expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
+    expect(screen.queryByTestId("nav-metrics")).toBeNull();
   });
 
-  it("renders the sub-destinations as live links inside the sub-menu", () => {
-    renderOperator({ pathname: "/operator/observability" });
+  it("renders settings as a live link in the account section", () => {
+    renderOperator({ pathname: "/operator" });
 
-    const settings = within(
-      screen.getByTestId("sidebar-group-observability-menu"),
-    ).getByTestId("nav-settings");
+    const settings = screen.getByTestId("nav-settings");
     // #747: Settings is a live placeholder shell, not a coming-soon stub, so
-    // it renders as a real link like every other sub-destination.
+    // it renders as a real link.
     expect(settings.tagName).toBe("A");
-    expect(settings).toHaveAttribute(
-      "href",
-      "/operator/observability/settings",
-    );
+    expect(settings).toHaveAttribute("href", "/operator/settings");
   });
 
-  it("keeps the collapsed rail a way into the group, with its sub-destinations", () => {
-    renderOperator({ collapsed: true });
+  it("keeps collapsed rail direct routes into flattened leaves", () => {
+    renderOperator({ collapsed: true, pathname: "/operator" });
 
-    const anchor = screen.getByTestId("nav-observability");
-    expect(anchor.tagName).toBe("A");
-    expect(anchor).toHaveAttribute("href", "/operator/observability");
-
-    fireEvent.mouseEnter(
-      screen.getByTestId("sidebar-group-observability-collapsed"),
-    );
-
-    const flyout = screen.getByTestId("sidebar-flyout");
-    expect(
-      within(flyout).getByRole("link", { name: "Business" }),
-    ).toHaveAttribute("href", "/operator/observability/business");
+    for (const key of [
+      "business",
+      "product",
+      "usage",
+      "reliability",
+      "health",
+      "cost",
+      "quality",
+      "security",
+      "evals",
+    ]) {
+      expect(screen.getByTestId(`nav-${key}`)).toBeInTheDocument();
+    }
+    expect(screen.queryByTestId("sidebar-group-metrics-collapsed")).toBeNull();
+    expect(screen.queryByTestId("sidebar-flyout")).toBeNull();
   });
 
-  it("renders the sub-destinations as live links in the collapsed flyout", () => {
-    renderOperator({ collapsed: true, pathname: "/operator/observability" });
+  it("renders settings as a live link", () => {
+    renderOperator({ collapsed: false, pathname: "/operator" });
 
-    fireEvent.mouseEnter(
-      screen.getByTestId("sidebar-group-observability-collapsed"),
-    );
-
-    const settings = within(screen.getByTestId("sidebar-flyout")).getByTestId(
-      "nav-settings",
-    );
-    // #747: Settings un-sooned to a live placeholder shell, so the flyout
+    const settings = screen.getByTestId("nav-settings");
+    // #747: Settings un-sooned to a live placeholder shell, so navigation
     // carries it as a link too.
     expect(settings.tagName).toBe("A");
-    expect(settings).toHaveAttribute(
-      "href",
-      "/operator/observability/settings",
-    );
+    expect(settings).toHaveAttribute("href", "/operator/settings");
   });
 });

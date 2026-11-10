@@ -3,6 +3,9 @@
 Single client initialized once at startup, pinged, and closed at shutdown.
 Empty REDIS_URL creates no client. Unreachable Redis logs a non-fatal warning
 and leaves all cache callers on SQL fallback.
+
+Runtime toggle ``redis.enabled`` is respected via in-process atomic flag
+(ticket #895): when false, ``get_redis_client`` returns ``None`` immediately.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import redis.asyncio as redis
 from redis.asyncio import Redis
 
 from app.config import Settings
+from app.runtime_toggles import redis_enabled
 
 _LOG = logging.getLogger(__name__)
 
@@ -60,5 +64,11 @@ def get_redis_client() -> Redis | None:
     """Return the active shared Redis client, or None if unavailable.
 
     Callers MUST treat None as a cache miss and fall back to SQL.
+
+    Respects the ``redis.enabled`` runtime toggle (ticket #895): returns
+    ``None`` immediately when the toggle is off, without touching the
+    underlying connection pool.
     """
+    if not redis_enabled():
+        return None
     return _REDIS_CLIENT

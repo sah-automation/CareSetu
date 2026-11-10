@@ -18,7 +18,9 @@
 // health) and the ticket's latency-percentiles chart is the health route's
 // headline.
 
-import { LatencyPercentileChart } from "@/components/observability/HealthCharts";
+import { Suspense } from "react";
+import dynamic from "next/dynamic";
+
 import {
   ObservabilityPanelPage,
   ReadPanel,
@@ -26,6 +28,14 @@ import {
 import { fetchHealth, fetchLatency } from "@/lib/operator/observability";
 import { formatDuration } from "@/lib/operator/observability-format";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
+
+const LatencyPercentileChart = dynamic(
+  () =>
+    import("@/components/observability/HealthCharts").then(
+      (mod) => mod.LatencyPercentileChart,
+    ),
+  { ssr: false, loading: () => null },
+);
 
 /** No latency sample has been rolled yet. */
 const NO_LATENCY_BODY =
@@ -94,10 +104,12 @@ export default function ObservabilityHealthPage() {
           }
         >
           {(report) => (
-            <LatencyPercentileChart
-              rows={report.providers}
-              testId="health-latency-chart"
-            />
+            <Suspense fallback={null}>
+              <LatencyPercentileChart
+                rows={report.providers}
+                testId="health-latency-chart"
+              />
+            </Suspense>
           )}
         </ReadPanel>
 

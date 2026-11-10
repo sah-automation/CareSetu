@@ -63,6 +63,16 @@ function hasSessionCookie(request: NextRequest): boolean {
 }
 
 export function proxy(request: NextRequest): NextResponse {
+  // Route migration: the legacy Settings surface moved from the
+  // observability group to a top-level entry. Redirect before the cookie
+  // guard so authenticated and unauthenticated bookmarks both land on the
+  // new route.
+  if (request.nextUrl.pathname === "/operator/observability/settings") {
+    const target = request.nextUrl.clone();
+    target.pathname = "/operator/settings";
+    return NextResponse.redirect(target, 301);
+  }
+
   if (hasSessionCookie(request)) {
     return NextResponse.next();
   }

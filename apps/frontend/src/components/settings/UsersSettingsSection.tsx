@@ -22,35 +22,157 @@ import {
   type OperatorSummary,
 } from "@/lib/operator/api";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
+import type { AuditEventView } from "@/lib/audit/api";
+import * as auditApi from "@/lib/audit/api";
+import * as operatorApi from "@/lib/operator/api";
 
-import { SettingsSection } from "./SettingsSection";
+import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 
 type UsersStrings = OperatorSettingsStrings["users"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
-
-function tierBadgeVariant(tier: string): "default" | "destructive" {
-  return tier === "admin" ? "destructive" : "default";
-}
-
-function tierLabel(tier: string, t: UsersStrings): string {
-  return tier === "admin" ? t.tierAdmin : t.tierOperator;
-}
-
-function activeLabel(isActive: boolean, t: UsersStrings): string {
-  return isActive ? t.active : t.inactive;
-}
 
 function mfaLabel(enabled: boolean, t: UsersStrings): string {
   return enabled ? t.mfaEnabled : t.mfaDisabled;
 }
 
+function formatTimestamp(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function UsersHistory({
+  entries,
+  t,
+  status,
+  errorMessage,
+  onRetry,
+}: {
+  entries: AuditEventView[];
+  t: UsersStrings;
+  status: "loading" | "ready" | "error";
+  errorMessage: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      className="mt-5 border-t border-hairline pt-4"
+      data-testid="settings-users-history"
+    >
+      <h3
+        className="text-sm font-medium text-txt-sub"
+        data-testid="settings-users-history-title"
+      >
+        {t.historyTitle}
+      </h3>
+      <p className="mt-0.5 text-xs text-txt-muted">{t.historyDescription}</p>
+
+      {status === "loading" && (
+        <div className="mt-2" data-testid="settings-users-history-loading">
+          <Skeleton className="h-16 w-full" />
+        </div>
+      )}
+
+      {status === "error" && (
+        <div
+          role="alert"
+          className="mt-2 rounded-md border border-danger-border bg-danger-soft px-3 py-2"
+          data-testid="settings-users-history-error"
+        >
+          <p className="text-sm text-danger">{errorMessage}</p>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="mt-2 inline-flex min-h-9 items-center rounded-md border border-danger-border px-3 text-xs font-medium text-danger hover:bg-danger-soft/60"
+            data-testid="settings-users-history-retry"
+          >
+            {t.historyRetry}
+          </button>
+        </div>
+      )}
+
+      {status === "ready" && entries.length === 0 && (
+        <p
+          className="mt-2 text-sm text-txt-muted"
+          data-testid="settings-users-history-empty"
+        >
+          {t.historyEmpty}
+        </p>
+      )}
+
+      {status === "ready" && entries.length > 0 && (
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-hairline text-xs text-txt-muted">
+                <th scope="col" className="py-2 pr-3 font-medium">
+                  {t.historyEvent}
+                </th>
+                <th scope="col" className="py-2 pr-3 font-medium">
+                  {t.historyChangedBy}
+                </th>
+                <th scope="col" className="py-2 font-medium">
+                  {t.historyChangedAt}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((entry) => (
+                <tr
+                  key={entry.id}
+                  className="border-b border-hairline last:border-0"
+                  data-testid={`settings-users-history-row-${entry.id}`}
+                >
+                  <th
+                    scope="row"
+                    className="py-2 pr-3 font-mono text-xs font-normal text-txt"
+                  >
+                    {entry.event_type}
+                  </th>
+                  <td className="py-2 pr-3 text-txt">
+                    {entry.actor_id ?? t.historyUnknownActor}
+                  </td>
+                  <td className="py-2 text-txt">
+                    {formatTimestamp(entry.timestamp)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
   const u = t.users;
   const operatorsRead = usePanelRead(() => fetchOperators());
-  const [draftTier, setDraftTier] = useState<
-    Record<number, "admin" | "operator">
-  >({});
-  const [draftActive, setDraftActive] = useState<Record<number, boolean>>({});
+  const historyRead = usePanelRead<AuditEventView[]>(() => {
+    const auditResult = auditApi.fetchOperatorChangeHistory?.();
+    if (
+      auditResult &&
+      typeof (auditResult as Promise<unknown>).then === "function"
+    ) {
+      return auditResult as Promise<AuditEventView[]>;
+    }
+    const operatorResult = operatorApi.fetchOperatorChangeHistory?.();
+    if (
+      operatorResult &&
+      typeof (operatorResult as Promise<unknown>).then === "function"
+    ) {
+      return operatorResult as Promise<AuditEventView[]>;
+    }
+    return Promise.resolve([] as AuditEventView[]);
+  });
   const [saveStates, setSaveStates] = useState<Record<number, SaveStatus>>({});
   const [saveErrors, setSaveErrors] = useState<Record<number, string>>({});
   const [showInviteModal, setShowInviteModal] = useState(false);
@@ -61,29 +183,10 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
   const [inviteState, setInviteState] = useState<SaveStatus>("idle");
   const [inviteError, setInviteError] = useState<string | null>(null);
 
-  function handleTierDraft(identityId: number, tier: "admin" | "operator") {
-    setDraftTier((current) => ({ ...current, [identityId]: tier }));
-    setSaveStates((current) => ({ ...current, [identityId]: "idle" }));
-    setSaveErrors((current) => {
-      if (!(identityId in current)) return current;
-      const next = { ...current };
-      delete next[identityId];
-      return next;
-    });
-  }
-
-  function handleActiveDraft(identityId: number, isActive: boolean) {
-    setDraftActive((current) => ({ ...current, [identityId]: isActive }));
-    setSaveStates((current) => ({ ...current, [identityId]: "idle" }));
-    setSaveErrors((current) => {
-      if (!(identityId in current)) return current;
-      const next = { ...current };
-      delete next[identityId];
-      return next;
-    });
-  }
-
-  async function handleTierSave(operator: OperatorSummary) {
+  async function handleTierSave(
+    operator: OperatorSummary,
+    newTier: "admin" | "operator",
+  ) {
     setSaveErrors((current) => {
       if (!(operator.identity_id in current)) return current;
       const next = { ...current };
@@ -91,7 +194,7 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
       return next;
     });
 
-    const tier = draftTier[operator.identity_id] ?? operator.tier;
+    const tier = newTier;
 
     setSaveStates((current) => ({
       ...current,
@@ -103,13 +206,8 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
         ...current,
         [operator.identity_id]: "saved",
       }));
-      setDraftTier((current) => {
-        if (!(operator.identity_id in current)) return current;
-        const next = { ...current };
-        delete next[operator.identity_id];
-        return next;
-      });
       operatorsRead.reload();
+      historyRead.reload();
     } catch (error) {
       setSaveStates((current) => ({
         ...current,
@@ -125,15 +223,16 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
     }
   }
 
-  async function handleActiveSave(operator: OperatorSummary) {
+  async function handleActiveSave(
+    operator: OperatorSummary,
+    isActive: boolean,
+  ) {
     setSaveErrors((current) => {
       if (!(operator.identity_id in current)) return current;
       const next = { ...current };
       delete next[operator.identity_id];
       return next;
     });
-
-    const isActive = draftActive[operator.identity_id] ?? operator.is_active;
 
     setSaveStates((current) => ({
       ...current,
@@ -145,13 +244,8 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
         ...current,
         [operator.identity_id]: "saved",
       }));
-      setDraftActive((current) => {
-        if (!(operator.identity_id in current)) return current;
-        const next = { ...current };
-        delete next[operator.identity_id];
-        return next;
-      });
       operatorsRead.reload();
+      historyRead.reload();
     } catch (error) {
       setSaveStates((current) => ({
         ...current,
@@ -176,6 +270,7 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
       setInvitePhone("");
       setInviteTier("operator");
       operatorsRead.reload();
+      historyRead.reload();
       setTimeout(() => {
         setShowInviteModal(false);
         setInviteState("idle");
@@ -191,7 +286,8 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
   }
 
   return (
-    <SettingsSection
+    <CollapsibleSettingsSection
+      sectionKey="users"
       testId="settings-users"
       title={t.sections.users}
       description={t.users.description}
@@ -292,9 +388,8 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
                 {operatorsRead.data.map((operator) => {
                   const status = saveStates[operator.identity_id] ?? "idle";
                   const error = saveErrors[operator.identity_id];
-                  const tier = draftTier[operator.identity_id] ?? operator.tier;
-                  const isActive =
-                    draftActive[operator.identity_id] ?? operator.is_active;
+                  const tier = operator.tier as "admin" | "operator";
+                  const isActive = operator.is_active;
                   return (
                     <tr
                       key={operator.identity_id}
@@ -310,13 +405,13 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
                       <td className="py-2 pr-3">
                         <select
                           value={tier}
+                          disabled={status === "saving"}
                           onChange={(e) =>
-                            handleTierDraft(
-                              operator.identity_id,
+                            void handleTierSave(
+                              operator,
                               e.target.value as "admin" | "operator",
                             )
                           }
-                          disabled={status === "saving"}
                           className="text-sm border border-hairline rounded px-2 py-1 bg-surface focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                           data-testid={`settings-users-tier-${operator.identity_id}`}
                         >
@@ -325,21 +420,20 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
                         </select>
                       </td>
                       <td className="py-2 pr-3">
-                        <select
-                          value={String(isActive)}
-                          onChange={(e) =>
-                            handleActiveDraft(
-                              operator.identity_id,
-                              e.target.value === "true",
-                            )
-                          }
-                          disabled={status === "saving"}
-                          className="text-sm border border-hairline rounded px-2 py-1 bg-surface focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                          data-testid={`settings-users-active-${operator.identity_id}`}
-                        >
-                          <option value="true">{u.active}</option>
-                          <option value="false">{u.inactive}</option>
-                        </select>
+                        <label className="inline-flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={isActive}
+                            disabled={status === "saving"}
+                            onChange={(e) =>
+                              void handleActiveSave(operator, e.target.checked)
+                            }
+                            data-testid={`settings-users-active-${operator.identity_id}`}
+                          />
+                          <span className="text-xs text-txt-muted">
+                            {isActive ? u.active : u.inactive}
+                          </span>
+                        </label>
                       </td>
                       <td className="py-2 pr-3">
                         <Badge
@@ -356,31 +450,14 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
                       </td>
                       <td className="py-2">
                         <div className="flex flex-col gap-1">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            disabled={
-                              status === "saving" || tier === operator.tier
-                            }
-                            onClick={() => handleTierSave(operator)}
-                            data-testid={`settings-users-save-tier-${operator.identity_id}`}
-                          >
-                            {status === "saving" ? u.saving : u.saveTier}
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            disabled={
-                              status === "saving" ||
-                              isActive === operator.is_active
-                            }
-                            onClick={() => handleActiveSave(operator)}
-                            data-testid={`settings-users-save-active-${operator.identity_id}`}
-                          >
-                            {status === "saving" ? u.saving : u.saveActive}
-                          </Button>
+                          {status === "saving" && (
+                            <span
+                              className="text-xs text-txt-muted"
+                              data-testid={`settings-users-saving-${operator.identity_id}`}
+                            >
+                              {u.saving}
+                            </span>
+                          )}
                           {status === "saved" && (
                             <span
                               className="text-xs text-success"
@@ -407,6 +484,18 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
             </table>
           </div>
         )}
+
+      <UsersHistory
+        entries={(historyRead.data ?? []) as AuditEventView[]}
+        t={u}
+        status={historyRead.status}
+        errorMessage={
+          historyRead.error?.expected
+            ? t.users.historyErrorExpected
+            : t.users.historyError
+        }
+        onRetry={historyRead.reload}
+      />
 
       {showInviteModal && (
         <div
@@ -493,6 +582,6 @@ export function UsersSettingsSection({ t }: { t: OperatorSettingsStrings }) {
           </div>
         </div>
       )}
-    </SettingsSection>
+    </CollapsibleSettingsSection>
   );
 }

@@ -56,6 +56,9 @@ from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped
 from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+# Cache module runtime toggle handlers (ticket #895) - not a MODULE_SCHEMAS module,
+# so registered separately in build_registry().
+from app.cache import register_handlers as cache_register_handlers
 from app.config import Settings, get_settings
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import (
@@ -238,6 +241,9 @@ def build_registry() -> HandlerRegistry:
     registry = HandlerRegistry()
     for register_handlers in _MODULE_REGISTERS:
         register_handlers(registry)
+    # Cache module runtime toggle handlers (ticket #895) - not a MODULE_SCHEMAS
+    # module, so registered separately after the module loop.
+    cache_register_handlers(registry)
     return registry
 
 
@@ -746,6 +752,11 @@ async def run_worker_until_stopped(
     alone.
     """
     resolved_settings = settings if settings is not None else get_settings()
+    # Seed in-process runtime toggles from resolved settings for consistency.
+    from app.runtime_toggles import set_cache_enabled, set_redis_enabled
+
+    set_cache_enabled(resolved_settings.cache_enabled)
+    set_redis_enabled(resolved_settings.redis_enabled)
     # PHASE-14A A1 (#694): configure structured logging once at the worker
     # composition root so the dispatcher's lines are JSON/console-rendered and
     # carry the service identity + trace id. Never raises.

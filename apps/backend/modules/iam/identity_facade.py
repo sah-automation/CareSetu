@@ -906,15 +906,11 @@ class IdentityFacade:
                         iam_identities.c.status,
                         iam_identities.c.phone_e164,
                         iam_identities.c.created_at,
-                        func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
                     )
                     .select_from(
                         iam_operator_profiles.join(
                             iam_identities,
                             iam_identities.c.id == iam_operator_profiles.c.identity_id,
-                        ).outerjoin(
-                            iam_operator_mfa,
-                            iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
                         )
                     )
                     .where(iam_operator_profiles.c.identity_id == identity_id)
@@ -929,11 +925,18 @@ class IdentityFacade:
                     .where(iam_operator_profiles.c.identity_id == identity_id)
                     .values(name=normalised, updated_at=self._clock())
                 )
+            mfa_row = (
+                await connection.execute(
+                    select(func.coalesce(iam_operator_mfa.c.mfa_enabled, False)).where(
+                        iam_operator_mfa.c.identity_id == identity_id
+                    )
+                )
+            ).first()
             tier = locked[0]
             photo_ref = locked[3]
             phone = locked[5]
             created_at = locked[6]
-            mfa_enabled = locked[7]
+            mfa_enabled = bool(mfa_row[0]) if mfa_row is not None else False
         return OperatorProfileView(
             identity_id=identity_id,
             name=normalised,

@@ -11,10 +11,9 @@
 // budget figure that is right there and correct. Every state - loading, empty,
 // failure with retry - belongs to the panel that owns the read (blueprint §9.1).
 
-import {
-  CostBudgetChart,
-  DailyCostTrendChart,
-} from "@/components/observability/CostCharts";
+import { Suspense } from "react";
+import dynamic from "next/dynamic";
+
 import {
   ObservabilityPanelPage,
   ReadPanel,
@@ -22,6 +21,22 @@ import {
 import { fetchCost, fetchCostTrend } from "@/lib/operator/observability";
 import { formatMoney, formatPct } from "@/lib/operator/observability-format";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
+
+const CostBudgetChart = dynamic(
+  () =>
+    import("@/components/observability/CostCharts").then(
+      (mod) => mod.CostBudgetChart,
+    ),
+  { ssr: false, loading: () => null },
+);
+
+const DailyCostTrendChart = dynamic(
+  () =>
+    import("@/components/observability/CostCharts").then(
+      (mod) => mod.DailyCostTrendChart,
+    ),
+  { ssr: false, loading: () => null },
+);
 
 /** Nothing is budgeted for this deployment - a fact about config, not usage. */
 const NO_BUDGET_BODY =
@@ -62,10 +77,12 @@ export default function ObservabilityCostPage() {
           }
         >
           {(summary) => (
-            <CostBudgetChart
-              budgets={summary.budgets}
-              testId="cost-budget-chart"
-            />
+            <Suspense fallback={null}>
+              <CostBudgetChart
+                budgets={summary.budgets}
+                testId="cost-budget-chart"
+              />
+            </Suspense>
           )}
         </ReadPanel>
 
@@ -84,10 +101,12 @@ export default function ObservabilityCostPage() {
           }
         >
           {(series) => (
-            <DailyCostTrendChart
-              points={series.points}
-              testId="cost-trend-chart"
-            />
+            <Suspense fallback={null}>
+              <DailyCostTrendChart
+                points={series.points}
+                testId="cost-trend-chart"
+              />
+            </Suspense>
           )}
         </ReadPanel>
       </div>

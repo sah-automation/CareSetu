@@ -460,7 +460,7 @@ describe("AiSettingsSection writes and history (#798)", () => {
     });
     // Called 3 times: initial AI + Notifications, then after save for AI + Notifications
     expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(3);
-    expect(mockFetchSettingHistory).toHaveBeenCalledTimes(2);
+    expect(mockFetchSettingHistory).toHaveBeenCalledTimes(3);
   });
 
   it("saves a boolean with the checkbox value", async () => {

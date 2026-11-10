@@ -468,3 +468,11 @@ export async function deleteOperatorProfilePhoto(
     headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey) },
   });
 }
+
+// Operator user-management audit history seam (re-exported for settings).
+export {
+  fetchOperatorChangeHistory,
+  fetchOperatorAuditHistory,
+  fetchOperatorHistory,
+  fetchAuditEvents as fetchOperatorAuditEvents,
+} from "@/lib/audit/api";

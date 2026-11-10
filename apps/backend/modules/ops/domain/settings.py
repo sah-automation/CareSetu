@@ -20,6 +20,8 @@ from typing import Any
 
 from app.config import Settings
 
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
 
 class SettingSource(StrEnum):
     """Source of an effective setting value."""
@@ -220,8 +222,40 @@ COMPOSITION_ROOT_READ_ONLY_KEYS: frozenset[str] = frozenset(
 )
 
 
-ALL_READ_ONLY_KEYS: frozenset[str] = READ_ONLY_SENSITIVE_KEYS | COMPOSITION_ROOT_READ_ONLY_KEYS
-ALL_EDITABLE_KEYS: frozenset[str] = EDITABLE_AI_KEYS | EDITABLE_NOTIFICATION_KEYS
+# Editable runtime switches for cache/redis (restart_required=false)
+EDITABLE_CACHE_REDIS_KEYS: frozenset[str] = frozenset(
+    {
+        "cache.enabled",
+        "redis.enabled",
+    }
+)
+
+
+# Read-only boot-time params for cache/redis/scaling (restart_required=true)
+READ_ONLY_BOOTTIME_KEYS: frozenset[str] = frozenset(
+    {
+        "redis.max_connections",
+        "redis.socket_connect_timeout_seconds",
+        "redis.socket_timeout_seconds",
+        "redis.consent_ttl_seconds",
+        "redis.directory_ttl_seconds",
+        "redis.rate_limit_key_prefix",
+        "cache.ttl_seconds",
+        "cache.max_entries",
+        "scaling.max_workers",
+        "scaling.queue_timeout_seconds",
+        "scaling.rate_limit_rps",
+        "scaling.rate_limit_backend",
+    }
+)
+
+
+ALL_READ_ONLY_KEYS: frozenset[str] = (
+    READ_ONLY_SENSITIVE_KEYS | COMPOSITION_ROOT_READ_ONLY_KEYS | READ_ONLY_BOOTTIME_KEYS
+)
+ALL_EDITABLE_KEYS: frozenset[str] = (
+    EDITABLE_AI_KEYS | EDITABLE_NOTIFICATION_KEYS | EDITABLE_CACHE_REDIS_KEYS
+)
 
 
 def is_editable(key: str) -> bool:
@@ -237,7 +271,13 @@ def requires_restart(key: str) -> bool:
         return True
     if key in COMPOSITION_ROOT_READ_ONLY_KEYS:
         return True
-    if key in EDITABLE_AI_KEYS or key in EDITABLE_NOTIFICATION_KEYS:
+    if key in READ_ONLY_BOOTTIME_KEYS:
+        return True
+    if (
+        key in EDITABLE_AI_KEYS
+        or key in EDITABLE_NOTIFICATION_KEYS
+        or key in EDITABLE_CACHE_REDIS_KEYS
+    ):
         return False
     return False
 
@@ -352,6 +392,64 @@ class EffectiveSettingsResolver:
             return getattr(
                 self._settings, "dispatcher_in_process_enabled", None
             ), SettingSource.DEFAULT.value
+        # Editable runtime switches for cache/redis. Source is environment per spec
+        # (they derive from env config), falling back to the Settings attribute.
+        if key == "cache.enabled":
+            return getattr(self._settings, "cache_enabled", True), SettingSource.ENVIRONMENT.value
+        if key == "redis.enabled":
+            value = getattr(self._settings, "redis_enabled", None)
+            if value is None:
+                value = bool(getattr(self._settings, "redis_url", "") or "")
+            return value, SettingSource.ENVIRONMENT.value
+        # Read-only boot-time params for redis
+        if key == "redis.max_connections":
+            return getattr(
+                self._settings, "redis_max_connections", None
+            ), SettingSource.ENVIRONMENT.value
+        if key == "redis.socket_connect_timeout_seconds":
+            return getattr(
+                self._settings, "redis_socket_connect_timeout_seconds", None
+            ), SettingSource.ENVIRONMENT.value
+        if key == "redis.socket_timeout_seconds":
+            return getattr(
+                self._settings, "redis_socket_timeout_seconds", None
+            ), SettingSource.ENVIRONMENT.value
+        if key == "redis.consent_ttl_seconds":
+            return getattr(
+                self._settings, "redis_consent_ttl_seconds", None
+            ), SettingSource.ENVIRONMENT.value
+        if key == "redis.directory_ttl_seconds":
+            return getattr(
+                self._settings, "redis_directory_ttl_seconds", None
+            ), SettingSource.ENVIRONMENT.value
+        if key == "redis.rate_limit_key_prefix":
+            return getattr(
+                self._settings, "redis_rate_limit_key_prefix", None
+            ), SettingSource.ENVIRONMENT.value
+        # Read-only boot-time params for cache
+        if key == "cache.ttl_seconds":
+            return getattr(
+                self._settings, "profile_cache_ttl_seconds", None
+            ), SettingSource.ENVIRONMENT.value
+        if key == "cache.max_entries":
+            return getattr(
+                self._settings, "http_counter_max_series", None
+            ), SettingSource.ENVIRONMENT.value
+        # Read-only boot-time params for scaling
+        if key == "scaling.max_workers":
+            return getattr(self._settings, "uvicorn_workers", None), SettingSource.ENVIRONMENT.value
+        if key == "scaling.queue_timeout_seconds":
+            return getattr(
+                self._settings, "dispatcher_claim_timeout_seconds", None
+            ), SettingSource.ENVIRONMENT.value
+        if key == "scaling.rate_limit_rps":
+            return getattr(
+                self._settings, "gateway_rate_limit_auth_max_requests", None
+            ), SettingSource.ENVIRONMENT.value
+        if key == "scaling.rate_limit_backend":
+            return getattr(
+                self._settings, "rate_limit_backend", None
+            ), SettingSource.ENVIRONMENT.value
         return None, SettingSource.DEFAULT.value
 
     def _get_notification_default(self, key: str) -> tuple[object | None, str]:
@@ -372,8 +470,10 @@ class EffectiveSettingsResolver:
         all_keys = (
             list(EDITABLE_AI_KEYS)
             + list(EDITABLE_NOTIFICATION_KEYS)
+            + list(EDITABLE_CACHE_REDIS_KEYS)
             + list(READ_ONLY_SENSITIVE_KEYS)
             + list(COMPOSITION_ROOT_READ_ONLY_KEYS)
+            + list(READ_ONLY_BOOTTIME_KEYS)
         )
         for key in sorted(set(all_keys)):
             source = SettingSource.DEFAULT.value
@@ -384,15 +484,10 @@ class EffectiveSettingsResolver:
                 source = SettingSource.DATABASE.value
             else:
                 # Check env/default via settings
-                val, _ = self._get_from_env_or_default(key)
+                val, src = self._get_from_env_or_default(key)
                 if val is not None and not (isinstance(val, str) and val == ""):
-                    # If it came from env, mark as environment; otherwise default
-                    # For simplicity in this context, treat as environment or default
-                    source = (
-                        SettingSource.ENVIRONMENT.value
-                        if key in READ_ONLY_SENSITIVE_KEYS or key in COMPOSITION_ROOT_READ_ONLY_KEYS
-                        else SettingSource.DEFAULT.value
-                    )
+                    # Use the source returned by the resolver (environment or default)
+                    source = src
                     value = val
                 else:
                     # Check notification defaults only for notification keys
@@ -534,3 +629,23 @@ def validate_notification_setting(key: str, value: object) -> None:
         validate_channel_enabled(value)
     else:
         raise ValueError(f"Unknown notification setting key: {key}")
+
+
+def validate_cache_redis_setting(key: str, value: object) -> None:
+    """Validate a cache/redis runtime switch write.
+
+    Args:
+        key: The setting key (must be "cache.enabled" or "redis.enabled").
+        value: The value to validate.
+
+    Raises:
+        ValueError: If the value is not a boolean.
+    """
+    if key == "cache.enabled":
+        if not isinstance(value, bool):
+            raise ValueError("cache.enabled must be a boolean (true/false)")
+    elif key == "redis.enabled":
+        if not isinstance(value, bool):
+            raise ValueError("redis.enabled must be a boolean (true/false)")
+    else:
+        raise ValueError(f"Unknown cache/redis setting key: {key}")

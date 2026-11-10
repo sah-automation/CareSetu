@@ -10,11 +10,13 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.db import AsyncEngineLike
-from bus.events import EVENT_AUDIT_EVENT
+from bus.events import EVENT_AUDIT_EVENT, EVENT_OPS_RUNTIME_SETTING_CHANGED
+from modules.ops.domain.events import OpsRuntimeSettingChangedPayload
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.settings import (
     ALL_EDITABLE_KEYS,
     EDITABLE_AI_KEYS,
+    EDITABLE_CACHE_REDIS_KEYS,
     EDITABLE_NOTIFICATION_KEYS,
     EffectiveSetting,
     EffectiveSettingsResolver,
@@ -26,6 +28,7 @@ from modules.ops.domain.settings import (
     OpsSettingsCache,
     SettingHistoryEntry,
     validate_ai_setting,
+    validate_cache_redis_setting,
     validate_feature_flag_write,
     validate_notification_setting,
 )
@@ -328,6 +331,8 @@ class OpsFacade:
                 validate_ai_setting(setting_key, value)
             elif setting_key in EDITABLE_NOTIFICATION_KEYS:
                 validate_notification_setting(setting_key, value)
+            elif setting_key in EDITABLE_CACHE_REDIS_KEYS:
+                validate_cache_redis_setting(setting_key, value)
         except ValueError as exc:
             raise InvalidSettingWriteError(setting_key, str(exc)) from exc
 
@@ -397,6 +402,22 @@ class OpsFacade:
                     attempts=0,
                 )
             )
+
+            # Emit runtime setting changed event for cache/redis switches
+            if setting_key in ("cache.enabled", "redis.enabled"):
+                runtime_event = OpsRuntimeSettingChangedPayload(
+                    key=setting_key, value=value, version=new_version
+                )
+                await connection.execute(
+                    ops_outbox.insert().values(
+                        event_id=uuid4(),
+                        event_type=EVENT_OPS_RUNTIME_SETTING_CHANGED,
+                        payload=runtime_event.model_dump(mode="json"),
+                        occurred_at=datetime.now(UTC),
+                        status="pending",
+                        attempts=0,
+                    )
+                )
 
         # Invalidate cache so the next effective read resolves the new value
         self._cache.invalidate()

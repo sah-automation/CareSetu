@@ -377,6 +377,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resolved_settings.langfuse_secret_key,
             resolved_settings.langfuse_host,
         )
+        # Seed in-process runtime toggles from the resolved settings so env-driven
+        # defaults (cache.enabled/redis.enabled) apply without a server restart.
+        from app.runtime_toggles import set_cache_enabled, set_redis_enabled
+
+        set_cache_enabled(resolved_settings.cache_enabled)
+        set_redis_enabled(resolved_settings.redis_enabled)
         # Initialize shared Redis client for consent-status and directory-search
         # caches (both degrade to SQL when absent/unhealthy)
         await init_redis_client(resolved_settings)

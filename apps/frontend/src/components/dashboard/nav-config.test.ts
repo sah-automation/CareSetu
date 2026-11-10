@@ -53,11 +53,20 @@ describe("NAV_CONFIG", () => {
           (item.key === "cases" ||
             item.key === "patients" ||
             item.key === "profile");
-        // #708: the operator's Observability entry joins them - the console has
-        // a live overview page behind it, so it may not read as coming-soon.
+        // #889: the observability leaves, settings and profile are live entries.
         const isLiveOperatorTab =
           role === "operator" &&
-          (item.key === "observability" || item.key === "profile");
+          (item.key === "business" ||
+            item.key === "product" ||
+            item.key === "usage" ||
+            item.key === "reliability" ||
+            item.key === "health" ||
+            item.key === "cost" ||
+            item.key === "quality" ||
+            item.key === "security" ||
+            item.key === "evals" ||
+            item.key === "settings" ||
+            item.key === "profile");
         expect(item.soon, `${role}/${item.key}`).toBe(
           isLiveDoctorTab || isLiveOperatorTab ? undefined : true,
         );
@@ -219,87 +228,113 @@ describe("isNavItemActive (#744)", () => {
   });
 });
 
-describe("operator Observability group (#744)", () => {
-  const parent = NAV_CONFIG.operator.find(
-    (item) => item.key === "observability",
-  );
-
-  it("is a disclosure parent in its own section, landing on Overview", () => {
-    expect(parent?.group).toBe("observability");
-    expect(parent?.href).toBe("/operator/observability");
-    // The console is live, not a placeholder.
-    expect(parent?.soon).toBeUndefined();
-    expect(parent?.children?.length).toBeGreaterThan(0);
-  });
-
-  it("declares the decision-28 sub-destinations in order", () => {
-    // Spec #717 decision 28: Observability holds Overview, Business, Product,
-    // Reliability, the four existing AI panels, Security and Settings. #745
-    // renders this exact order as the disclosure's sub-menu, so the order is a
-    // contract, not an incidental detail.
-    expect(parent?.children?.map((child) => child.key)).toEqual([
-      "overview",
+describe("operator nav groups (#874)", () => {
+  it("has observability leaves as top-level entries (#889)", () => {
+    const keys = NAV_CONFIG.operator.map((item) => item.key);
+    expect(keys).not.toContain("observability");
+    expect(keys).not.toContain("metrics");
+    expect(keys).not.toContain("qualitySecurity");
+    for (const key of [
       "business",
       "product",
-      "reliability",
-      "cost",
       "usage",
-      "quality",
+      "reliability",
       "health",
+      "cost",
+      "quality",
       "security",
-      "settings",
       "evals",
-    ]);
-    // #747: no sub-destination is a coming-soon stub any more. Settings is the
-    // placeholder shell behind a live page, so the whole sub-menu is clickable.
-    expect(
-      parent?.children?.filter((child) => child.soon).map((child) => child.key),
-    ).toEqual([]);
+      "settings",
+    ]) {
+      expect(keys).toContain(key);
+    }
   });
 
-  it("keeps Settings live as the #747 placeholder shell", () => {
-    const settings = parent?.children?.find(
-      (child) => child.key === "settings",
+  it("declares the observability leaves with their group metadata (#889)", () => {
+    const byKey = Object.fromEntries(
+      NAV_CONFIG.operator.map((item) => [item.key, item]),
     );
-
-    expect(settings?.href).toBe("/operator/observability/settings");
-    expect(settings?.soon).toBeUndefined();
+    expect(byKey.business?.group).toBe("metrics");
+    expect(byKey.product?.group).toBe("metrics");
+    expect(byKey.usage?.group).toBe("metrics");
+    expect(byKey.reliability?.group).toBe("reliability");
+    expect(byKey.health?.group).toBe("reliability");
+    expect(byKey.cost?.group).toBe("reliability");
+    expect(byKey.quality?.group).toBe("qualitySecurity");
+    expect(byKey.security?.group).toBe("qualitySecurity");
+    expect(byKey.evals?.group).toBe("qualitySecurity");
+    for (const key of [
+      "business",
+      "product",
+      "usage",
+      "reliability",
+      "health",
+      "cost",
+      "quality",
+      "security",
+      "evals",
+    ]) {
+      expect(byKey[key]?.children).toBeUndefined();
+      expect(byKey[key]?.mobileOverflow).toBe(true);
+    }
   });
 
-  it("keeps the Work entries as they were and adds Observability and Account sections", () => {
-    const sections = sidebarSections(NAV_CONFIG.operator);
+  it("keeps settings as a flat admin-only account entry", () => {
+    const settings = NAV_CONFIG.operator.find(
+      (item) => item.key === "settings",
+    );
+    expect(settings).toMatchObject({
+      labelKey: "settings",
+      href: "/operator/settings",
+      group: "account",
+      adminOnly: true,
+    });
+    expect(settings?.children).toBeUndefined();
+  });
 
+  it("orders sidebar sections as work, metrics, reliability, qualitySecurity, account", () => {
+    const sections = sidebarSections(NAV_CONFIG.operator);
     expect(sections.map((section) => section.labelKey)).toEqual([
       "work",
-      "observability",
+      "metrics",
+      "reliability",
+      "qualitySecurity",
       "account",
     ]);
-    expect(sections[0].items.map((item) => item.key)).toEqual([
+
+    const itemsByKey = (label: string | null) =>
+      sections.find((s) => s.labelKey === label)?.items.map((i) => i.key) ?? [];
+    expect(itemsByKey("work")).toEqual([
       "home",
       "verifications",
       "disputes",
       "audit",
     ]);
-    expect(sections[1].items.map((item) => item.key)).toEqual([
-      "observability",
+    expect(itemsByKey("metrics")).toEqual(["business", "product", "usage"]);
+    expect(itemsByKey("reliability")).toEqual([
+      "reliability",
+      "health",
+      "cost",
     ]);
-    expect(sections[2].items.map((item) => item.key)).toEqual(["profile"]);
+    expect(itemsByKey("qualitySecurity")).toEqual([
+      "quality",
+      "security",
+      "evals",
+    ]);
+    expect(itemsByKey("account")).toEqual(["settings", "profile"]);
   });
 
-  it("points the operator account entry at the live profile page", () => {
-    // #867/#868: the entry is a real destination in the account group, not a
-    // coming-soon placeholder, and it matches the route the AccountMenu links to.
+  it("points the operator account entry at the live profile page with mobileOverflow", () => {
     const profile = NAV_CONFIG.operator.find((item) => item.key === "profile");
-
     expect(profile).toMatchObject({
       labelKey: "profile",
       href: "/operator/profile",
       group: "account",
+      mobileOverflow: true,
     });
     expect(profile?.soon).toBeUndefined();
   });
 });
-
 describe("splitMobileTabs", () => {
   it("shapes the ratified five-column patient bar with Start Visit centered", () => {
     const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.patient);
@@ -370,12 +405,7 @@ describe("splitMobileTabs", () => {
       expect(overflow).toHaveLength(0);
     },
   );
-
-  // #746: a disclosure parent (an item carrying `children`) is not a flat tab -
-  // a tab column cannot expand a group - so the pinned-overflow rule sends it
-  // into the More sheet. The operator bar keeps the four Work destinations plus
-  // More; the parent and its nine sub-destinations live in the sheet.
-  it("pins the operator's disclosure parent into More (#746)", () => {
+  it("pins the operator's disclosure parents into More (#874)", () => {
     const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.operator);
 
     expect(tabs.map((item) => item.key)).toEqual([
@@ -383,11 +413,22 @@ describe("splitMobileTabs", () => {
       "verifications",
       "disputes",
       "audit",
-      "profile",
     ]);
     expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
     expect(hasMore).toBe(true);
-    expect(overflow.map((item) => item.key)).toEqual(["observability"]);
+    expect(overflow.map((item) => item.key)).toEqual([
+      "business",
+      "product",
+      "usage",
+      "reliability",
+      "health",
+      "cost",
+      "quality",
+      "security",
+      "evals",
+      "settings",
+      "profile",
+    ]);
   });
 
   it("keeps the first five destinations visible and pushes the rest into More", () => {

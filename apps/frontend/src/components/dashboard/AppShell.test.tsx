@@ -737,11 +737,19 @@ describe.each(["doctor", "partner", "operator"] as const)(
       setup();
 
       const config = NAV_CONFIG[role];
+      // The sidebar flattens disclosure parents into their leaves (#889), so
+      // walk leaves (children) for sidebar testids while retaining parents for
+      // other surfaces.
+      const sidebarKeys = config.flatMap((item) =>
+        item.children?.length
+          ? item.children.map((child) => child.key)
+          : [item.key],
+      );
       // Walk the configuration rather than a hand-kept list: every destination
       // is in the sidebar (nav-<key>), and the phone bar columns are exactly
       // what the split helper keeps off the More sheet (#746).
-      for (const item of config) {
-        expect(screen.getByTestId(`nav-${item.key}`)).toBeInTheDocument();
+      for (const key of sidebarKeys) {
+        expect(screen.getAllByTestId(`nav-${key}`).length).toBeGreaterThan(0);
       }
       for (const item of splitMobileTabs(config).tabs) {
         expect(screen.getByTestId(`tab-${item.key}`)).toBeInTheDocument();
@@ -786,25 +794,15 @@ describe("AppShell operator Observability parent (#744)", () => {
     return screen.getByTestId("more-sheet");
   }
 
-  it("marks the parent current on a nested sub-destination in both surfaces", () => {
+  it("marks the flattened leaf current on a nested sub-destination on every surface", () => {
     renderShell("operator", "/operator/observability/business");
 
-    // The group row is the current group ("true") in both surfaces; the
-    // destination row below it is the current page ("page"). One element per
-    // navigation set may claim the current page.
-    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
+    expect(screen.queryByTestId("nav-metrics")).toBeNull();
     expect(screen.getByTestId("nav-business")).toHaveAttribute(
       "aria-current",
       "page",
     );
     const sheet = openMore();
-    expect(within(sheet).getByTestId("more-observability")).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
     expect(within(sheet).getByTestId("more-business")).toHaveAttribute(
       "aria-current",
       "page",
@@ -814,11 +812,11 @@ describe("AppShell operator Observability parent (#744)", () => {
   it("stays unlit on a sibling that merely shares a string prefix", () => {
     renderShell("operator", "/operator/observability-archive");
 
-    expect(screen.getByTestId("nav-observability")).not.toHaveAttribute(
+    expect(screen.queryByTestId("nav-business")).not.toHaveAttribute(
       "aria-current",
     );
     const sheet = openMore();
-    expect(within(sheet).getByTestId("more-observability")).not.toHaveAttribute(
+    expect(within(sheet).getByTestId("more-business")).not.toHaveAttribute(
       "aria-current",
     );
   });
@@ -840,11 +838,13 @@ describe("AppShell operator mobile More sheet (#746)", () => {
     const sheet = openMore();
 
     for (const item of NAV_CONFIG.operator) {
-      expect(within(sheet).getByTestId(`more-${item.key}`)).toBeInTheDocument();
+      expect(
+        within(sheet).getAllByTestId(`more-${item.key}`).length,
+      ).toBeGreaterThan(0);
       for (const child of item.children ?? []) {
         expect(
-          within(sheet).getByTestId(`more-${child.key}`),
-        ).toBeInTheDocument();
+          within(sheet).getAllByTestId(`more-${child.key}`).length,
+        ).toBeGreaterThan(0);
       }
     }
 
@@ -852,19 +852,15 @@ describe("AppShell operator mobile More sheet (#746)", () => {
     expect(within(sheet).getByTestId("more-section-work")).toHaveTextContent(
       "Work",
     );
-    expect(
-      within(sheet).getByTestId("more-section-observability"),
-    ).toHaveTextContent("Observability");
+    expect(within(sheet).getByTestId("more-section-metrics")).toHaveTextContent(
+      "Metrics",
+    );
 
-    // Indentation: the sub-destinations sit inside the parent group's menu.
-    const menu = within(sheet).getByTestId("more-group-observability-menu");
-    expect(within(menu).getByTestId("more-business")).toHaveAttribute(
+    // Leaves sit inside the Metrics accordion panel.
+    const panel = within(sheet).getByTestId("more-panel-metrics");
+    expect(within(panel).getByTestId("more-business")).toHaveAttribute(
       "href",
       "/operator/observability/business",
-    );
-    expect(within(menu).getByTestId("more-overview")).toHaveAttribute(
-      "href",
-      "/operator/observability",
     );
   });
 
@@ -885,17 +881,14 @@ describe("AppShell operator mobile More sheet (#746)", () => {
     expect(within(sheet).getByTestId("more-business").tagName).toBe("A");
     const settings = within(sheet).getByTestId("more-settings");
     expect(settings.tagName).toBe("A");
-    expect(settings).toHaveAttribute(
-      "href",
-      "/operator/observability/settings",
-    );
+    expect(settings).toHaveAttribute("href", "/operator/settings");
   });
 
   it("keeps a disclosure parent off the phone bar, behind More", () => {
     renderShell("operator", "/operator");
 
     expect(screen.getByTestId("more-trigger")).toBeInTheDocument();
-    expect(screen.queryByTestId("tab-observability")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tab-metrics")).not.toBeInTheDocument();
     for (const key of ["home", "verifications", "disputes", "audit"]) {
       expect(screen.getByTestId(`tab-${key}`)).toBeInTheDocument();
     }
@@ -905,62 +898,34 @@ describe("AppShell operator mobile More sheet (#746)", () => {
 // #745: the grouped operator sidebar end to end through the shell - the
 // disclosure's sub-destinations render under their parent while the operator is
 // inside the group, and the collapsed rail still offers a way back in.
-describe("AppShell operator grouped sidebar (#745)", () => {
-  it("renders the Observability sub-destinations under their parent inside the group", () => {
+describe("AppShell operator flattened sidebar (#889)", () => {
+  it("renders the Metrics sub-destinations directly under their section", () => {
     renderShell("operator", "/operator/observability/business");
 
-    expect(screen.getByTestId("nav-observability")).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
-    const group = screen.getByTestId("sidebar-group-observability");
-    for (const key of [
-      "overview",
-      "business",
-      "product",
-      "reliability",
-      "cost",
-      "usage",
-      "quality",
-      "health",
-      "settings",
-    ]) {
-      expect(within(group).getByTestId(`nav-${key}`)).toBeInTheDocument();
+    const content = screen.getByTestId("sidebar-section-metrics-content");
+    for (const key of ["business", "product", "usage"]) {
+      expect(within(content).getByTestId(`nav-${key}`)).toBeInTheDocument();
     }
+    expect(screen.queryByTestId("sidebar-group-metrics")).toBeNull();
   });
 
-  it("renders every sub-destination as a live link inside the sub-menu", () => {
+  it("renders every sub-destination as a live link", () => {
     renderShell("operator", "/operator/observability/business");
-
-    const settings = within(
-      screen.getByTestId("sidebar-group-observability-menu"),
-    ).getByTestId("nav-settings");
-    // #747: Settings is a live placeholder shell, so it is a real link rather
-    // than the coming-soon span it used to be. No operator sub-destination is
-    // coming-soon any more.
+    fireEvent.click(screen.getByTestId("more-trigger"));
+    const sheet = screen.getByTestId("more-sheet");
+    const settings = within(sheet).getByTestId("more-settings");
     expect(settings.tagName).toBe("A");
-    expect(settings).toHaveAttribute(
-      "href",
-      "/operator/observability/settings",
-    );
+    expect(settings).toHaveAttribute("href", "/operator/settings");
   });
 
-  it("keeps the collapsed rail a route into the group", () => {
+  it("keeps the collapsed rail direct routes into flattened leaves", () => {
     localStorage.setItem("caresetu.sidebar.operator", "collapsed");
     renderShell("operator", "/operator");
 
-    const anchor = screen.getByTestId("nav-observability");
-    expect(anchor.tagName).toBe("A");
-    expect(anchor).toHaveAttribute("href", "/operator/observability");
-
-    fireEvent.mouseEnter(
-      screen.getByTestId("sidebar-group-observability-collapsed"),
-    );
-    expect(
-      within(screen.getByTestId("sidebar-flyout")).getByRole("link", {
-        name: "Business",
-      }),
-    ).toHaveAttribute("href", "/operator/observability/business");
+    for (const key of ["business", "product", "usage"]) {
+      expect(screen.getByTestId(`nav-${key}`)).toBeInTheDocument();
+    }
+    expect(screen.queryByTestId("sidebar-group-metrics-collapsed")).toBeNull();
   });
 });
 

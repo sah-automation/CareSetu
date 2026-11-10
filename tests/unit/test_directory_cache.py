@@ -23,6 +23,7 @@ import pytest
 from redis.asyncio import Redis
 
 import app.redis as shared_redis
+from app.runtime_toggles import set_redis_enabled
 from modules.partner.directory_cache import (
     _cache_key,
     get_cached_search,
@@ -66,6 +67,7 @@ class _FakeRedis:
 
 def _install(client: Redis | None) -> None:
     shared_redis._REDIS_CLIENT = client
+    set_redis_enabled(client is not None)
 
 
 @pytest.fixture(autouse=True)

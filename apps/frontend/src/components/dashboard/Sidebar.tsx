@@ -40,14 +40,7 @@
 // doctor and partner rails keep #575's 208px, and the collapsed `w-16` (and
 // therefore the flyout's `left-16`) is untouched for all roles.
 
-import {
-  Fragment,
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  type FocusEvent,
-} from "react";
+import { Fragment, useId, useRef, useState, type FocusEvent } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronDown, ChevronLeft, ChevronRight, LogOut } from "lucide-react";
@@ -62,6 +55,7 @@ import {
   NAV_CONFIG,
   isNavItemActive,
   sidebarSections,
+  sidebarStorageKey,
 } from "./nav-config";
 import {
   ActiveIndicator,
@@ -71,14 +65,6 @@ import {
 } from "./NavItemLink";
 import type { NavItemDef, SidebarSection } from "./nav-config";
 import type { Role } from "./types";
-
-function useAuthOrNull() {
-  try {
-    return useAuth();
-  } catch {
-    return null;
-  }
-}
 
 interface SidebarProps {
   role: Role;
@@ -95,13 +81,13 @@ export function Sidebar({
   onToggleCollapse,
   items,
 }: SidebarProps) {
-  const auth = useAuthOrNull();
+  const auth = useAuth();
   const isAdmin =
-    auth?.user?.roles?.includes("operator") === true &&
-    auth?.user?.tier === "admin";
+    auth.user?.roles?.includes("operator") === true &&
+    auth.user?.tier === "admin";
   const navItems = filterNavItems(items ?? NAV_CONFIG[role], isAdmin);
   const sections = sidebarSections(navItems);
-  const { logout } = useAuth();
+  const { logout } = auth;
   const { lang } = useLang();
   const strings = STRINGS[lang].nav;
 
@@ -178,7 +164,11 @@ export function Sidebar({
                 data-testid="sidebar-section-divider"
               />
             )}
-            <SidebarSectionGroup section={section} collapsed={collapsed} />
+            <SidebarSectionGroup
+              section={section}
+              collapsed={collapsed}
+              role={role}
+            />
           </Fragment>
         ))}
       </nav>
@@ -208,42 +198,130 @@ export function Sidebar({
   );
 }
 
+function readSectionState(storageKey: string): Record<string, unknown> {
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { ...(parsed as Record<string, unknown>) };
+    }
+    return {};
+  } catch {
+    // Fall back to empty state (defaults all expanded) on malformed storage.
+    return {};
+  }
+}
+
 function SidebarSectionGroup({
   section,
   collapsed,
+  role,
 }: {
   section: SidebarSection;
   collapsed: boolean;
+  role: Role;
 }) {
   const { lang } = useLang();
   const label = section.labelKey
     ? STRINGS[lang].nav.sections[section.labelKey]
     : null;
+  const sectionKey = section.labelKey;
+  const storageKey = `${sidebarStorageKey(role)}.sections`;
+  const [expanded, setExpanded] = useState(() => {
+    if (!sectionKey || typeof window === "undefined") return true;
+    try {
+      const value = readSectionState(storageKey)[sectionKey];
+      return typeof value === "boolean" ? value : true;
+    } catch {
+      return true;
+    }
+  });
+  const contentId = useId();
+
+  function toggle() {
+    setExpanded((value) => {
+      const next = !value;
+      if (sectionKey) {
+        try {
+          const state = readSectionState(storageKey);
+          state[sectionKey] = next;
+          window.localStorage.setItem(storageKey, JSON.stringify(state));
+        } catch {
+          // Ignore storage write failures.
+        }
+      }
+      return next;
+    });
+  }
+
+  // Collapsed rail: header and section grouping disappear, just the icon rows.
+  // Flattened at display time: any entry carrying children expands into its own
+  // leaves, so no destination depends on a disclosure flyout (#889).
+  if (collapsed) {
+    return (
+      <div className="space-y-1">
+        {section.items
+          .flatMap((item) => (item.children?.length ? item.children : [item]))
+          .map((child) => (
+            <CollapsedNavItem key={child.key} item={child} />
+          ))}
+      </div>
+    );
+  }
+
+  // Ungrouped (patient flat) sections stay label-free and non-collapsible.
+  // Flattened at display time: disclosure parents expand into their leaves (#889).
+  if (!label) {
+    return (
+      <div className="space-y-1">
+        {section.items
+          .flatMap((item) => (item.children?.length ? item.children : [item]))
+          .map((child) => (
+            <NavItemLink key={child.key} item={child} variant="sidebar" />
+          ))}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-1">
-      {!collapsed && label && (
-        <p className="px-3 pt-2 text-[11px] font-semibold tracking-wide text-txt-muted uppercase">
-          {label}
-        </p>
-      )}
-      {section.items.map((item) => {
-        // #745: an item carrying children is a disclosure parent. Expanded it
-        // is a toggle + sub-menu; collapsed it is an icon whose flyout lists
-        // its sub-destinations so the group stays navigable in the rail.
-        if (collapsed) {
-          return item.children?.length ? (
-            <CollapsedGroupNavItem key={item.key} item={item} />
-          ) : (
-            <CollapsedNavItem key={item.key} item={item} />
-          );
-        }
-        return item.children?.length ? (
-          <DisclosureNavItem key={item.key} item={item} />
-        ) : (
-          <NavItemLink key={item.key} item={item} variant="sidebar" />
-        );
-      })}
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={expanded}
+        aria-controls={contentId}
+        data-testid={`sidebar-section-${sectionKey}-toggle`}
+        className="flex w-full items-center justify-between px-3 pt-2 text-[11px] font-semibold tracking-wide text-txt-muted uppercase hover:text-txt"
+      >
+        <span>{label}</span>
+        <ChevronDown
+          size={12}
+          aria-hidden="true"
+          data-testid={`${sectionKey}-section-chevron`}
+          className={cn(
+            "shrink-0 transition-transform",
+            expanded && "rotate-180",
+          )}
+        />
+      </button>
+      <ul
+        id={contentId}
+        data-testid={`sidebar-section-${sectionKey}-content`}
+        className={cn(
+          "space-y-1 overflow-hidden transition-[max-height] duration-200 ease-in-out",
+          expanded ? "max-h-[2000px]" : "max-h-0",
+        )}
+        style={{ maxHeight: expanded ? "2000px" : "0px" }}
+      >
+        {section.items
+          .flatMap((item) => (item.children?.length ? item.children : [item]))
+          .map((child) => (
+            <li key={child.key}>
+              <NavItemLink item={child} variant="sidebar" />
+            </li>
+          ))}
+      </ul>
     </div>
   );
 }
@@ -272,9 +350,7 @@ function DisclosureNavItem({ item }: { item: NavItemDef }) {
   const submenuId = useId();
   const children = item.children ?? [];
 
-  useEffect(() => {
-    if (active) setOpen(true);
-  }, [active]);
+  if (active && !open) setOpen(true);
 
   return (
     <div data-testid={`sidebar-group-${item.key}`}>

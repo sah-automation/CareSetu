@@ -11,7 +11,6 @@
 
 import type { ComponentType } from "react";
 import {
-  Activity,
   BadgeCheck,
   BarChart3,
   Boxes,
@@ -24,7 +23,6 @@ import {
   History,
   Home,
   Inbox,
-  LayoutDashboard,
   Mic,
   Package,
   Scale,
@@ -269,97 +267,86 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       soon: true,
       group: "work",
     },
-    // #744 (spec #717 decisions 27-29): the console is now its own section and
-    // a disclosure parent - its nine sub-destinations are declared here once
-    // and read by both the sidebar disclosure (#745) and the mobile More sheet
-    // (#746). Overview is the group landing (same route as the parent), the
-    // three lenses and the four AI panels have live pages, and Settings is the
-    // #747 placeholder shell: a real page carrying no configuration until the
-    // Batch 2 settings surface ships, so it is live rather than Soon.
-    //
-    // Decision 28 says the parent has "no destination of its own"; decision 29
-    // and ticket criterion 2 make parent highlighting key off "its own
-    // destination". Resolved by giving the parent the console landing route as
-    // its href and making Overview a child that points at that same route: the
-    // parent's href is a real page (so the collapsed rail and the disclosure
-    // header have somewhere to go, and the prefix match has an anchor), while
-    // Overview remains the destination an operator reads as current. The
-    // duplication is deliberate and pinned by the contract tests.
     {
-      key: "observability",
-      labelKey: "observability",
-      href: "/operator/observability",
-      icon: Activity,
-      group: "observability",
-      children: [
-        {
-          key: "overview",
-          labelKey: "overview",
-          href: "/operator/observability",
-          icon: LayoutDashboard,
-        },
-        {
-          key: "business",
-          labelKey: "business",
-          href: "/operator/observability/business",
-          icon: TrendingUp,
-        },
-        {
-          key: "product",
-          labelKey: "product",
-          href: "/operator/observability/product",
-          icon: Boxes,
-        },
-        {
-          key: "reliability",
-          labelKey: "reliability",
-          href: "/operator/observability/reliability",
-          icon: ShieldCheck,
-        },
-        {
-          key: "cost",
-          labelKey: "cost",
-          href: "/operator/observability/cost",
-          icon: Coins,
-        },
-        {
-          key: "usage",
-          labelKey: "usage",
-          href: "/operator/observability/usage",
-          icon: BarChart3,
-        },
-        {
-          key: "quality",
-          labelKey: "quality",
-          href: "/operator/observability/quality",
-          icon: BadgeCheck,
-        },
-        {
-          key: "health",
-          labelKey: "health",
-          href: "/operator/observability/health",
-          icon: HeartPulse,
-        },
-        {
-          key: "security",
-          labelKey: "security",
-          href: "/operator/observability/security",
-          icon: ShieldCheck,
-        },
-        {
-          key: "settings",
-          labelKey: "settings",
-          href: "/operator/observability/settings",
-          icon: Settings,
-          adminOnly: true,
-        },
-        {
-          key: "evals",
-          labelKey: "evals",
-          href: "/operator/observability/evals",
-          icon: ClipboardList,
-        },
-      ],
+      key: "business",
+      labelKey: "business",
+      href: "/operator/observability/business",
+      icon: TrendingUp,
+      group: "metrics",
+      mobileOverflow: true,
+    },
+    {
+      key: "product",
+      labelKey: "product",
+      href: "/operator/observability/product",
+      icon: Boxes,
+      group: "metrics",
+      mobileOverflow: true,
+    },
+    {
+      key: "usage",
+      labelKey: "usage",
+      href: "/operator/observability/usage",
+      icon: BarChart3,
+      group: "metrics",
+      mobileOverflow: true,
+    },
+    {
+      key: "reliability",
+      labelKey: "reliability",
+      href: "/operator/observability/reliability",
+      icon: ShieldCheck,
+      group: "reliability",
+      mobileOverflow: true,
+    },
+    {
+      key: "health",
+      labelKey: "health",
+      href: "/operator/observability/health",
+      icon: HeartPulse,
+      group: "reliability",
+      mobileOverflow: true,
+    },
+    {
+      key: "cost",
+      labelKey: "cost",
+      href: "/operator/observability/cost",
+      icon: Coins,
+      group: "reliability",
+      mobileOverflow: true,
+    },
+    {
+      key: "quality",
+      labelKey: "quality",
+      href: "/operator/observability/quality",
+      icon: BadgeCheck,
+      group: "qualitySecurity",
+      mobileOverflow: true,
+    },
+    {
+      key: "security",
+      labelKey: "security",
+      href: "/operator/observability/security",
+      icon: ShieldCheck,
+      group: "qualitySecurity",
+      mobileOverflow: true,
+    },
+    {
+      key: "evals",
+      labelKey: "evals",
+      href: "/operator/observability/evals",
+      icon: ClipboardList,
+      group: "qualitySecurity",
+      mobileOverflow: true,
+    },
+    {
+      key: "settings",
+      labelKey: "settings",
+      href: "/operator/settings",
+      icon: Settings,
+      group: "account",
+      adminOnly: true,
+      mobileOverflow: true,
     },
     {
       key: "profile",
@@ -367,6 +354,7 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       href: "/operator/profile",
       icon: User,
       group: "account",
+      mobileOverflow: true,
     },
   ],
 };
@@ -421,7 +409,8 @@ export function filterNavItems(
       if (!item.children?.length) return item;
       const filteredChildren = filterNavItems(item.children, isAdmin);
       if (filteredChildren.length === 0) {
-        const { children: _children, ...rest } = item;
+        const rest = { ...item };
+        delete rest.children;
         return rest;
       }
       return { ...item, children: filteredChildren };
@@ -474,7 +463,15 @@ export function isGroupParent(item: NavItemDef): boolean {
 // sub-destinations alike - is reachable from the sheet. A config with no
 // nesting keeps the sheet as the overflow list it has always been.
 export function hasNestedDestinations(items: NavItemDef[]): boolean {
-  return items.some(isGroupParent);
+  if (items.some(isGroupParent)) return true;
+  // Operator navigation is section-grouped on mobile even after the observability
+  // disclosure parents were flattened into leaf destinations (#889).
+  return items.some(
+    (item) =>
+      item.group === "metrics" ||
+      item.group === "reliability" ||
+      item.group === "qualitySecurity",
+  );
 }
 
 // Collapse preference persists per role (spec decision 6): the storage key is

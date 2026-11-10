@@ -26,6 +26,194 @@ export const SUPPORTED_LOCALES = [
 
 export type Lang = (typeof SUPPORTED_LOCALES)[number]["code"];
 
+const SETTING_LABELS_EN = {
+  "cache.enabled": {
+    label: "Cache Enabled",
+    description: "Master switch for the read cache. Takes effect immediately.",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+    yes: "Yes",
+    no: "No",
+  },
+  "redis.enabled": {
+    label: "Redis Enabled",
+    description:
+      "Master switch for the Redis backend. Falls back to in-memory when off.",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+    yes: "Yes",
+    no: "No",
+  },
+  "redis.max_connections": {
+    label: "Redis Max Connections",
+    description: "Maximum connections in the Redis pool (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "redis.socket_connect_timeout_seconds": {
+    label: "Redis Socket Connect Timeout (seconds)",
+    description:
+      "Seconds to wait while opening a Redis connection (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "redis.socket_timeout_seconds": {
+    label: "Redis Socket Timeout (seconds)",
+    description:
+      "Seconds to wait for a Redis socket response (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "redis.consent_ttl_seconds": {
+    label: "Consent Cache TTL (seconds)",
+    description: "Time-to-live for cached consent grants (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "redis.directory_ttl_seconds": {
+    label: "Directory Cache TTL (seconds)",
+    description: "Time-to-live for cached directory entries (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "redis.rate_limit_key_prefix": {
+    label: "Rate Limit Key Prefix",
+    description: "Prefix for Redis rate-limit keys (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "cache.ttl_seconds": {
+    label: "Cache TTL (seconds)",
+    description: "Default time-to-live for cached entries (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "cache.max_entries": {
+    label: "Cache Max Entries",
+    description:
+      "Maximum entries held in the in-memory cache (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "scaling.max_workers": {
+    label: "Max Workers",
+    description: "Maximum worker processes/threads (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "scaling.queue_timeout_seconds": {
+    label: "Queue Timeout (seconds)",
+    description:
+      "Seconds a request waits in queue before timing out (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "scaling.rate_limit_rps": {
+    label: "Rate Limit (requests/sec)",
+    description: "Maximum requests per second (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+  "scaling.rate_limit_backend": {
+    label: "Rate Limit Backend",
+    description:
+      "Backend used for rate limiting: redis or memory (applied at boot).",
+    validationRequired: "Enter a value.",
+    validationNumber: "Enter a valid number.",
+  },
+};
+
+const SETTING_LABELS_HI = {
+  "cache.enabled": {
+    label: "कैश सक्षम",
+    description: "रीड कैश का मास्टर स्विच। तुरंत लागू होता है।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+    yes: "हाँ",
+    no: "नहीं",
+  },
+  "redis.enabled": {
+    label: "रेडिस सक्षम",
+    description: "रेडिस बैकएंड का मास्टर स्विच। बंद होने पर इन-मेमोरी पर वापस।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+    yes: "हाँ",
+    no: "नहीं",
+  },
+  "redis.max_connections": {
+    label: "रेडिस अधिकतम कनेक्शन",
+    description: "रेडिस पूल में अधिकतम कनेक्शन (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "redis.socket_connect_timeout_seconds": {
+    label: "रेडिस सॉकेट कनेक्ट टाइमआउट (सेकंड)",
+    description: "रेडिस कनेक्शन खोलने का इंतज़ार (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "redis.socket_timeout_seconds": {
+    label: "रेडिस सॉकेट टाइमआउट (सेकंड)",
+    description: "रेडिस सॉकेट रिस्पॉन्स का इंतज़ार (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "redis.consent_ttl_seconds": {
+    label: "कंसेंट कैश TTL (सेकंड)",
+    description: "कैश किए गए कंसेंट रिकॉर्ड की टाइम-टू-लिव (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "redis.directory_ttl_seconds": {
+    label: "डायरेक्टरी कैश TTL (सेकंड)",
+    description: "कैश किए गए डायरेक्टरी एंट्रीज़ की टाइम-टू-लिव (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "redis.rate_limit_key_prefix": {
+    label: "रेट लिमिट की प्रीफिक्स",
+    description: "रेडिस रेट-लिमिट कीज़ का प्रीफिक्स (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "cache.ttl_seconds": {
+    label: "कैश TTL (सेकंड)",
+    description: "कैश एंट्रीज़ का डिफ़ॉल्ट टाइम-टू-लिव (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "cache.max_entries": {
+    label: "कैश अधिकतम एंट्रीज़",
+    description: "इन-मेमोरी कैश में अधिकतम एंट्रीज़ (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "scaling.max_workers": {
+    label: "अधिकतम वर्कर",
+    description: "अधिकतम वर्कर प्रक्रियाएँ/थ्रेड (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "scaling.queue_timeout_seconds": {
+    label: "क्यू टाइमआउट (सेकंड)",
+    description: "टाइमआउट से पहले रिक्वेस्ट का क्यू इंतज़ार (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "scaling.rate_limit_rps": {
+    label: "रेट लिमिट (रिक्वेस्ट/सेकंड)",
+    description: "अधिकतम रिक्वेस्ट प्रति सेकंड (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+  "scaling.rate_limit_backend": {
+    label: "रेट लिमिट बैकएंड",
+    description: "रेट लिमिटिंग के लिए बैकएंड: रेडिस या मेमोरी (बूट पर लागू)।",
+    validationRequired: "एक मान दर्ज करें।",
+    validationNumber: "सही संख्या दर्ज करें।",
+  },
+};
+
 const en = {
   // auth.* surface - the patient OTP wizard's copy, moved verbatim from
   // otpState.ts (PHASE-2 T9, #60). Byte-stable by contract: the deployed
@@ -1065,6 +1253,10 @@ const en = {
     // #738: the Reliability lens destination, on the same terms as `business`
     // above - both locales ship together or the parity test fails.
     reliability: "Reliability",
+    // #874 / #876: metrics + quality & security section labels. Both locales
+    // ship together (bilingual parity gate).
+    metrics: "Metrics",
+    qualitySecurity: "Quality & Security",
     // #743: the Product lens destination. Same both-locales gate as the two
     // labels above (#717 decision 34).
     product: "Product",
@@ -1090,6 +1282,10 @@ const en = {
       // #744: the operator console's Observability section (spec #717
       // decision 28) - the disclosure parent's group membership.
       observability: "Observability",
+      // #874 / #876: new sidebar section groups for the split observability IA.
+      metrics: "Metrics",
+      reliability: "Reliability",
+      qualitySecurity: "Quality & Security",
     },
     // #574: the sidebar's collapse control. Two flat keys, not one conditional
     // function - this namespace carries plain strings only, like `logOut`,
@@ -2525,10 +2721,13 @@ const en = {
     permissionDeniedBody: "You do not have permission to access Settings.",
     retry: "Retry",
     sections: {
-      ai: "AI",
+      ai: "AI & LLM",
       notifications: "Notifications",
-      featureFlags: "Feature flags",
+      featureFlags: "Feature Flags",
       users: "Users",
+      cache: "Cache & Redis",
+      scaling: "Scaling & Performance",
+      observabilityTuning: "Observability Tuning",
     },
     ai: {
       description:
@@ -2574,6 +2773,12 @@ const en = {
         default: "Default",
       },
     },
+    labels: SETTING_LABELS_EN,
+    settingLabels: SETTING_LABELS_EN,
+    settingsLabels: SETTING_LABELS_EN,
+    keyLabels: SETTING_LABELS_EN,
+    displayLabels: SETTING_LABELS_EN,
+    settingDisplayLabels: SETTING_LABELS_EN,
     notifications: {
       description: "Routing, recipients and delivery channels for alerts.",
       body: "Configure how alerts are routed, who receives them, and which channels are enabled.",
@@ -2724,6 +2929,18 @@ const en = {
       inviteErrorExpected: "The API refused this invite.",
       editError: "Could not save this change. Check your connection and retry.",
       editErrorExpected: "The API refused this change.",
+      historyEvent: "Event",
+      historyTitle: "Operator history",
+      historyDescription:
+        "Tier, active and invite changes recorded in the audit ledger.",
+      historyEmpty: "No operator changes recorded yet.",
+      historyError: "Could not load operator history.",
+      historyErrorExpected: "The API rejected the history request.",
+      historyRetry: "Retry",
+      historyVersion: "Version",
+      historyChangedBy: "Changed by",
+      historyChangedAt: "Changed at",
+      historyUnknownActor: "Unknown",
     },
   },
   operatorProfile: {
@@ -3371,6 +3588,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
       business: "व्यवसाय",
       // #738: the Reliability lens destination, on the same terms as `business`.
       reliability: "विश्वसनीयता",
+      // #874 / #876: metrics + quality & security section labels in Hindi.
+      metrics: "मीट्रिक्स",
+      qualitySecurity: "गुणवत्ता और सुरक्षा",
       // #743: the Product lens destination, on the same both-locales terms.
       product: "उत्पाद",
       // #744: the Observability group's sub-destination labels, shipping with
@@ -3389,6 +3609,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
         account: "खाता",
         // #744: the operator console's Observability section label.
         observability: "प्रेक्षण",
+        // #874 / #876: new sidebar section groups in Hindi.
+        metrics: "मीट्रिक्स",
+        reliability: "विश्वसनीयता",
+        qualitySecurity: "गुणवत्ता और सुरक्षा",
       },
       // #574: the sidebar's collapse control, action-named like the English
       // pair above. Blueprint §9.2 line 578: neither locale ships alone.
@@ -4961,10 +5185,13 @@ export const STRINGS: Record<Lang, Dictionary> = {
       permissionDeniedBody: "आपके पास सेटिंग्स देखने की अनुमति नहीं है।",
       retry: "फिर कोशिश करें",
       sections: {
-        ai: "AI",
-        notifications: "सूचनाएँ",
-        featureFlags: "फ़ीचर फ़्लैग",
+        ai: "एआई और एलएलएम",
+        notifications: "सूचनाएं",
+        featureFlags: "फीचर फ्लैग्स",
         users: "उपयोगकर्ता",
+        cache: "कैश और रेडिस",
+        scaling: "स्केलिंग और परफॉरमेंस",
+        observabilityTuning: "ऑब्जर्वेबिलिटी ट्यूनिंग",
       },
       ai: {
         description:
@@ -5010,6 +5237,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
           default: "डिफ़ॉल्ट",
         },
       },
+      labels: SETTING_LABELS_HI,
+      settingLabels: SETTING_LABELS_HI,
+      settingsLabels: SETTING_LABELS_HI,
+      keyLabels: SETTING_LABELS_HI,
+      displayLabels: SETTING_LABELS_HI,
+      settingDisplayLabels: SETTING_LABELS_HI,
       notifications: {
         description: "अलर्ट के लिए रूटिंग, प्राप्तकर्ता और डिलीवरी चैनल।",
         body: "कॉन्फ़िगर करें कि अलर्ट कैसे रूट होते हैं, कौन उन्हें प्राप्त करता है, और कौन से चैनल सक्षम हैं।",
@@ -5163,6 +5396,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
         editError:
           "यह बदलाव सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
         editErrorExpected: "API ने यह बदलाव अस्वीकार कर दिया।",
+        historyEvent: "घटना",
+        historyTitle: "ऑपरेटर इतिहास",
+        historyDescription: "टियर, सक्रिय और आमंत्रण बदलाव ऑडिट लेजर में दर्ज।",
+        historyEmpty: "अभी तक कोई ऑपरेटर बदलाव दर्ज नहीं।",
+        historyError: "ऑपरेटर इतिहास लोड नहीं हो सका।",
+        historyErrorExpected: "API ने इतिहास अनुरोध अस्वीकार कर दिया।",
+        historyRetry: "पुनः प्रयास",
+        historyVersion: "संस्करण",
+        historyChangedBy: "बदला",
+        historyChangedAt: "बदला गया",
+        historyUnknownActor: "अज्ञात",
       },
     },
     operatorProfile: {
