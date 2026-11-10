@@ -19,6 +19,7 @@ from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, File, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
@@ -735,6 +736,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if resolved_settings.mock_otp_readback_enabled:
         app.state.mock_sms_adapter = cast(MockSmsAdapter, sms_adapter)
 
+    # Issue #902: response compression - large JSON must not ride uncompressed
+    # over the demo's high-RTT link. Registered INNERMOST (before jwt_verify)
+    # deliberately: every gateway layer is a BaseHTTPMiddleware, whose streaming
+    # dispatch converts any inner response into chunked body messages, and
+    # GZipMiddleware compresses streams unconditionally - only a placement that
+    # sees the router's single complete body message can honour
+    # ``minimum_size``. At this position the size threshold genuinely holds for
+    # module responses; the gateway rejections produced ABOVE this layer
+    # (401/429/404) bypass compression, which is fine - those envelopes are
+    # tiny. The outer layers (trace, security headers, the #901 ServerTiming
+    # outermost window) still see and stamp every response. Off = not
+    # installed, no per-request cost (#753 posture).
+    if resolved_settings.response_compression_enabled:
+        app.add_middleware(
+            GZipMiddleware,
+            minimum_size=resolved_settings.response_compression_min_size,
+        )
+
     # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59; REM T6, #77;
     # REM T8, #78; PS-05, #403). The auth and intake-write surfaces are
     # unauthenticated entry points, so rate_limit is the outermost of the
@@ -783,6 +802,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
         allow_credentials=True,
+        # Issue #902: a LONG preflight cache - on the split-origin demo (ADR-0007)
+        # every un-cached preflight is one full cross-site round trip, so the
+        # middleware echoes the day-long hint (browsers clamp it themselves) and
+        # repeated authenticated calls stop re-preflighting every time.
+        max_age=resolved_settings.cors_preflight_max_age_seconds,
     )
     # Trace established outermost of the whole stack (PHASE-2 REM T6, #77), so
     # the one request-scoped trace id is settled before the gateway middleware

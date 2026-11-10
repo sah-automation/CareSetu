@@ -288,6 +288,19 @@ DEFAULT_ERROR_DRAIN_INTERVAL_SECONDS = 30
 # slower leaves the operator's "recent past" stale.
 DEFAULT_HTTP_COUNTER_MAX_SERIES = 5000
 DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS = 60
+# RESPONSE COMPRESSION and the CORS PREFLIGHT CACHE (issue #902, the latency
+# series' transfer levers - region co-location is the manifest's job).
+# ``RESPONSE_COMPRESSION_MIN_SIZE`` is the payload size at or above which the
+# GZip middleware compresses a response: large JSON must not ride uncompressed
+# over the high-RTT link the #901 probe measures, but tiny envelopes (400s,
+# health pings) gain nothing and would pay the gzip CPU per request, so the
+# default 1 KiB keeps them out. ``CORS_PREFLIGHT_MAX_AGE_SECONDS`` is the
+# ``access-control-max-age`` hint the CORS middleware echoes on preflight
+# answers: on the split-origin demo (ADR-0007) every UNCACHED preflight costs a
+# full cross-site round trip, so the demo opts in for a day and lets the
+# browser clamp (Chromium ~2 h, Firefox/Safari 24 h).
+DEFAULT_RESPONSE_COMPRESSION_MIN_SIZE = 1024
+DEFAULT_CORS_PREFLIGHT_MAX_AGE_SECONDS = 86_400
 # MOD-013's ALERT THRESHOLDS (Batch 3, #717; plan-phase14 §11). Every one of
 # these is a LIMIT a deployment may have to move - a bigger budget, a busier
 # queue, a stricter provider - so each is configuration (coding-standards §9.1)
@@ -458,6 +471,18 @@ class Settings:
     # origin of the public demo (deployment plan 4.1). Empty by default, which
     # preserves today's posture: only the localhost dev origin is allowed.
     cors_allowed_origins: tuple[str, ...] = ()
+    # Response compression (issue #902): GZip every answered response at or
+    # above ``response_compression_min_size`` bytes (transport lever beside the
+    # region lever the Render manifest carries). On by default - a client that
+    # sends no Accept-Encoding gets bytes back unchanged, so on is the safe
+    # posture, and off is a deployment opt-out, not the demo intent.
+    response_compression_enabled: bool = True
+    response_compression_min_size: int = DEFAULT_RESPONSE_COMPRESSION_MIN_SIZE
+    # CORS preflight cache (issue #902): the ``max_age`` the CORS middleware
+    # echoes so browsers reuse a preflight answer instead of paying one
+    # un-cached round trip per authenticated call. Starlette's own default is
+    # 600 s; the deployment default is the day-long constant above.
+    cors_preflight_max_age_seconds: int = DEFAULT_CORS_PREFLIGHT_MAX_AGE_SECONDS
     # Explicit demo-flag: when set, the mock-OTP read-back route answers even
     # in production so the deployed portfolio demo can drive register -> verify
     # (deployment plan 4.3). Fail-closed: never valid with a real provider.
@@ -1576,6 +1601,15 @@ def get_settings() -> Settings:
         directory_max_results=_env_int("DIRECTORY_MAX_RESULTS", DEFAULT_DIRECTORY_MAX_RESULTS),
         audit_retention_days=_env_int("AUDIT_RETENTION_DAYS", DEFAULT_AUDIT_RETENTION_DAYS),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
+        # Issue #902: compression defaults ON (safe posture); the CORS
+        # preflight cache defaults to the day-long hint above.
+        response_compression_enabled=_env_bool("RESPONSE_COMPRESSION_ENABLED", True),
+        response_compression_min_size=_env_int(
+            "RESPONSE_COMPRESSION_MIN_SIZE", DEFAULT_RESPONSE_COMPRESSION_MIN_SIZE
+        ),
+        cors_preflight_max_age_seconds=_env_int(
+            "CORS_PREFLIGHT_MAX_AGE_SECONDS", DEFAULT_CORS_PREFLIGHT_MAX_AGE_SECONDS
+        ),
         demo_mode=_env_bool("DEMO_MODE", False),
         dispatcher_in_process_enabled=_env_bool("DISPATCHER_IN_PROCESS_ENABLED", False),
         ai_async_enabled=_env_bool("AI_ASYNC_ENABLED", False),

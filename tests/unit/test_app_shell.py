@@ -16,6 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
+from starlette.middleware import Middleware
 
 import app.main as app_main
 from app.config import DEFAULT_DATABASE_URL, Settings
@@ -421,6 +422,100 @@ def test_app_answers_cors_headers_for_the_configured_demo_origin() -> None:
     response = client.get("/v1/me", headers={"Origin": "https://demo.example.com"})
 
     assert response.headers.get("access-control-allow-origin") == "https://demo.example.com"
+
+
+# Issue #902: the CORS preflight cache. A split-origin (Vercel + Render, ADR-0007)
+# browser pays one full cross-site round trip for EVERY un-cached preflight, so the
+# middleware sets an explicit max-age (Starlette's silent default is 600 s) and
+# preflight answers must carry it.
+def test_cors_preflight_answers_the_configured_max_age() -> None:
+    """Issue 902: a preflight OPTIONS answers the configured access-control-max-age."""
+    client = TestClient(create_app())
+
+    response = client.options(
+        "/v1/me",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("access-control-max-age") == "86400"
+
+
+def test_cors_preflight_max_age_follows_settings() -> None:
+    client = TestClient(create_app(settings=Settings(cors_preflight_max_age_seconds=3600)))
+
+    response = client.options(
+        "/v1/me",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.headers.get("access-control-max-age") == "3600"
+
+
+# Issue #902: response compression. Introspection over app.user_middleware is the
+# same prior art as _cors_allow_origins above; the behavioural asserts pin the
+# minimum_size split - payloads at or above RESPONSE_COMPRESSION_MIN_SIZE (1 KiB
+# default) ride gzip, tiny responses stay uncompressed.
+def _gzip_middleware(app: FastAPI) -> Middleware | None:
+    from fastapi.middleware.gzip import GZipMiddleware
+
+    return next(
+        (middleware for middleware in app.user_middleware if middleware.cls is GZipMiddleware),
+        None,
+    )
+
+
+def _app_with_json_routes(settings: Settings | None = None) -> FastAPI:
+    resolved = settings or Settings()
+    app = create_app(settings=resolved)
+
+    @app.get("/v1-test/large-json")
+    def large_json() -> dict[str, str]:
+        return {"payload": "x" * 4096}
+
+    @app.get("/v1-test/small-json")
+    def small_json() -> dict[str, int]:
+        return {"ok": 1}
+
+    return app
+
+
+def test_create_app_registers_gzip_when_enabled() -> None:
+    assert _gzip_middleware(create_app()) is not None
+
+
+def test_create_app_skips_gzip_when_disabled() -> None:
+    app = create_app(settings=Settings(response_compression_enabled=False))
+
+    assert _gzip_middleware(app) is None
+
+
+def test_large_json_response_rides_gzip_and_small_responses_do_not() -> None:
+    client = TestClient(_app_with_json_routes())
+
+    large = client.get("/v1-test/large-json")
+    small = client.get("/v1-test/small-json")
+
+    assert large.status_code == 200
+    assert large.headers.get("content-encoding") == "gzip"
+    assert small.status_code == 200
+    assert small.headers.get("content-encoding") is None
+
+
+def test_compression_disabled_serves_large_json_uncompressed() -> None:
+    settings = Settings(response_compression_enabled=False)
+    client = TestClient(_app_with_json_routes(settings))
+
+    response = client.get("/v1-test/large-json")
+
+    assert response.status_code == 200
+    assert response.headers.get("content-encoding") is None
 
 
 def test_mock_sms_adapter_stored_in_demo_mode_but_not_production_default() -> None:
