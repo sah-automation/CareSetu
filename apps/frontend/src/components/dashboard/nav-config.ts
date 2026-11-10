@@ -356,13 +356,6 @@ export const NAV_CONFIG: Record<Role, NavItemDef[]> = {
       group: "account",
       mobileOverflow: true,
     },
-    {
-      key: "profile",
-      labelKey: "profile",
-      href: "/operator/profile",
-      icon: User,
-      group: "account",
-    },
   ],
 };
 

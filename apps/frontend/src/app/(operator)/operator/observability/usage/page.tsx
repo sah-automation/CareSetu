@@ -10,18 +10,40 @@
 // one answer. Loading, empty and failure all belong to the read that produces
 // them (blueprint §9.1).
 
+import { Suspense } from "react";
+import dynamic from "next/dynamic";
+
 import {
   ObservabilityPanelPage,
   ReadPanel,
 } from "@/components/observability/ObservabilityPanelPage";
-import {
-  CallsByScopeChart,
-  ScopeCostTable,
-  TokensByScopeChart,
-} from "@/components/observability/UsageCharts";
 import { fetchUsage } from "@/lib/operator/observability";
 import { formatMoney } from "@/lib/operator/observability-format";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
+
+const CallsByScopeChart = dynamic(
+  () =>
+    import("@/components/observability/UsageCharts").then(
+      (mod) => mod.CallsByScopeChart,
+    ),
+  { ssr: false, loading: () => null },
+);
+
+const TokensByScopeChart = dynamic(
+  () =>
+    import("@/components/observability/UsageCharts").then(
+      (mod) => mod.TokensByScopeChart,
+    ),
+  { ssr: false, loading: () => null },
+);
+
+const ScopeCostTable = dynamic(
+  () =>
+    import("@/components/observability/UsageCharts").then(
+      (mod) => mod.ScopeCostTable,
+    ),
+  { ssr: false, loading: () => null },
+);
 
 /** The rollup has no AI activity for this window. */
 const NO_USAGE_BODY =
@@ -59,25 +81,31 @@ export default function ObservabilityUsagePage() {
               <h3 className="mb-1 text-xs font-medium text-txt-sub">
                 AI calls by scope
               </h3>
-              <CallsByScopeChart
-                rows={report.rows}
-                testId="usage-calls-chart"
-              />
+              <Suspense fallback={null}>
+                <CallsByScopeChart
+                  rows={report.rows}
+                  testId="usage-calls-chart"
+                />
+              </Suspense>
             </div>
             <div>
               <h3 className="mb-1 text-xs font-medium text-txt-sub">
                 Tokens by scope
               </h3>
-              <TokensByScopeChart
-                rows={report.rows}
-                testId="usage-tokens-chart"
-              />
+              <Suspense fallback={null}>
+                <TokensByScopeChart
+                  rows={report.rows}
+                  testId="usage-tokens-chart"
+                />
+              </Suspense>
             </div>
             <div>
               <h3 className="mb-1 text-xs font-medium text-txt-sub">
                 Spend by scope
               </h3>
-              <ScopeCostTable rows={report.rows} />
+              <Suspense fallback={null}>
+                <ScopeCostTable rows={report.rows} />
+              </Suspense>
             </div>
           </div>
         )}

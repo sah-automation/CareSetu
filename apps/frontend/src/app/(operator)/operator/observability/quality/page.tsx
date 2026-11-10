@@ -14,17 +14,32 @@
 // read as an em dash with the count beside them ("0 flagged", "0 of 0 calls"),
 // so an operator can tell "nothing was flagged" from "nothing has run".
 
+import { Suspense } from "react";
+import dynamic from "next/dynamic";
+
 import {
   ObservabilityPanelPage,
   ReadPanel,
 } from "@/components/observability/ObservabilityPanelPage";
-import {
-  OutcomeMixChart,
-  ProviderSuccessRateChart,
-} from "@/components/observability/QualityCharts";
 import { fetchQuality } from "@/lib/operator/observability";
 import { formatPct } from "@/lib/operator/observability-format";
 import { usePanelRead } from "@/lib/operator/usePanelRead";
+
+const ProviderSuccessRateChart = dynamic(
+  () =>
+    import("@/components/observability/QualityCharts").then(
+      (mod) => mod.ProviderSuccessRateChart,
+    ),
+  { ssr: false, loading: () => null },
+);
+
+const OutcomeMixChart = dynamic(
+  () =>
+    import("@/components/observability/QualityCharts").then(
+      (mod) => mod.OutcomeMixChart,
+    ),
+  { ssr: false, loading: () => null },
+);
 
 /** No AI output to score in this window. */
 const NO_QUALITY_BODY =
@@ -105,10 +120,12 @@ export default function ObservabilityQualityPage() {
                   per-provider rate to plot.
                 </p>
               ) : (
-                <ProviderSuccessRateChart
-                  rows={report.providers}
-                  testId="quality-success-rate-chart"
-                />
+                <Suspense fallback={null}>
+                  <ProviderSuccessRateChart
+                    rows={report.providers}
+                    testId="quality-success-rate-chart"
+                  />
+                </Suspense>
               )}
             </div>
 
@@ -125,12 +142,14 @@ export default function ObservabilityQualityPage() {
                   outcomes to split.
                 </p>
               ) : (
-                <OutcomeMixChart
-                  successCount={report.success_count}
-                  failureCount={report.failure_count}
-                  timeoutCount={report.timeout_count}
-                  testId="quality-outcome-chart"
-                />
+                <Suspense fallback={null}>
+                  <OutcomeMixChart
+                    successCount={report.success_count}
+                    failureCount={report.failure_count}
+                    timeoutCount={report.timeout_count}
+                    testId="quality-outcome-chart"
+                  />
+                </Suspense>
               )}
             </div>
           </div>

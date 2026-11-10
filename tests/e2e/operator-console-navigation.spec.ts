@@ -71,12 +71,6 @@ interface Destination {
 // Overview page rendered rather than blanked.
 const DESTINATIONS: Destination[] = [
   {
-    key: "overview",
-    href: "/operator/observability",
-    heading: "Observability",
-    panels: ["observability-alerts", "observability-deeplinks"],
-  },
-  {
     key: "business",
     href: "/operator/observability/business",
     heading: "Business",
@@ -396,10 +390,7 @@ test.describe("operator console navigation (desktop sidebar)", () => {
     // The phone bar belongs to the small breakpoint only.
     await expect(page.getByTestId("bottom-tabs")).toBeHidden();
 
-    await openObservabilityGroup(page);
-
     for (const destination of DESTINATIONS) {
-      await openObservabilityGroup(page);
       await page.getByTestId(`nav-${destination.key}`).click();
       await expectDestination(page, destination);
     }
@@ -415,35 +406,18 @@ test.describe("operator console navigation (desktop sidebar)", () => {
     const sidebar = page.getByTestId("sidebar");
     await expect(sidebar).toHaveAttribute("data-collapsed", "true");
 
-    // Collapsed, the group is an icon whose flyout lists every
-    // sub-destination - the group must not become unreachable.
-    const group = page.getByTestId("sidebar-group-observability-collapsed");
-    await expect(group).toBeVisible();
-
-    // Hovering the icon opens the flyout, and the flyout offers every
-    // sub-destination with the group's own hrefs: the collapsed rail is a way
-    // into the group, not a dead end.
-    await group.hover();
-    const flyout = page.getByTestId("sidebar-flyout");
-    await expect(flyout).toBeVisible({ timeout: 30_000 });
-    for (const destination of DESTINATIONS) {
-      await expect(
-        flyout.getByTestId(`nav-${destination.key}`),
-        `the flyout should offer ${destination.key}`,
-      ).toHaveAttribute("href", destination.href);
-    }
-
-    // Clicking through the flyout reaches a destination - the awkward path
-    // the brief calls out. The click runs from the queue page the operator
-    // lands on: on the chart pages the flyout's lower rows are painted under
-    // the page content (#758), so there they are covered rather than clickable.
-    await group.hover();
-    await flyout.getByTestId("nav-business").click();
-    await expectDestination(page, DESTINATIONS[1]);
-
-    // And the group's own icon is the rail's way in.
-    await group.getByTestId("nav-observability").click();
+    // Flattened: every console destination is a direct icon on the collapsed
+    // rail, so the rail reaches them without a disclosure flyout (#889).
+    const business = page.getByTestId("nav-business");
+    await expect(business).toBeVisible();
+    await business.click();
     await expectDestination(page, DESTINATIONS[0]);
+
+    // A second leaf is reachable too, proving the rail is not a single entry.
+    const reliability = page.getByTestId("nav-reliability");
+    await expect(reliability).toBeVisible();
+    await reliability.click();
+    await expectDestination(page, DESTINATIONS[2]);
   });
 });
 
