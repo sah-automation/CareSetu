@@ -439,8 +439,30 @@ test.describe("operator console navigation (phone More sheet)", () => {
       timeout: 60_000,
     });
 
+    function sectionFor(key: string): string {
+      if (key === "business" || key === "product" || key === "usage") {
+        return "metrics";
+      }
+      if (key === "reliability" || key === "health" || key === "cost") {
+        return "reliability";
+      }
+      if (key === "quality") {
+        return "qualitySecurity";
+      }
+      return "account";
+    }
+
+    async function openMoreSection(sectionKey: string): Promise<void> {
+      const toggle = page.getByTestId(`more-section-${sectionKey}`);
+      if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+        await toggle.click();
+      }
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    }
+
     for (const destination of DESTINATIONS) {
       await openMoreSheet(page);
+      await openMoreSection(sectionFor(destination.key));
       await page.getByTestId(`more-${destination.key}`).click();
       await expectDestination(page, destination);
       // The sheet closes on the way out, so the next leg opens it again.
