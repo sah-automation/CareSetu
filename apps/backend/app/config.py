@@ -720,6 +720,15 @@ class Settings:
     # schema, in seconds. Bounded below only by "must be positive": a zero
     # interval is a busy loop against the database.
     http_counter_drain_interval_seconds: int = DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
+    # Opt-in server-processing timing header (issue #901, the latency feedback
+    # loop): the ``Server-Timing: caresetu_tstmp;dur=<ms>`` middleware that lets
+    # the latency probe (``scripts/measure_backend_latency.py``) separate server
+    # processing time from network round-trip time. Default OFF in production
+    # and ON in dev/test (``from_settings`` resolves the env-dependent default;
+    # SERVER_TIMING_HEADER_ENABLED overrides either way). Developer-facing debug
+    # only, tagged ``caresetu_tstmp`` - never a telemetry source (OTel serves
+    # that); removing the harness is one grep for the tag or the flag.
+    server_timing_header_enabled: bool = False
     # MOD-013's alert thresholds: the LIMITS each rollup rule compares against.
     # They are configuration rather than constants in the rule that reads them
     # (coding-standards §9.1), so a deployment moves a threshold by an
@@ -1742,6 +1751,13 @@ def get_settings() -> Settings:
         ),
         http_counter_drain_interval_seconds=_env_int(
             "HTTP_COUNTER_DRAIN_INTERVAL_SECONDS", DEFAULT_HTTP_COUNTER_DRAIN_INTERVAL_SECONDS
+        ),
+        # Issue #901: ON by default in dev/test, OFF in production; the explicit
+        # env var wins either way.
+        server_timing_header_enabled=_env_bool(
+            "SERVER_TIMING_HEADER_ENABLED",
+            os.environ.get("APP_ENVIRONMENT", DEFAULT_APP_ENVIRONMENT).strip().lower()
+            in _DEV_TEST_ENVIRONMENTS,
         ),
         observability_budget_alert_threshold_pct=_env_int(
             "OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT",

@@ -39,6 +39,7 @@ from app.gateway.principal import Principal
 from app.gateway.rate_limit import RateLimitMiddleware, RedisRateLimitMiddleware
 from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
+from app.gateway.server_timing import ServerTimingMiddleware
 from app.gateway.sharding import ShardingMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
 from app.redis import close_redis_client, init_redis_client
@@ -827,6 +828,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # does not even pay the middleware's per-request cost.
     if resolved_settings.http_counter_enabled:
         app.add_middleware(HttpCounterMiddleware)
+    # LAT-HARNESS (#901): the opt-in server-processing timing header, registered
+    # after the HTTP counter so it is the OUTERMOST user middleware - the same
+    # full-stack window the latency probe measures from outside, gateway
+    # rejections included. Off = not installed, no per-request cost (#753
+    # posture); ON is dev/test default, production opt-in.
+    if resolved_settings.server_timing_header_enabled:
+        app.add_middleware(ServerTimingMiddleware)
 
     app.include_router(iam_router)
     app.include_router(operator_profile_router)
