@@ -29,6 +29,8 @@ vi.mock("@/lib/partner/api", () => ({
 
 vi.mock("@/lib/config", () => ({
   STATUS_POLL_INTERVAL_MS: 42_000,
+  ACCESS_TOKEN_TTL_SECONDS: 900,
+  PROACTIVE_REFRESH_RATIO: 0.8,
 }));
 
 function mockSession(roles: string[] | null) {

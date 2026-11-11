@@ -19,6 +19,9 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { QueryClientProvider } from "@tanstack/react-query";
+import { makeTestQueryClient } from "@/test/query-client";
+
 import PatientDashboardPage from "./page";
 import { ProfileProvider } from "@/lib/profile/ProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
@@ -152,11 +155,22 @@ function langFlip() {
   );
 }
 
+const testQueryClientRef = { current: makeTestQueryClient() };
+
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={testQueryClientRef.current}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+
 function renderHome() {
   return render(
     <ProfileProvider>
       <LangFlipHost />
     </ProfileProvider>,
+    { wrapper: QueryWrapper },
   );
 }
 
@@ -172,6 +186,7 @@ function LangFlipHost() {
 beforeEach(() => {
   window.localStorage.clear();
   __resetLangForTests();
+  testQueryClientRef.current = makeTestQueryClient();
   state.getProfile.mockReset();
   state.saveProfile.mockReset();
   state.push.mockReset();
@@ -199,6 +214,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  testQueryClientRef.current = makeTestQueryClient();
 });
 
 describe("patient home shell (#499)", () => {

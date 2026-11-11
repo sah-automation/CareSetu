@@ -13,14 +13,15 @@
 // rule), with the failure logged. "View all" targets the live My Record route
 // from the patient nav config.
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import Link from "next/link";
 
 import { PATIENT_RECORD_ROUTE } from "@/components/dashboard/nav-config";
 import { EmptyState } from "@/components/layout/EmptyState";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import { fetchOwnRecord, type RecordEntryView } from "@/lib/record/api";
+import { useOwnRecordTimeline } from "@/lib/record/useOwnRecord";
+import type { RecordEntryView } from "@/lib/record/api";
 import {
   ENTRY_TONE,
   TYPE_BADGE_KEY,
@@ -43,31 +44,13 @@ export function RecentActivityCard() {
   const { lang } = useLang();
   const t = STRINGS[lang].recent;
   const recordT = STRINGS[lang].record;
-  // null = resolving the timeline; [] = a record with no activity yet.
-  const [entries, setEntries] = useState<RecordEntryView[] | null>(null);
-  const [failed, setFailed] = useState(false);
+  // #904: the card mounts the shared own-record query (one read for the whole
+  // home) instead of issuing its own fetch.
+  const { status, timeline } = useOwnRecordTimeline();
+  const failed = status === "error";
 
-  useEffect(() => {
-    let active = true;
-    fetchOwnRecord()
-      .then((record) => {
-        if (active) setEntries(record.entries);
-      })
-      .catch((err: unknown) => {
-        // Third-party-integration standard + record-page honesty rule: a failed
-        // read never renders as a calm "no activity" empty state - it would lie
-        // about why the card is empty. The preview stays absent, with the
-        // failure logged so it stays distinguishable from a truly empty record.
-        console.warn(
-          "[recent-activity] record fetch failed, hiding card:",
-          err,
-        );
-        if (active) setFailed(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const entries: RecordEntryView[] | null =
+    status === "ready" && timeline ? timeline.entries : null;
 
   const visible = useMemo(() => {
     if (entries === null) return [];
