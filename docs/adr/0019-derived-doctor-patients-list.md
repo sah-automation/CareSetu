@@ -34,6 +34,8 @@ That bound is a property of the Patients list's pagination, not of the disciplin
 
 (#903) The per-row discipline is unchanged - still one health-ledger transaction and one consent egress transaction per served row - but the writes for a page now run **concurrently** (`asyncio.gather`) instead of serially, and the row set's identity-profile enrichment is one batched read (`get_patient_profiles`) instead of one read per patient. Concurrency changes only the wall-clock cost, not what is written: every served row is still logged once, every granted row still disclosed once, and a failed write still fails the read.
 
+(#903) The patient access-history read is bounded to the newest **200** rows (`ACCESS_HISTORY_MAX_ROWS`, a constant pinned by this decision record per coding-standards §9.2). The ledger grows without limit but the view is a trust read of recent activity: newest-first ordering is unchanged, rows older than the newest 200 stop being served, and the read's cost is capped no matter how large the ledger grows.
+
 One asymmetry is deliberate: the entry-keyed consented reads (`read_consented_history`, `read_consented_health_background`) self-ledger both the allowed and the denied attempt, while a doctor with **no** live grant for the photo route is a boundary refusal - the same 403 shape as an RBAC denial, with no byte read and no ledger row, because nothing was disclosed.
 
 ## Consequences
