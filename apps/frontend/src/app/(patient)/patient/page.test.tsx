@@ -1220,6 +1220,36 @@ describe("recent activity card (#506)", () => {
     expect(row).toHaveTextContent(/2026/);
   });
 
+  it("fetches the own record exactly once for the whole home (#904)", async () => {
+    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+    renderHome();
+
+    // The home composes three consumers of the shared own-record query - the
+    // page's summary counts, the Recent-activity rows, and the Health-snapshot
+    // counts. The shared TanStack query must dedupe them into ONE network
+    // fetch instead of the three the pre-#904 home paid.
+    await screen.findByTestId("recent-activity");
+    await screen.findByTestId("health-snapshot");
+    await waitFor(() => {
+      expect(recordApi.fetchOwnRecord).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("serves a navigation back to the home from cache inside the stale window (#904)", async () => {
+    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+
+    // First visit: the one network read, then leave (unmount).
+    const { unmount } = renderHome();
+    await screen.findByTestId("recent-activity");
+    unmount();
+
+    // Second visit inside OWN_RECORD_STALE_TIME: the cached timeline answers
+    // the mount, so no second fetch rides the navigation (story 1).
+    renderHome();
+    await screen.findByTestId("recent-activity");
+    expect(recordApi.fetchOwnRecord).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps access-history out of the recent-activity card", async () => {
     seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
     renderHome();

@@ -9,13 +9,11 @@
 
 import type { QueryClient } from "@tanstack/react-query";
 
+import { API_BASE_URL } from "@/lib/api-base";
 import {
   ACCESS_TOKEN_TTL_SECONDS,
   PROACTIVE_REFRESH_RATIO,
 } from "@/lib/config";
-
-const API_BASE_URL: string =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 export interface MeResponse {
   /** The principal identity the token is scoped to (a numeric string, #196). */
@@ -28,6 +26,9 @@ export interface MeResponse {
 export async function fetchMe(jwt: string): Promise<MeResponse> {
   const res = await fetch(`${API_BASE_URL}/v1/me`, {
     headers: { Authorization: `Bearer ${jwt}` },
+    // ADR-0005: cookie transport rides along on split-origin deploys, like
+    // every other authed call in the app.
+    credentials: "include",
   });
   if (!res.ok) {
     throw new Error(`GET /v1/me returned ${res.status}`);
@@ -63,6 +64,10 @@ export function fetchSessionMe(
     queryKey: sessionMeQueryKey(jwt),
     queryFn: () => fetchMe(jwt),
     staleTime: SESSION_ME_STALE_TIME,
+    // fetchQuery leaves the entry unobserved, so the default 5-minute gcTime
+    // would evict it mid-window and force a refetch; the cache entry must
+    // outlive the stale window for the cached check to mean anything.
+    gcTime: SESSION_ME_STALE_TIME,
     retry: false,
   });
 }

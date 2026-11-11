@@ -68,13 +68,6 @@ export interface PartnerVerifyResult {
   lockout_remaining_seconds: number | null;
 }
 
-export interface MeResult {
-  subject_id: string;
-  roles: string[];
-  phone: string;
-  tier: string | null;
-}
-
 export interface DemoOtpResult {
   code: string | null;
 }
@@ -173,15 +166,11 @@ export function partnerVerify(
   return post<PartnerVerifyResult>("/v1/auth/partner/verify", { phone, otp });
 }
 
-export async function fetchMe(jwt: string): Promise<MeResult> {
-  const response = await fetch(`${API_BASE_URL}/v1/me`, {
-    headers: { Authorization: `Bearer ${jwt}` },
-  });
-  if (!response.ok) {
-    throw new Error(`GET /v1/me returned ${response.status}`);
-  }
-  return (await response.json()) as MeResult;
-}
+// #904: one /v1/me client, owned by the session-query seam (bearer header +
+// ADR-0005 cookie transport); the staff login form reuses it here instead of
+// carrying a second copy.
+export { fetchMe } from "./sessionQuery";
+export type { MeResponse as MeResult } from "./sessionQuery";
 
 export async function fetchDemoOtp(phone: string): Promise<string | null> {
   try {

@@ -50,9 +50,9 @@
 // the health snapshot, and "Who accessed my record", in that order, with the
 // record rail's sticky offset and spacing. The two new sections render the
 // shared components extracted in #666/#669 and are fed from ONE own-record read
-// via the shared useOwnRecord hook (story 33); HealthSnapshotCard keeps its own
-// self-fetch, and the record page keeps passing its loaded timeline down. On
-// small screens the aside stacks after the main cards in the same order.
+// via the shared TanStack query (#904): the page's useOwnRecord hook and both
+// cards' useOwnRecordTimeline consume the same cached answer. On small screens
+// the aside stacks after the main cards in the same order.
 
 import { useState } from "react";
 

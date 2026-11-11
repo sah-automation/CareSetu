@@ -10,8 +10,10 @@
 // ("record", "own", identityId), the in-flight read is shared by construction,
 // and a client-side navigation inside the stale window answers from cache
 // instead of refetching. Loading/error postures are unchanged: a failed read
-// hides the consuming sections rather than claiming the record is empty (the
-// record page's honesty rule), and the failure is logged (coding-standards §8).
+// with no cached answer hides the consuming sections rather than claiming the
+// record is empty (the record page's honesty rule), a cached answer keeps
+// rendering while a background refetch fails, and the failure is logged
+// (coding-standards §8).
 
 import { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -31,8 +33,12 @@ import {
 // cached timeline instead of paying for a second read.
 export const OWN_RECORD_STALE_TIME = 60_000;
 
-export function ownRecordQueryKey(identityId: number): readonly unknown[] {
-  return ["record", "own", identityId] as const;
+export function ownRecordQueryKey(
+  identityId: number | undefined,
+): readonly unknown[] {
+  // The signed-out segment can never match a signed-in key, and the query is
+  // disabled without an identity - the sentinel only keeps the array typed.
+  return ["record", "own", identityId ?? "signed-out"] as const;
 }
 
 type LoadStatus = "loading" | "ready" | "error";
@@ -58,15 +64,16 @@ export function useOwnRecordTimeline(): OwnRecordTimelineView {
   const identityId = user?.id;
 
   const query = useQuery({
-    queryKey: ownRecordQueryKey(identityId ?? -1),
+    queryKey: ownRecordQueryKey(identityId),
     queryFn: () => fetchOwnRecord(),
     enabled: identityId !== undefined,
     staleTime: OWN_RECORD_STALE_TIME,
   });
 
-  // A failed read hides the record-consuming surfaces rather than claiming the
-  // record is empty; the failure is logged so it stays reproducible
-  // (coding-standards §8) - once per failed fetch, not on every render.
+  // Cached data wins over a failed background refetch (stale-while-error): the
+  // surfaces keep rendering the timeline they already hold, and the failure is
+  // logged so it stays reproducible (coding-standards §8) - once per failed
+  // fetch, not on every render.
   useEffect(() => {
     if (query.isError) {
       console.warn(
@@ -77,7 +84,7 @@ export function useOwnRecordTimeline(): OwnRecordTimelineView {
   }, [query.isError, query.error]);
 
   return {
-    status: query.isPending ? "loading" : query.isError ? "error" : "ready",
+    status: query.isPending ? "loading" : query.data ? "ready" : "error",
     timeline: query.data ?? null,
     refetching: query.isFetching,
     error: query.error,
