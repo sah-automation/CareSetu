@@ -84,25 +84,29 @@ class StubCareFacade:
 
 
 class StubIamFacade:
-    """Per-identity profile stand-in; can fail wholesale or for one patient."""
+    """Batch profile stand-in; can fail wholesale for the whole call."""
 
     def __init__(
         self,
         profiles: dict[int, object] | None = None,
         *,
         fail: bool = False,
-        fail_for: int | None = None,
     ) -> None:
         self.profiles = profiles or {}
         self.fail = fail
-        self.fail_for = fail_for
         self.reads: list[int] = []
+        self.calls: list[list[int]] = []
 
-    async def get_patient_profile(self, identity_id: int) -> object:
-        self.reads.append(identity_id)
-        if self.fail or identity_id == self.fail_for:
+    async def get_patient_profiles(self, identity_ids: list[int]) -> dict[int, object]:
+        self.calls.append(list(identity_ids))
+        self.reads.extend(identity_ids)
+        if self.fail:
             raise RuntimeError("iam seam down")
-        return self.profiles.get(identity_id)
+        return {
+            identity_id: self.profiles[identity_id]
+            for identity_id in identity_ids
+            if identity_id in self.profiles
+        }
 
 
 class StubHealthFacade:
@@ -327,19 +331,18 @@ async def test_profile_failure_degrades_the_whole_batch_to_anonymous_rows(
 
 
 @pytest.mark.asyncio
-async def test_a_mid_batch_profile_failure_still_degrades_the_whole_batch() -> None:
-    # Not a per-row fallback: patient 10's profile resolves before the read for
-    # 20 fails, and its name is dropped too - a half-enriched batch would
-    # imply a partial read of the identity module that never happened.
+async def test_the_batch_resolves_profiles_in_one_seam_call() -> None:
+    # Not one read per patient (#903): the whole distinct patient set is
+    # resolved through a single batched identity read, so a half-enriched
+    # batch (one per-row read failing after another succeeded) cannot arise.
     care = StubCareFacade([_case(case_id=1, patient_id=10), _case(case_id=2, patient_id=20)])
-    iam = StubIamFacade({10: _profile("Ravi Kumar", 32)}, fail_for=20)
+    iam = StubIamFacade({10: _profile("Ravi Kumar", 32)})
     facade = _facade(care=care, iam=iam)
 
     result = await facade.list_doctor_cases(doctor_id=_DOCTOR_ID)
 
-    assert iam.reads == [10, 20]
-    assert [row.patient_name for row in result.items] == [None, None]
-    assert [row.patient_age for row in result.items] == [None, None]
+    assert iam.calls == [[10, 20]]
+    assert [row.patient_name for row in result.items] == ["Ravi Kumar", None]
 
 
 # ---------------------------------------------------------------------------

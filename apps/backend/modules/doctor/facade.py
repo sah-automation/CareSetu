@@ -10,6 +10,7 @@ the composition root (``app/main.py``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, TypeVar
@@ -252,19 +253,32 @@ class DoctorConsoleFacade:
         start = (page - 1) * per_page
         page_rows = rows[start : start + per_page]
 
+        # The per-row ledger writes fan out concurrently (#903): every served
+        # row's access-log write runs concurrently with - and every granted
+        # row's egress-disclosure write alongside - the other rows' writes,
+        # instead of serializing into one round trip per row. What is written
+        # is unchanged: every served row is access-logged and every granted
+        # row egress-disclosed, and a failed write still fails the read.
+        writes: list[Awaitable[None]] = []
         for row in page_rows:
-            await self._health_facade.log_doctor_patient_view(
-                patient_id=row.patient_id, doctor_id=doctor_id
+            writes.append(
+                self._health_facade.log_doctor_patient_view(
+                    patient_id=row.patient_id, doctor_id=doctor_id
+                )
             )
-            # A row the doctor reaches through a care case alone (Past, or
-            # Current-by-case) carries no live standing grant, so there is no
-            # consent lineage to disclose the egress against: fail closed and
-            # leave the egress log untouched rather than citing a consent the
-            # patient never granted. The access-history row above still
-            # records that the row was served.
             patient_grants = grants_by_patient.get(row.patient_id, [])
             if patient_grants:
-                await self._disclose_against_grant(patient_grants, row.patient_id, doctor_id)
+                # A row the doctor reaches through a care case alone (Past, or
+                # Current-by-case) carries no live standing grant, so there is
+                # no consent lineage to disclose the egress against: fail
+                # closed and leave the egress log untouched rather than
+                # citing a consent the patient never granted. The
+                # access-history write above still records that the row was
+                # served.
+                writes.append(
+                    self._disclose_against_grant(patient_grants, row.patient_id, doctor_id)
+                )
+        await asyncio.gather(*writes)
 
         return PatientsListView(items=page_rows, total=total)
 
@@ -294,15 +308,16 @@ class DoctorConsoleFacade:
         failed profile resolution must never take the whole list down, so the
         run degrades to anonymous rows with a warning logged and no patient
         ids or PHI in the log line (error-handling-observability §2).
+
+        One batched read (#903): the whole id set is resolved through
+        ``get_patient_profiles`` in a single query instead of one
+        ``get_patient_profile`` call per patient, so the enrichment cost is
+        one round trip for the page rather than one per row.
         """
-        profiles: dict[int, PatientProfile] = {}
         if not patient_ids:
-            return profiles
+            return {}
         try:
-            for patient_id in patient_ids:
-                profile = await self._iam_facade.get_patient_profile(patient_id)
-                if profile is not None:
-                    profiles[patient_id] = profile
+            return await self._iam_facade.get_patient_profiles(patient_ids)
         except Exception:
             # No ``exc_info``: a traceback frame or exception message can
             # carry the patient id (error-handling-observability §2, the
@@ -310,8 +325,7 @@ class DoctorConsoleFacade:
             logger.warning(
                 "doctor-console profile resolution failed; degrading to anonymous rows",
             )
-            profiles = {}
-        return profiles
+            return {}
 
     async def list_doctor_cases(self, *, doctor_id: int) -> DoctorCasesListView:
         """Return the doctor's open care cases as displayable rows (#646).
@@ -381,19 +395,30 @@ class DoctorConsoleFacade:
             )
         rows.sort(key=lambda row: (row.created_at, row.case_id))
 
+        # Same concurrent ledger fan-out as the Patients list (#903): every
+        # open-case row's access-log write (under the cases marker) and every
+        # granted row's egress-disclosure write run concurrently instead of
+        # serially, with what is written unchanged.
+        writes: list[Awaitable[None]] = []
         for row in rows:
-            await self._health_facade.log_doctor_patient_view(
-                patient_id=row.patient_id,
-                doctor_id=doctor_id,
-                scope=_CASES_SCOPE_MARKER,
+            writes.append(
+                self._health_facade.log_doctor_patient_view(
+                    patient_id=row.patient_id,
+                    doctor_id=doctor_id,
+                    scope=_CASES_SCOPE_MARKER,
+                )
             )
-            # Same fail-closed rule as the Patients list: a case row the doctor
-            # reaches without any live standing grant has no consent lineage to
-            # disclose against, so no egress row is fabricated for it. The
-            # access-history row above still records that the row was served.
             patient_grants = grants_by_patient.get(row.patient_id, [])
             if patient_grants:
-                await self._disclose_against_grant(patient_grants, row.patient_id, doctor_id)
+                # Same fail-closed rule as the Patients list: a case row the
+                # doctor reaches without any live standing grant has no
+                # consent lineage to disclose against, so no egress row is
+                # fabricated for it. The access-history write above still
+                # records that the row was served.
+                writes.append(
+                    self._disclose_against_grant(patient_grants, row.patient_id, doctor_id)
+                )
+        await asyncio.gather(*writes)
 
         return DoctorCasesListView(items=rows)
 

@@ -32,6 +32,8 @@ Each row actually returned to the doctor is recorded through the `MOD-003` acces
 
 That bound is a property of the Patients list's pagination, not of the discipline itself, and it does **not** carry to an unpaginated read. The doctor's open-cases list (#646) logs every served row and writes one ledger transaction per row with nothing to cap it at, so its cost scales with the doctor's open caseload; pagination on that list is deferred, and this is the reason to revisit it if a large caseload ever makes the write cost matter.
 
+(#903) The per-row discipline is unchanged - still one health-ledger transaction and one consent egress transaction per served row - but the writes for a page now run **concurrently** (`asyncio.gather`) instead of serially, and the row set's identity-profile enrichment is one batched read (`get_patient_profiles`) instead of one read per patient. Concurrency changes only the wall-clock cost, not what is written: every served row is still logged once, every granted row still disclosed once, and a failed write still fails the read.
+
 One asymmetry is deliberate: the entry-keyed consented reads (`read_consented_history`, `read_consented_health_background`) self-ledger both the allowed and the denied attempt, while a doctor with **no** live grant for the photo route is a boundary refusal - the same 403 shape as an RBAC denial, with no byte read and no ledger row, because nothing was disclosed.
 
 ## Consequences

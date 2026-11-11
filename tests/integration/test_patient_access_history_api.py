@@ -39,7 +39,7 @@ from sqlalchemy.pool import NullPool
 
 from modules.audit.facade import AuditFacade
 from modules.health.domain.exceptions import RecordAccessDeniedError
-from modules.health.facade import HealthFacade
+from modules.health.facade import ACCESS_HISTORY_MAX_ROWS, HealthFacade
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -344,3 +344,39 @@ async def test_audit_facade_delegates_access_history_to_the_health_facade(
     assert view.entries[0].actor_id == _DOCTOR
     assert view.entries[0].actor_type == "doctor"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_access_history_is_bounded_to_the_newest_rows(
+    database_url: str, clean_tables: None
+) -> None:
+    """#903: a long ledger cannot make one trust read unbounded.
+
+    The read answers the newest ``ACCESS_HISTORY_MAX_ROWS`` rows, newest
+    first, truncating the rest - the same ordering contract, now bounded.
+    """
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        facade = HealthFacade(engine)
+        record_id = await facade.create_record(_IDENTITY)
+        total = ACCESS_HISTORY_MAX_ROWS + 7
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO health.health_record_access_history "
+                    "(record_id, accessor_identity_id, outcome, actor_type, scope, accessed_at) "
+                    "SELECT :record_id, 7, 'allowed', 'doctor', 'doctor_patients_list', "
+                    "now() - make_interval(secs => s) "
+                    "FROM generate_series(1, :total, 1) AS s"
+                ),
+                {"record_id": record_id, "total": total},
+            )
+        view = await facade.get_access_history(_IDENTITY)
+    finally:
+        await engine.dispose()
+
+    assert len(view.entries) == ACCESS_HISTORY_MAX_ROWS
+    assert all(entry.actor_id == 7 for entry in view.entries)
+    # Newest first: the newest inserted row (s=1, least seconds back) leads.
+    stamps = [entry.accessed_at for entry in view.entries]
+    assert stamps == sorted(stamps, reverse=True)

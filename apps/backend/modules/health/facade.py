@@ -22,6 +22,7 @@ append-only egress audit row (see inline ADR in ``read_consented_history``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -91,6 +92,14 @@ _HEALTH_BACKGROUND_SCOPE = "health_background"
 _ACTOR_TYPE_PATIENT = "patient"
 
 _ACTOR_TYPE_DOCTOR: Literal["doctor", "lab", "chemist"] = "doctor"
+
+# The hard bound on one access-history read (#903, api-standards §4): a
+# counterparty ledger that grew without limit previously made the trust read
+# unbounded - every row in the ledger came back in one response. The read
+# stays newest-first and answers the most recent ``ACCESS_HISTORY_MAX_ROWS``
+# rows; the ordering contract (and every response field) is unchanged, so a
+# long history now truncates instead of stalling the request.
+ACCESS_HISTORY_MAX_ROWS: Final[int] = 200
 
 # The access-history scope marker for the doctor-console Patients list
 # (MOD-012, ADR-0019). A list row has no single record entry or consent
@@ -474,6 +483,13 @@ async def query_access_history(
     counterparty answers an empty list. Running inside the caller's
     connection keeps the read single-transaction and testable without a
     database (same seam shape as MOD-011's ``query_audit_events``).
+
+    Latency discipline (#903): the query is bounded to the newest
+    ``ACCESS_HISTORY_MAX_ROWS`` rows, and the display-name seam is resolved
+    once per DISTINCT counterparty (deduplicated, resolved concurrently)
+    rather than once per row - a history written by one doctor costs one
+    name resolution, not one per ledger row. Per-pair failure still degrades
+    to null exactly as the per-row seam did.
     """
     rows = (
         await connection.execute(
@@ -505,16 +521,45 @@ async def query_access_history(
                 health_record_access_history.c.accessed_at.desc(),
                 health_record_access_history.c.id.desc(),
             )
+            .limit(ACCESS_HISTORY_MAX_ROWS)
         )
     ).all()
+
+    # Collect the DISTINCT non-patient actors that need a name, in row order.
+    # Patient-type actors never reach the seam (stories 21-22) and untyped
+    # rows answer null, so neither is collected.
+    counterparty_keys: list[tuple[str, int]] = []
+    for row in rows:
+        if row.actor_type is None or row.actor_type == _ACTOR_TYPE_PATIENT:
+            continue
+        key = (str(row.actor_type), int(row.accessor_identity_id))
+        if key not in counterparty_keys:
+            counterparty_keys.append(key)
+
+    # One resolution per distinct counterparty, run concurrently; gather
+    # preserves key order so the mapping below is deterministic. Each call
+    # carries its own degrade-to-null semantics (the bound seam wrapper).
+    names = dict(
+        zip(
+            counterparty_keys,
+            await asyncio.gather(
+                *(
+                    _resolve_actor_display_name(display_name, actor_type, actor_id)
+                    for actor_type, actor_id in counterparty_keys
+                )
+            ),
+            strict=True,
+        )
+    )
+
     return AccessHistoryView(
         entries=[
             AccessHistoryEntry(
                 actor_id=int(row.accessor_identity_id),
                 actor_type=row.actor_type,
-                actor_display_name=await _resolve_actor_display_name(
-                    display_name, row.actor_type, row.accessor_identity_id
-                ),
+                actor_display_name=names.get((str(row.actor_type), int(row.accessor_identity_id)))
+                if row.actor_type is not None and row.actor_type != _ACTOR_TYPE_PATIENT
+                else None,
                 scope=row.scope,
                 accessed_at=row.accessed_at,
                 denied=row.outcome == "denied",

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
@@ -1251,6 +1251,43 @@ class IdentityFacade:
                     ttl_seconds=_ttl,
                 )
         return result
+
+    async def get_patient_profiles(
+        self,
+        identity_ids: Sequence[int],
+    ) -> dict[int, PatientProfile]:
+        """Read many patients' saved profiles in one query (#903).
+
+        The batched sibling of :meth:`get_patient_profile`: one
+        ``identity_id IN (...)`` SELECT for the whole id set, so a caller
+        enriching a page of rows costs one round trip instead of one per
+        patient. Ids with no saved profile row are simply absent from the
+        result (the same typed "not set" ``None`` answers per id). Read-only;
+        opens its own transaction and always reads SQL directly - the Redis
+        per-id cache serves the single-id seam, while the batch read stays
+        fresh by construction and touches no cache state.
+
+        Touches only the ``iam`` schema (ADR-0003).
+        """
+        ids = sorted({int(identity_id) for identity_id in identity_ids})
+        if not ids:
+            return {}
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                select(iam_patient_profiles).where(iam_patient_profiles.c.identity_id.in_(ids))
+            )
+            return {
+                int(row["identity_id"]): PatientProfile(
+                    name=row["name"],
+                    age=row["age"],
+                    gender=row["gender"],
+                    preferred_language=row["preferred_language"],
+                    area=row["area"],
+                    emergency_contact=row["emergency_contact"],
+                    photo_ref=row["photo_ref"],
+                )
+                for row in result.mappings()
+            }
 
     async def save_patient_photo(
         self,

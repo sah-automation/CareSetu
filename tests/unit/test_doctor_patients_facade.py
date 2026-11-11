@@ -68,7 +68,7 @@ class StubCareFacade:
 
 
 class StubIamFacade:
-    """Per-identity profile stand-in; can be pointed to fail wholesale."""
+    """Batch profile stand-in; can be pointed to fail wholesale."""
 
     def __init__(
         self,
@@ -79,12 +79,18 @@ class StubIamFacade:
         self.profiles = profiles or {}
         self.fail = fail
         self.reads: list[int] = []
+        self.calls: list[list[int]] = []
 
-    async def get_patient_profile(self, identity_id: int) -> object:
-        self.reads.append(identity_id)
+    async def get_patient_profiles(self, identity_ids: list[int]) -> dict[int, object]:
+        self.calls.append(list(identity_ids))
+        self.reads.extend(identity_ids)
         if self.fail:
             raise RuntimeError("iam seam down")
-        return self.profiles.get(identity_id)
+        return {
+            identity_id: self.profiles[identity_id]
+            for identity_id in identity_ids
+            if identity_id in self.profiles
+        }
 
 
 class StubHealthFacade:
@@ -350,6 +356,23 @@ async def test_profile_resolution_failure_degrades_to_anonymous_rows() -> None:
     assert result.items[0].name is None
     assert result.items[0].age is None
     assert result.items[0].has_photo is False
+
+
+@pytest.mark.asyncio
+async def test_the_batch_resolves_profiles_in_one_seam_call() -> None:
+    # Not one read per patient (#903): the page's whole distinct patient set
+    # is resolved through a single batched identity read.
+    consent = StubConsentFacade([_grant(patient_id=10), _grant(patient_id=20)])
+    care = StubCareFacade([_case(case_id=1, patient_id=20, stage="closed", updated_at=NOW)])
+    iam = StubIamFacade({10: _profile("Ravi Kumar")})
+    facade = _facade(consent=consent, care=care, iam=iam)
+
+    result = await facade.list_doctor_patients(doctor_id=_DOCTOR_ID)
+
+    assert iam.calls == [[10, 20]]
+    by_id = {item.patient_id: item for item in result.items}
+    assert by_id[10].name == "Ravi Kumar"
+    assert by_id[20].name is None
 
 
 @pytest.mark.asyncio
