@@ -294,6 +294,8 @@ def _cors_client() -> TestClient:
 
 
 def test_cors_preflight_echoes_configured_origin() -> None:
+    """Ticket #906 / FEAT-008: a cross-origin preflight OPTIONS to
+    /v1/doctor/cases echoes the configured origin as Access-Control-Allow-Origin."""
     client = _cors_client()
 
     response = client.options(
@@ -309,6 +311,9 @@ def test_cors_preflight_echoes_configured_origin() -> None:
 
 
 def test_cors_actual_request_echoes_configured_origin() -> None:
+    """Ticket #906 / FEAT-008: a cross-origin authenticated GET to
+    /v1/doctor/cases returns 200 and echoes the configured origin as
+    Access-Control-Allow-Origin."""
     client = _cors_client()
 
     response = client.get(
@@ -321,6 +326,8 @@ def test_cors_actual_request_echoes_configured_origin() -> None:
 
 
 def test_cors_non_listed_origin_returns_no_allow_origin() -> None:
+    """Ticket #906 / FEAT-008: a cross-origin request from a non-listed origin to
+    /v1/doctor/cases returns 200 with no Access-Control-Allow-Origin header."""
     client = _cors_client()
 
     response = client.get(
