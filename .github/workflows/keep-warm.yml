@@ -7,10 +7,11 @@ name: Keep backend warm
 #
 # Carries no credentials: it reads only the public LIVE_BACKEND_URL repository
 # variable and pings the public health endpoint.
+# If need backend warm-up cron, add this inside "on" bellow:
+#  schedule:
+#    - cron: "*/10 * * * *"
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 concurrency:
