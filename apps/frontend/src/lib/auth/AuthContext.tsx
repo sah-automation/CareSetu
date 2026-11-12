@@ -169,6 +169,16 @@ export async function attemptRefresh(
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  // #904: the validate/resume/refresh flows are mount-time, not render-time.
+  // The router object is not a stable identity on every surface that mounts
+  // AuthProvider (tests hand it a fresh object per render), so the flows read
+  // it through a ref instead of an effect dependency: listing it directly
+  // re-ran mount validation on every render, and once /v1/me is answered from
+  // the session-query cache that loop never terminates.
+  const routerRef = useRef(router);
+  useEffect(() => {
+    routerRef.current = router;
+  });
   // #904: /v1/me runs through the shared query client (the root QueryProvider
   // supplies it; a bare mount, as in tests, falls back to a private client).
   const outerClient = useContext(QueryClientContext);
@@ -227,7 +237,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           clearSession();
           clearCachedSessionMe(queryClient);
           clearCookie("caresetu.access_jwt");
-          router.replace("/login");
+          routerRef.current.replace("/login");
         }
       } finally {
         if (!cancelled) {
@@ -241,7 +251,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [router, queryClient]);
+  }, [queryClient]);
 
   useEffect(() => {
     if (!user) {
@@ -333,7 +343,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearCookie("caresetu.access_jwt");
         setUser(null);
         setSelectedRole(null);
-        router.replace("/login");
+        routerRef.current.replace("/login");
       }
     };
 
@@ -343,7 +353,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
       clearTimer();
     };
-  }, [user, router]);
+  }, [user]);
 
   function switchRole(role: string) {
     setSelectedRole(role);
@@ -386,10 +396,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearCookie("caresetu.access_jwt");
         setUser(null);
         setSelectedRole(null);
-        router.replace("/login");
+        routerRef.current.replace("/login");
       }
     }
-  }, [router, queryClient]);
+  }, [queryClient]);
 
   function logout() {
     clearSession();
