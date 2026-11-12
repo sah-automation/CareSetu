@@ -13,6 +13,15 @@
 services:
   - type: web
     name: caresetu-backend
+    # Issue #902 (latency): co-locate the backend with the Supabase database
+    # (Singapore) so India-audience requests stop paying a ~250-350 ms
+    # trans-ocean round trip every call. Render cannot change a service's
+    # region in place - a region move means RECREATING the web service, and
+    # the ordered checklist (secret re-entry, JWT signing-key rotation, URL
+    # updates, old-service retirement) lives in
+    # docs/plans/deployment-plan/portfolio-deployment-plan.md #7.2. This line
+    # is what a provisioned/recreated service should be built with.
+    region: singapore
     # The deploy hook fired by deploy.yml is the sole automated deploy
     # trigger, so this stays false: a git "On Commit" auto-deploy would boot
     # before deploy.yml's migrate-and-seed and redeploy on docs-only pushes.

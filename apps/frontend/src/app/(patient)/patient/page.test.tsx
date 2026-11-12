@@ -19,6 +19,9 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { QueryClientProvider } from "@tanstack/react-query";
+import { makeTestQueryClient } from "@/test/query-client";
+
 import PatientDashboardPage from "./page";
 import { ProfileProvider } from "@/lib/profile/ProfileContext";
 import type { StoredPatientProfile } from "@/lib/profile/api";
@@ -152,11 +155,22 @@ function langFlip() {
   );
 }
 
+const testQueryClientRef = { current: makeTestQueryClient() };
+
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={testQueryClientRef.current}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+
 function renderHome() {
   return render(
     <ProfileProvider>
       <LangFlipHost />
     </ProfileProvider>,
+    { wrapper: QueryWrapper },
   );
 }
 
@@ -172,6 +186,7 @@ function LangFlipHost() {
 beforeEach(() => {
   window.localStorage.clear();
   __resetLangForTests();
+  testQueryClientRef.current = makeTestQueryClient();
   state.getProfile.mockReset();
   state.saveProfile.mockReset();
   state.push.mockReset();
@@ -199,6 +214,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  testQueryClientRef.current = makeTestQueryClient();
 });
 
 describe("patient home shell (#499)", () => {
@@ -1202,6 +1218,36 @@ describe("recent activity card (#506)", () => {
     expect(pill).toHaveClass("bg-success-soft");
     expect(pill).not.toHaveTextContent(STRINGS.en.record.badge.active);
     expect(row).toHaveTextContent(/2026/);
+  });
+
+  it("fetches the own record exactly once for the whole home (#904)", async () => {
+    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+    renderHome();
+
+    // The home composes three consumers of the shared own-record query - the
+    // page's summary counts, the Recent-activity rows, and the Health-snapshot
+    // counts. The shared TanStack query must dedupe them into ONE network
+    // fetch instead of the three the pre-#904 home paid.
+    await screen.findByTestId("recent-activity");
+    await screen.findByTestId("health-snapshot");
+    await waitFor(() => {
+      expect(recordApi.fetchOwnRecord).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("serves a navigation back to the home from cache inside the stale window (#904)", async () => {
+    seedTimeline([entry(1, "consultation", "2026-09-21T08:00:00.000Z")]);
+
+    // First visit: the one network read, then leave (unmount).
+    const { unmount } = renderHome();
+    await screen.findByTestId("recent-activity");
+    unmount();
+
+    // Second visit inside OWN_RECORD_STALE_TIME: the cached timeline answers
+    // the mount, so no second fetch rides the navigation (story 1).
+    renderHome();
+    await screen.findByTestId("recent-activity");
+    expect(recordApi.fetchOwnRecord).toHaveBeenCalledTimes(1);
   });
 
   it("keeps access-history out of the recent-activity card", async () => {

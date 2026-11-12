@@ -21,6 +21,9 @@ import {
   vi,
 } from "vitest";
 
+import { QueryClientProvider } from "@tanstack/react-query";
+import { makeTestQueryClient } from "@/test/query-client";
+
 import RecordPage from "./page";
 import PatientGroupLayout from "@/app/(patient)/layout";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
@@ -154,6 +157,23 @@ function resolveWith(timeline: RecordTimeline | null) {
   );
 }
 
+// #904: the record page reads through the shared TanStack query - every
+// render gets a fresh test client (retry disabled) so cache never leaks
+// between tests and fetch counts stay exact.
+const testQueryClientRef = { current: makeTestQueryClient() };
+
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={testQueryClientRef.current}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+
+function renderWithShell(ui: React.ReactNode) {
+  return render(ui, { wrapper: QueryWrapper });
+}
+
 function accessEntry(
   overrides: Partial<AccessHistoryEntry>,
 ): AccessHistoryEntry {
@@ -196,6 +216,7 @@ function resolveAccessWith(entries: AccessHistoryEntry[] | null) {
 
 beforeEach(() => {
   __resetLangForTests();
+  testQueryClientRef.current = makeTestQueryClient();
   resolveWith(TIMELINE);
   resolveAccessWith(ACCESS_HISTORY);
 });
@@ -203,6 +224,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  testQueryClientRef.current = makeTestQueryClient();
 });
 
 async function waitForTimeline() {
@@ -217,7 +239,7 @@ function openMoreMenu() {
 
 describe("RecordPage (inside the patient light shell)", () => {
   it("mounts within the patient AppShell with header and filters", async () => {
-    render(
+    renderWithShell(
       <PatientGroupLayout>
         <LangFlipHost />
       </PatientGroupLayout>,
@@ -241,7 +263,7 @@ describe("RecordPage (inside the patient light shell)", () => {
   }, 15_000);
 
   it("renders API entries newest-first regardless of payload order", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const ids = [
@@ -257,7 +279,7 @@ describe("RecordPage (inside the patient light shell)", () => {
   });
 
   it("shows the delivered prescription with its success badge", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     expect(screen.getByTestId("entry-24")).toHaveTextContent("Delivered");
@@ -266,7 +288,7 @@ describe("RecordPage (inside the patient light shell)", () => {
 
   it("shows skeletons while loading and recovers when Retry succeeds", async () => {
     resolveWith(null);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
 
     expect(screen.getByTestId("record-loading")).toBeInTheDocument();
     await screen.findByTestId("error-banner");
@@ -290,17 +312,15 @@ describe("RecordPage (inside the patient light shell)", () => {
     await waitForTimeline();
 
     expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
-    // RecordPage fetched 3x; the two health-snapshot cards (one per zone) mount
-    // on the first ready render and fetch once each = 5 total. The cards render
-    // in the same commit as the timeline, so wait on them before counting - a
-    // bare assertion could race the card effects' first fetch.
+    // RecordPage's shared query fetches 3x (initial fail, retry fail, retry success);
+    // the two health-snapshot cards now read the same query, so no extra fetches.
     await screen.findAllByTestId("health-snapshot");
-    await waitFor(() => expect(mockFetchOwnRecord).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(mockFetchOwnRecord).toHaveBeenCalledTimes(3));
   });
 
   it("lets Dismiss close the error banner without refetching", async () => {
     resolveWith(null);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await screen.findByTestId("error-banner");
 
     fireEvent.click(screen.getByTestId("error-banner-dismiss"));
@@ -320,7 +340,7 @@ function LangFlipHost() {
 
 describe("RecordPage type filters", () => {
   it("filters by a chip's type and reflects aria-pressed", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     fireEvent.click(screen.getByTestId("filter-chip-prescription"));
@@ -338,7 +358,7 @@ describe("RecordPage type filters", () => {
   });
 
   it("collapses Lab results + Metrics into More, which renames to the active filter", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const trigger = screen.getByTestId("filter-more-btn");
@@ -370,7 +390,7 @@ describe("RecordPage type filters", () => {
       ...TIMELINE,
       entries: [entry({ entry_id: 28, entry_type: "consultation" })],
     });
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     // Metrics is a chip at 720px+; this exercises the mobile menu path down
@@ -387,7 +407,7 @@ describe("RecordPage type filters", () => {
 
   it("shows the empty state when the fresh timeline has no entries at all", async () => {
     resolveWith({ ...TIMELINE, entries: [] });
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
 
     expect(await screen.findByTestId("empty-state")).toHaveTextContent(
       "No entries yet",
@@ -397,7 +417,7 @@ describe("RecordPage type filters", () => {
 
 describe("RecordPage bilingual EN/HI (REQ-006)", () => {
   it("renames everything incl. Consultations -> परामर्श in Hindi", async () => {
-    render(<LangFlipHost />);
+    renderWithShell(<LangFlipHost />);
     await waitForTimeline();
 
     fireEvent.click(screen.getByText("flip-lang"));
@@ -418,7 +438,7 @@ describe("RecordPage bilingual EN/HI (REQ-006)", () => {
 
 describe("RecordPage access history", () => {
   it("renders the resolved label, role word, scope and timestamp", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await screen.findByTestId("access-history-list");
 
     expect(mockFetchAccessHistory).toHaveBeenCalledWith(7);
@@ -439,7 +459,7 @@ describe("RecordPage access history", () => {
   });
 
   it("sorts entries newest-first by accessed_at", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await screen.findByTestId("access-history-list");
 
     const first = screen.getByTestId("access-entry-0").textContent ?? "";
@@ -460,7 +480,7 @@ describe("RecordPage access history", () => {
         denial_reason: "consent check failed",
       }),
     ]);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await screen.findByTestId("access-entry-0");
 
     const row = screen.getByTestId("access-entry-0");
@@ -482,7 +502,7 @@ describe("RecordPage access history", () => {
         denial_reason: "no consent",
       }),
     ]);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await screen.findByTestId("access-entry-0");
 
     const row = screen.getByTestId("access-entry-0");
@@ -499,7 +519,7 @@ describe("RecordPage access history", () => {
 
   it("shows an empty state when there is no access history", async () => {
     resolveAccessWith([]);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
 
     // Growing inline empty copy inside the accordion (both zones carry it).
     const mobileCard = await screen.findByTestId("access-history");
@@ -511,7 +531,7 @@ describe("RecordPage access history", () => {
 
   it("shows a loading skeleton before the entries resolve", async () => {
     mockFetchAccessHistory.mockReturnValue(new Promise(() => {}));
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
 
     expect(await screen.findByTestId("access-loading")).toBeInTheDocument();
     expect(screen.queryByTestId("access-history-list")).not.toBeInTheDocument();
@@ -519,7 +539,7 @@ describe("RecordPage access history", () => {
 
   it("shows an error banner when access history fails and recovers on Retry", async () => {
     resolveAccessWith(null);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await screen.findByTestId("error-banner");
     expect(mockFetchAccessHistory).toHaveBeenCalledTimes(1);
 
@@ -534,7 +554,7 @@ describe("RecordPage access history", () => {
 describe("RecordPage PROTO-3.1 snapshot strip", () => {
   it("never flashes counts while the record is still loading", async () => {
     mockFetchOwnRecord.mockReturnValue(new Promise(() => {}));
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
 
     expect(screen.queryByTestId("snapshot-strip")).not.toBeInTheDocument();
     expect(
@@ -543,7 +563,7 @@ describe("RecordPage PROTO-3.1 snapshot strip", () => {
   });
 
   it("derives counts from the payload and shows honest zero micro-labels", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const strip = screen.getByTestId("snapshot-strip");
@@ -557,7 +577,7 @@ describe("RecordPage PROTO-3.1 snapshot strip", () => {
   });
 
   it("doubles as a jump-filter: it scopes the feed and mirrors aria-pressed", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     expect(screen.getByTestId("snapshot-consultation")).toHaveAttribute(
@@ -582,7 +602,7 @@ describe("RecordPage PROTO-3.1 snapshot strip", () => {
   });
 
   it("mirrors the same counts as static read-only tiles on desktop", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const desktop = screen.getByTestId("snapshot-strip-desktop");
@@ -616,7 +636,7 @@ describe("RecordPage PROTO-3.1 snapshot strip", () => {
         }),
       ],
     });
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     expect(
@@ -640,7 +660,7 @@ describe("RecordPage PROTO-3.1 snapshot strip", () => {
 
 describe("RecordPage PROTO-3.1 filter chip vocabulary", () => {
   it("renders Metrics as a 720px+ chip and in the mobile More menu", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     expect(screen.getByTestId("filter-chip-metric")).toBeInTheDocument();
@@ -659,7 +679,7 @@ describe("RecordPage PROTO-3.1 filter chip vocabulary", () => {
 
 describe("RecordPage PROTO-3.1 timeline date grouping", () => {
   it("labels month buckets with a localized heading and count", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     expect(screen.getByTestId("group-2026-08")).toBeInTheDocument();
@@ -680,7 +700,7 @@ describe("RecordPage PROTO-3.1 timeline date grouping", () => {
         entry({ entry_id: 20, occurred_at: "2026-07-05T10:00:00Z" }),
       ],
     });
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     for (const key of ["2026-08", "2026-07"]) {
@@ -692,7 +712,7 @@ describe("RecordPage PROTO-3.1 timeline date grouping", () => {
   });
 
   it("links every entry card to its detail page", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     expect(screen.getByTestId("entry-link-24")).toHaveAttribute(
@@ -728,7 +748,7 @@ describe("RecordPage PROTO-3.1 out-of-range lab flags", () => {
 
   it("renders per-row amber badges and the flagged micro-label", async () => {
     resolveWith(FLAGGED_TIMELINE);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     expect(screen.getByTestId("lab-flag-26-0")).toHaveTextContent(
@@ -744,7 +764,7 @@ describe("RecordPage PROTO-3.1 out-of-range lab flags", () => {
 
   it("summarizes flagged rows in the desktop rail footnote", async () => {
     resolveWith(FLAGGED_TIMELINE);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const rail = screen.getByTestId("record-rail");
@@ -755,7 +775,7 @@ describe("RecordPage PROTO-3.1 out-of-range lab flags", () => {
 
 describe("RecordPage PROTO-3.1 zones", () => {
   it("stacks the health snapshot and who-accessed cards under the mobile feed", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await screen.findByTestId("access-history-list");
 
     const mobile = screen.getByTestId("record-privacy-mobile");
@@ -769,7 +789,7 @@ describe("RecordPage PROTO-3.1 zones", () => {
   });
 
   it("mirrors the summary, health snapshot and who-accessed list in the rail", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
     await screen.findByTestId("access-history-rail-list");
 
@@ -797,7 +817,7 @@ describe("RecordPage PROTO-3.1 zones", () => {
       }),
     );
     resolveAccessWith(many);
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await screen.findByTestId("access-history-list");
 
     const mobile = screen.getByTestId("record-privacy-mobile");
@@ -811,7 +831,7 @@ describe("RecordPage PROTO-3.1 zones", () => {
   });
 
   it("summarizes payload counts in the at-a-glance rail card", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const summary = screen.getByTestId("record-rail-summary");
@@ -857,7 +877,7 @@ describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
       ],
       attributed_doctor_name: "Dr. A. Kumar",
     });
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const card = screen.getByTestId("entry-50");
@@ -876,7 +896,7 @@ describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
       attributed_doctor_name: "Dr. A. Kumar",
       chemist_name: "Ramesh Medical Store",
     });
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const card = screen.getByTestId("entry-50");
@@ -894,7 +914,7 @@ describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
       ],
       attributed_doctor_name: "Dr. A. Kumar",
     });
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     expect(screen.getByTestId("entry-50")).toHaveTextContent(
@@ -909,7 +929,7 @@ describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
       items: [{ name: "Amlodipine", dose: "5 mg", frequency: "once daily" }],
       attributed_doctor_name: null,
     });
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const card = screen.getByTestId("entry-50");
@@ -919,7 +939,7 @@ describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
   });
 
   it("keeps the lean Rx form for a legacy prescription without items", async () => {
-    render(<RecordPage />);
+    renderWithShell(<RecordPage />);
     await waitForTimeline();
 
     const card = screen.getByTestId("entry-30");

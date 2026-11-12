@@ -12,11 +12,12 @@
 // teaser, which would lie about why the slot is empty - the record page's
 // honesty rule), with the failure logged.
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
-import { fetchOwnRecord, type RecordEntryView } from "@/lib/record/api";
+import { useOwnRecordTimeline } from "@/lib/record/useOwnRecord";
+import type { RecordEntryView } from "@/lib/record/api";
 import {
   describeEntry,
   formatOccurredAt,
@@ -53,29 +54,13 @@ function ReportTile({ entry }: { entry: RecordEntryView }) {
 export function HealthSnapshotCard() {
   const { lang } = useLang();
   const t = STRINGS[lang].health;
-  // null = resolving the timeline; [] = a record with no snapshot data yet.
-  const [entries, setEntries] = useState<RecordEntryView[] | null>(null);
-  const [failed, setFailed] = useState(false);
+  // #904: the card mounts the shared own-record query (one read for the whole
+  // home) instead of issuing its own fetch.
+  const { status, timeline } = useOwnRecordTimeline();
+  const failed = status === "error";
 
-  useEffect(() => {
-    let active = true;
-    fetchOwnRecord()
-      .then((record) => {
-        if (active) setEntries(record.entries);
-      })
-      .catch((err: unknown) => {
-        // A failed read never passes itself off as an honest "Soon" teaser -
-        // the slot would claim no data exists when the read simply failed.
-        console.warn(
-          "[health-snapshot] record fetch failed, hiding card:",
-          err,
-        );
-        if (active) setFailed(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const entries: RecordEntryView[] | null =
+    status === "ready" && timeline ? timeline.entries : null;
 
   // Derive, never invent: the newest of each snapshot slot by the timeline's
   // reverse-chronological order. Entries arrive sorted, but the defensive sort

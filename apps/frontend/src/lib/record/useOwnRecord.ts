@@ -1,19 +1,24 @@
 "use client";
 
 // MOD-003 (record timeline) / FEAT-003 (patient trust view) + FEAT-006 (patient
-// home): #671 one own-record read per homepage visit, shared between the rail's new
-// "At a glance" and "Who accessed my record" sections (story 33) - parity must
-// not multiply the patient's API traffic. Mirrors the AccessHistoryAccordion
-// store pattern: a module-level external store whose single fetch is started on
-// the first subscriber and dropped once the last listener unmounts, so a fresh
-// visit refetches while a transient remount reuses the in-flight read. The hook
-// hands the new sections exactly what they need - the summary counts and the
-// patient id - so neither re-derives from a second response. HealthSnapshotCard
-// keeps its own self-fetch, and the record page keeps passing its already-loaded
-// timeline down, per the spec's Implementation Decisions.
+// home): #671 one own-record read per homepage visit, shared between the rail's
+// "At a glance", "Who accessed my record", the health snapshot, and recent
+// activity - parity must not multiply the patient's API traffic.
+//
+// #904: the hand-rolled external store became a shared TanStack query so the
+// dedupe generalizes: every consumer mounts the same identity-scoped query
+// ("record", "own", identityId), the in-flight read is shared by construction,
+// and a client-side navigation inside the stale window answers from cache
+// instead of refetching. Loading/error postures are unchanged: a failed read
+// with no cached answer hides the consuming sections rather than claiming the
+// record is empty (the record page's honesty rule), a cached answer keeps
+// rendering while a background refetch fails, and the failure is logged
+// (coding-standards §8).
 
-import { useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 
+import { useAuth } from "@/lib/auth/AuthContext";
 import { fetchOwnRecord, type RecordTimeline } from "@/lib/record/api";
 import {
   countByType,
@@ -24,68 +29,67 @@ import {
   type RecordCounts,
 } from "@/lib/record/timelineView";
 
+// Navigating back to the home (or the record page) within a minute reuses the
+// cached timeline instead of paying for a second read.
+export const OWN_RECORD_STALE_TIME = 60_000;
+
+export function ownRecordQueryKey(
+  identityId: number | undefined,
+): readonly unknown[] {
+  // The signed-out segment can never match a signed-in key, and the query is
+  // disabled without an identity - the sentinel only keeps the array typed.
+  return ["record", "own", identityId ?? "signed-out"] as const;
+}
+
 type LoadStatus = "loading" | "ready" | "error";
 
-interface OwnRecordState {
+export interface OwnRecordTimelineView {
   status: LoadStatus;
+  /** The raw timeline, null until the single read resolves. */
   timeline: RecordTimeline | null;
+  /** True while a fetch (initial or retry) is in flight. */
+  refetching: boolean;
+  /** The failure behind an "error" status (an ApiError with a trace id). */
+  error: unknown;
+  refetch: () => void;
 }
 
-const INITIAL_STATE: OwnRecordState = { status: "loading", timeline: null };
+/**
+ * The one own-record read every record-consuming surface mounts. Gated on the
+ * session identity (the query key carries it, so a different session can never
+ * be served another patient's cached timeline).
+ */
+export function useOwnRecordTimeline(): OwnRecordTimelineView {
+  const { user } = useAuth();
+  const identityId = user?.id;
 
-class OwnRecordStore {
-  private state: OwnRecordState = INITIAL_STATE;
-  private listeners = new Set<() => void>();
-  private started = false;
+  const query = useQuery({
+    queryKey: ownRecordQueryKey(identityId),
+    queryFn: () => fetchOwnRecord(),
+    enabled: identityId !== undefined,
+    staleTime: OWN_RECORD_STALE_TIME,
+  });
 
-  subscribe = (listener: () => void): (() => void) => {
-    this.listeners.add(listener);
-    if (!this.started) this.load();
-    return () => {
-      this.listeners.delete(listener);
-      if (this.listeners.size === 0) {
-        // Deferred so a transient mount/unmount/mount (StrictMode, or a
-        // same-tick remount) reuses the store instead of refetching; a real
-        // navigation unmounts, the microtask drops the store, and the next
-        // mount starts a fresh read.
-        queueMicrotask(() => {
-          if (this.listeners.size === 0 && store === this) store = null;
-        });
-      }
-    };
+  // Cached data wins over a failed background refetch (stale-while-error): the
+  // surfaces keep rendering the timeline they already hold, and the failure is
+  // logged so it stays reproducible (coding-standards §8) - once per failed
+  // fetch, not on every render.
+  useEffect(() => {
+    if (query.isError) {
+      console.warn(
+        "[own-record] record fetch failed, hiding record surfaces:",
+        query.error,
+      );
+    }
+  }, [query.isError, query.error]);
+
+  return {
+    status: query.isPending ? "loading" : query.data ? "ready" : "error",
+    timeline: query.data ?? null,
+    refetching: query.isFetching,
+    error: query.error,
+    refetch: () => void query.refetch(),
   };
-
-  getSnapshot = (): OwnRecordState => this.state;
-
-  private setState(patch: Partial<OwnRecordState>): void {
-    this.state = { ...this.state, ...patch };
-    this.listeners.forEach((listener) => listener());
-  }
-
-  load = (): void => {
-    this.started = true;
-    this.setState({ status: "loading" });
-    fetchOwnRecord()
-      .then((timeline) => this.setState({ timeline, status: "ready" }))
-      .catch((error: unknown) => {
-        // A failed read hides both rail sections rather than claiming the
-        // record is empty; the failure is logged so it stays reproducible
-        // (coding-standards §8) - the same posture HealthSnapshotCard takes
-        // for its own self-fetch.
-        console.warn(
-          "[own-record] record fetch failed, hiding rail sections:",
-          error,
-        );
-        this.setState({ timeline: null, status: "error" });
-      });
-  };
-}
-
-let store: OwnRecordStore | null = null;
-
-function getStore(): OwnRecordStore {
-  if (!store) store = new OwnRecordStore();
-  return store;
 }
 
 export interface OwnRecordView {
@@ -99,27 +103,22 @@ export interface OwnRecordView {
 }
 
 export function useOwnRecord(): OwnRecordView {
-  const active = useMemo(getStore, []);
-  const state = useSyncExternalStore(
-    active.subscribe,
-    active.getSnapshot,
-    active.getSnapshot,
-  );
+  const { status, timeline } = useOwnRecordTimeline();
 
   const derived = useMemo(() => {
-    const sorted = sortTimelineDesc(state.timeline?.entries ?? []);
+    const sorted = sortTimelineDesc(timeline?.entries ?? []);
     return {
-      counts: state.timeline ? countByType(sorted) : null,
+      counts: timeline ? countByType(sorted) : null,
       issuedCount: issuedPrescriptionCount(sorted),
       flagged: flaggedValues(sorted),
     };
-  }, [state.timeline]);
+  }, [timeline]);
 
   return {
-    status: state.status,
+    status,
     counts: derived.counts,
     issuedCount: derived.issuedCount,
     flagged: derived.flagged,
-    patientId: state.timeline?.patient_id ?? null,
+    patientId: timeline?.patient_id ?? null,
   };
 }

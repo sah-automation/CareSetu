@@ -51,6 +51,7 @@ _QUERY_PARAM_RE = re.compile(r"(\w+)=")
 _PROMISE_RE = re.compile(r"Promise<([A-Za-z_]\w*)>")
 _CAST_RE = re.compile(r"\bas\s+(\w+)")
 _HTTP_METHOD_RE = re.compile(r'method:\s*"(\w+)"')
+_FETCH_CALL_RE = re.compile(r"\bfetch\(")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
 
 _SCHEMAS_REF_PREFIX = "#/components/schemas/"
@@ -172,18 +173,31 @@ def _response_interface(body: str, interfaces: dict[str, dict[str, TypeSpec]], c
     raise ContractParseError(f"{context}: cannot determine the response interface")
 
 
-def parse_api(source: str) -> tuple[dict[str, dict[str, TypeSpec]], list[ClientEndpoint]]:
-    """Parse the auth client's interfaces and request functions out of ``source``."""
-    interfaces = parse_interfaces(source)
+def parse_api(
+    source: str, extra_source: str | None = None
+) -> tuple[dict[str, dict[str, TypeSpec]], list[ClientEndpoint]]:
+    """Parse the auth client's interfaces and request functions out of ``source``.
+
+    ``extra_source`` extends the scan with the session-query seam file (#904),
+    which owns the /v1/me client next door to api.ts. A function is an
+    endpoint when its body calls ``fetch(`` or ``post<...>``; exported
+    helpers without either (query-key builders, cache clearers) are skipped
+    even when a stray /v1 string appears in their doc comments.
+    """
+    combined = source if extra_source is None else f"{source}\n{extra_source}"
+    interfaces = parse_interfaces(combined)
     endpoints: list[ClientEndpoint] = []
-    starts = list(_FUNCTION_START_RE.finditer(source))
+    starts = list(_FUNCTION_START_RE.finditer(combined))
     for index, match in enumerate(starts):
         name = match.group(1)
-        end = starts[index + 1].start() if index + 1 < len(starts) else len(source)
-        body = source[match.start() : end]
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(combined)
+        body = combined[match.start() : end]
+        is_call = _FETCH_CALL_RE.search(body) is not None or "post<" in body
+        if not is_call:
+            continue
         path_match = _PATH_RE.search(body)
         if path_match is None:
-            raise ContractParseError(f"{name}: no /v1 auth path found in api.ts")
+            raise ContractParseError(f"{name}: no /v1 auth path found in the auth client")
         method = "POST" if "post<" in body else _http_method(body)
         if method == "POST":
             request_fields = _post_request_fields(body, name)
@@ -497,8 +511,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError as exc:
         print(f"contract check FAILED: cannot read {args.api}: {exc}", file=sys.stderr)
         return 1
+    # Since #904 the /v1/me client lives in the session-query seam next door;
+    # when the sibling exists it is part of the same auth client surface.
+    session_file = args.api.parent / "sessionQuery.ts"
+    extra_source = None
+    if session_file.exists():
+        try:
+            extra_source = session_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"contract check FAILED: cannot read {session_file}: {exc}", file=sys.stderr)
+            return 1
     try:
-        interfaces, endpoints = parse_api(source)
+        interfaces, endpoints = parse_api(source, extra_source)
     except ContractParseError as exc:
         print(f"contract check FAILED: {exc}", file=sys.stderr)
         return 1

@@ -39,7 +39,8 @@
     "build": "npm run build -w @caresetu/frontend",
     "check:pages": "node scripts/measure-pages.cjs",
     "check:lighthouse": "node scripts/lighthouse-gate.cjs",
-    "check:contract": "node scripts/py.cjs scripts/contract_check.py"
+    "check:contract": "node scripts/py.cjs scripts/contract_check.py",
+    "check:latency": "node scripts/py.cjs scripts/measure_backend_latency.py"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

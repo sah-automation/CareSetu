@@ -20,6 +20,7 @@ CONTRACT_CHECK_FILE = Path(__file__).resolve().parents[2] / "scripts" / "contrac
 API_FILE = (
     Path(__file__).resolve().parents[2] / "apps" / "frontend" / "src" / "lib" / "auth" / "api.ts"
 )
+SESSION_FILE = API_FILE.parent / "sessionQuery.ts"
 
 
 def _load_contract_check():
@@ -496,13 +497,56 @@ def test_main_exits_one_on_mismatch(tmp_path: Path, capsys: pytest.CaptureFixtur
 
 
 def test_real_api_ts_passes_against_real_openapi() -> None:
-    interfaces, endpoints = parse_api(API_FILE.read_text(encoding="utf-8"))
+    interfaces, endpoints = parse_api(
+        API_FILE.read_text(encoding="utf-8"),
+        SESSION_FILE.read_text(encoding="utf-8"),
+    )
     spec = load_openapi(None)
 
     # Seven auth endpoints (verify, register, resend, session,
-    # partner/session, partner/login, partner/verify), the protected
-    # GET /v1/me session read mirrored since PHASE-2.6 T05 (#196), and
-    # the dev-only OTP reader.  Partner surface added by F014 T02/T03
-    # (#462/#463) and T05 (#298).
+    # partner/session, partner/login, partner/verify) and the dev-only OTP
+    # reader live in api.ts. The protected GET /v1/me session read is owned
+    # by the session-query seam since #904 and parsed from sessionQuery.ts.
+    # Partner surface added by F014 T02/T03 (#462/#463) and T05 (#298).
     assert len(endpoints) == 9
     assert check_contract(interfaces, endpoints, spec) == []
+
+
+def test_parse_api_skips_non_fetch_helpers() -> None:
+    source = (
+        "export interface MeResponse {\n"
+        "  subject_id: string;\n"
+        "}\n\n"
+        "export function sessionMeQueryKey(jwt: string): readonly unknown[] {\n"
+        '  return ["session", jwt];\n'
+        "}\n\n"
+        "export async function fetchMe(jwt: string): Promise<MeResponse> {\n"
+        "  const res = await fetch(\n"
+        "    `${API_BASE_URL}/v1/me`,\n"
+        "    { headers: { Authorization: `Bearer ${jwt}` } },\n"
+        "  );\n"
+        "  return (await res.json()) as MeResponse;\n"
+        "}\n"
+    )
+
+    _, endpoints = parse_api(source)
+
+    # The query-key builder is a helper, not an endpoint; the fetch-calling
+    # session read still counts.
+    assert [(e.name, e.method, e.path) for e in endpoints] == [
+        ("fetchMe", "GET", "/v1/me"),
+    ]
+
+
+def test_parse_api_fetch_without_path_is_a_hard_failure() -> None:
+    source = (
+        "export interface OrphanResult {\n"
+        "  ok: boolean;\n"
+        "}\n\n"
+        "export async function orphan(): Promise<OrphanResult> {\n"
+        '  return fetch("/other");\n'
+        "}\n"
+    )
+
+    with pytest.raises(ContractParseError, match="no /v1 auth path"):
+        parse_api(source)

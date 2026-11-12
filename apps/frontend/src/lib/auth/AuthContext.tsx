@@ -21,6 +21,8 @@ import {
   useState,
 } from "react";
 import { useRouter } from "next/navigation";
+import { QueryClientContext, type QueryClient } from "@tanstack/react-query";
+import { makeQueryClient } from "@/lib/queryClient";
 import {
   readSession,
   clearSession,
@@ -29,6 +31,11 @@ import {
   clearSelectedRole,
   type StoredSession,
 } from "./session";
+import {
+  fetchSessionMe,
+  clearCachedSessionMe,
+  type MeResponse,
+} from "./sessionQuery";
 
 import {
   ACCESS_TOKEN_TTL_SECONDS,
@@ -72,14 +79,6 @@ export function useAuth(): AuthContextValue {
   return ctx;
 }
 
-interface MeResponse {
-  /** The principal identity the token is scoped to (a numeric string, #196). */
-  subject_id: string;
-  phone: string;
-  roles: string[];
-  tier: string | null;
-}
-
 interface RefreshResponse {
   jwt: string;
   refresh_token: string;
@@ -105,16 +104,6 @@ function applyMe(
     const role = saved && me.roles.includes(saved) ? saved : me.roles[0];
     setSelectedRole(role);
   }
-}
-
-async function fetchMe(jwt: string): Promise<MeResponse> {
-  const res = await fetch(`${API_BASE_URL}/v1/me`, {
-    headers: { Authorization: `Bearer ${jwt}` },
-  });
-  if (!res.ok) {
-    throw new Error(`GET /v1/me returned ${res.status}`);
-  }
-  return (await res.json()) as MeResponse;
 }
 
 class RefreshError extends Error {
@@ -180,6 +169,21 @@ export async function attemptRefresh(
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  // #904: the validate/resume/refresh flows are mount-time, not render-time.
+  // The router object is not a stable identity on every surface that mounts
+  // AuthProvider (tests hand it a fresh object per render), so the flows read
+  // it through a ref instead of an effect dependency: listing it directly
+  // re-ran mount validation on every render, and once /v1/me is answered from
+  // the session-query cache that loop never terminates.
+  const routerRef = useRef(router);
+  useEffect(() => {
+    routerRef.current = router;
+  });
+  // #904: /v1/me runs through the shared query client (the root QueryProvider
+  // supplies it; a bare mount, as in tests, falls back to a private client).
+  const outerClient = useContext(QueryClientContext);
+  const [fallbackClient] = useState(() => makeQueryClient());
+  const queryClient: QueryClient = outerClient ?? fallbackClient;
   const [user, setUser] = useState<User | null>(null);
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -199,7 +203,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       try {
-        const me = await fetchMe(session.jwt);
+        const me = await fetchSessionMe(queryClient, session.jwt);
         if (cancelled) return;
 
         applyMe(me, setUser, setSelectedRole);
@@ -222,7 +226,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             refreshed.refresh_token,
           );
 
-          const me = await fetchMe(refreshed.jwt);
+          const me = await fetchSessionMe(queryClient, refreshed.jwt);
           if (cancelled) return;
 
           applyMe(me, setUser, setSelectedRole);
@@ -231,8 +235,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
           console.warn("[auth] session validation refresh failed", refreshErr);
           clearSession();
+          clearCachedSessionMe(queryClient);
           clearCookie("caresetu.access_jwt");
-          router.replace("/login");
+          routerRef.current.replace("/login");
         }
       } finally {
         if (!cancelled) {
@@ -246,7 +251,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [queryClient]);
 
   useEffect(() => {
     if (!user) {
@@ -338,7 +343,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearCookie("caresetu.access_jwt");
         setUser(null);
         setSelectedRole(null);
-        router.replace("/login");
+        routerRef.current.replace("/login");
       }
     };
 
@@ -348,7 +353,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
       clearTimer();
     };
-  }, [user, router]);
+  }, [user]);
 
   function switchRole(role: string) {
     setSelectedRole(role);
@@ -367,7 +372,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!session) return;
 
     try {
-      const me = await fetchMe(session.jwt);
+      const me = await fetchSessionMe(queryClient, session.jwt);
       applyMe(me, setUser, setSelectedRole);
     } catch (err) {
       try {
@@ -382,22 +387,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem("caresetu.access_jwt", refreshed.jwt);
         localStorage.setItem("caresetu.refresh_token", refreshed.refresh_token);
 
-        const me = await fetchMe(refreshed.jwt);
+        const me = await fetchSessionMe(queryClient, refreshed.jwt);
         applyMe(me, setUser, setSelectedRole);
       } catch (refreshErr) {
         console.warn("[auth] session resume refresh failed", refreshErr);
         clearSession();
+        clearCachedSessionMe(queryClient);
         clearCookie("caresetu.access_jwt");
         setUser(null);
         setSelectedRole(null);
-        router.replace("/login");
+        routerRef.current.replace("/login");
       }
     }
-  }, [router]);
+  }, [queryClient]);
 
   function logout() {
     clearSession();
     clearSelectedRole();
+    clearCachedSessionMe(queryClient);
     clearCookie("caresetu.access_jwt");
     if (refreshTimerRef.current) {
       clearTimeout(refreshTimerRef.current);
@@ -409,18 +416,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider
-      value={{
-        user,
-        selectedRole,
-        switchRole,
-        logout,
-        isAuthenticated: user !== null,
-        isLoading,
-        resumeSession,
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
+    <QueryClientContext.Provider value={queryClient}>
+      <AuthContext.Provider
+        value={{
+          user,
+          selectedRole,
+          switchRole,
+          logout,
+          isAuthenticated: user !== null,
+          isLoading,
+          resumeSession,
+        }}
+      >
+        {children}
+      </AuthContext.Provider>
+    </QueryClientContext.Provider>
   );
 }

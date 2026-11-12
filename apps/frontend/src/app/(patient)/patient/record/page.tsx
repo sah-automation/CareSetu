@@ -17,7 +17,7 @@
 
 import { ChevronDown, ChevronRight } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { EmptyState } from "@/components/layout/EmptyState";
@@ -36,11 +36,11 @@ import { STRINGS, type Lang } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 import { cn } from "@/lib/utils";
 import {
-  fetchOwnRecord,
   RecordApiError,
   type RecordEntryView,
   type RecordTimeline,
 } from "@/lib/record/api";
+import { useOwnRecordTimeline } from "@/lib/record/useOwnRecord";
 import {
   BADGE_TONE,
   ENTRY_TONE,
@@ -195,43 +195,51 @@ export default function RecordPage() {
   const { lang } = useLang();
   const t = STRINGS[lang].record;
 
-  const [timeline, setTimeline] = useState<RecordTimeline | null>(null);
-  const [status, setStatus] = useState<LoadStatus>("loading");
+  // #904: the timeline read is the shared identity-scoped own-record query,
+  // the same one the home rail mounts - navigating between the two surfaces
+  // inside the stale window answers from cache instead of refetching.
+  const record = useOwnRecordTimeline();
+  const timeline = record.timeline;
+
+  // Display mapping: a pending fetch or an in-flight retry (of a failed read)
+  // shows skeletons; a settled failure shows the banner; success stays ready
+  // even while a background refetch is in flight.
+  const status: LoadStatus = record.timeline
+    ? "ready"
+    : record.refetching
+      ? "loading"
+      : record.status === "error"
+        ? "error"
+        : "loading";
+
   const [filter, setFilter] = useState<RecordFilter>("all");
   // Kept from the failed read for the banner's support-correlation line;
   // the banner shows a client-local trace id when the API could not be
   // reached (error-handling-observability §3).
-  const [errorTraceId, setErrorTraceId] = useState<string | undefined>(
-    undefined,
-  );
+  const errorTraceId =
+    record.error instanceof RecordApiError ? record.error.traceId : undefined;
   // Dismissal is separate from load state: closing the banner must never
   // silently re-fire the failing request.
   const [bannerOpen, setBannerOpen] = useState(false);
 
+  useEffect(() => {
+    if (status === "error") {
+      setBannerOpen(true);
+    }
+    if (status === "ready") {
+      setBannerOpen(false);
+    }
+  }, [status]);
+
   // Snapshot tiles scroll this into view when acting as jump-filters.
   const filterBarRef = useRef<HTMLDivElement>(null);
 
-  // One load path for mount and Retry alike.
-  const load = useCallback(() => {
-    setStatus("loading");
-    fetchOwnRecord()
-      .then((data) => {
-        setTimeline(data);
-        setStatus("ready");
-        setBannerOpen(false);
-      })
-      .catch((error: unknown) => {
-        setErrorTraceId(
-          error instanceof RecordApiError ? error.traceId : undefined,
-        );
-        setStatus("error");
-        setBannerOpen(true);
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  // Retry is the only path back from a failed read; the mount fetch belongs
+  // to the query itself.
+  const load = () => {
+    setBannerOpen(false);
+    void record.refetch();
+  };
 
   const sorted = useMemo(
     () => sortTimelineDesc(timeline?.entries ?? []),

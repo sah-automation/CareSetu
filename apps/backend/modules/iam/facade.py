@@ -11,7 +11,7 @@ here for backward compatibility.  ``emit_access_denied`` and
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -338,6 +338,18 @@ class IamFacade:
         the GET route wraps.
         """
         return await self._identity.get_patient_profile(identity_id, connection=connection)
+
+    async def get_patient_profiles(
+        self,
+        identity_ids: Sequence[int],
+    ) -> dict[int, PatientProfile]:
+        """Many patients' saved profiles in one query (#903).
+
+        Delegated to ``IdentityFacade``: the batched sibling of
+        :meth:`get_patient_profile`, one SELECT for the whole id set. Ids
+        without a saved profile row are absent from the result. Read-only.
+        """
+        return await self._identity.get_patient_profiles(identity_ids)
 
     # -- Profile photo delegation (US-20, ticket #533) ---------------------
 

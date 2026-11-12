@@ -20,7 +20,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from modules.audit.facade import AuditFacade
-from modules.health.facade import AccessHistoryView, HealthFacade, query_access_history
+from modules.health.facade import (
+    ACCESS_HISTORY_MAX_ROWS,
+    AccessHistoryView,
+    HealthFacade,
+    query_access_history,
+)
 
 _NOW = datetime(2026, 8, 27, 10, 30, 0, tzinfo=UTC)
 
@@ -147,6 +152,40 @@ async def test_patient_type_rows_never_reach_the_display_name_resolver() -> None
     assert entry.denied is True
     assert entry.actor_display_name is None
     assert resolver.calls == []
+
+
+async def test_repeated_rows_of_one_actor_resolve_the_name_once() -> None:
+    """#903: the display-name seam runs once per DISTINCT counterparty.
+
+    A history written by one doctor resolves that doctor's name a single
+    time, not once per ledger row; every row still carries the name.
+    """
+    resolver = _RecordingResolver()
+    connection = _connection(
+        [
+            _row(accessor_identity_id=3, actor_type="doctor"),
+            _row(accessor_identity_id=3, actor_type="doctor"),
+            _row(accessor_identity_id=5, actor_type="doctor"),
+            _row(accessor_identity_id=3, actor_type="doctor"),
+        ]
+    )
+
+    view = await query_access_history(connection, patient_id=7, display_name=resolver)
+
+    assert [entry.actor_display_name for entry in view.entries] == ["Sunrise Clinic"] * 4
+    assert resolver.calls == [("doctor", "3"), ("doctor", "5")]
+
+
+async def test_the_query_is_bounded_to_the_newest_max_rows() -> None:
+    """#903: the read is bounded, so a long ledger cannot make it unbounded."""
+    connection = _connection([])
+
+    await query_access_history(connection, patient_id=7)
+
+    (select_stmt,) = connection.execute.await_args.args
+    compiled = select_stmt.compile()
+    assert "LIMIT" in str(compiled).upper()
+    assert ACCESS_HISTORY_MAX_ROWS in compiled.params.values()
 
 
 async def test_an_unresolvable_counterparty_stays_null() -> None:

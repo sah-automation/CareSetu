@@ -132,7 +132,10 @@ describe("AuthProvider", () => {
 
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "http://localhost:8000/v1/me",
-      { headers: { Authorization: "Bearer test-jwt-token" } },
+      {
+        headers: { Authorization: "Bearer test-jwt-token" },
+        credentials: "include",
+      },
     );
   });
 
@@ -333,7 +336,10 @@ describe("AuthProvider resumeSession seam (#496)", () => {
 
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "http://localhost:8000/v1/me",
-      { headers: { Authorization: "Bearer test-jwt-token" } },
+      {
+        headers: { Authorization: "Bearer test-jwt-token" },
+        credentials: "include",
+      },
     );
     expect(mockReplace).not.toHaveBeenCalled();
   });
