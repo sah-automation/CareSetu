@@ -253,17 +253,21 @@ class DoctorConsoleFacade:
         start = (page - 1) * per_page
         page_rows = rows[start : start + per_page]
 
-        # The per-row ledger writes fan out concurrently (#903): every served
+        # Per-row ledger writes fan out concurrently (#903): every served
         # row's access-log write runs concurrently with - and every granted
-        # row's egress-disclosure write alongside - the other rows' writes,
-        # instead of serializing into one round trip per row. What is written
-        # is unchanged: every served row is access-logged and every granted
-        # row egress-disclosed, and a failed write still fails the read.
+        # row's egress-disclosure write alongside - the other rows' writes.
+        # Each write is degrade-safe (#907): a single row's ledger write
+        # failure logs a warning with no patient id or PHI and skips that
+        # row's entry instead of failing the whole list. What is written is
+        # otherwise unchanged: every served row is access-logged and every
+        # granted row egress-disclosed.
         writes: list[Awaitable[None]] = []
         for row in page_rows:
             writes.append(
-                self._health_facade.log_doctor_patient_view(
-                    patient_id=row.patient_id, doctor_id=doctor_id
+                self._degrade_safe_write(
+                    write=self._health_facade.log_doctor_patient_view(
+                        patient_id=row.patient_id, doctor_id=doctor_id
+                    )
                 )
             )
             patient_grants = grants_by_patient.get(row.patient_id, [])
@@ -276,7 +280,11 @@ class DoctorConsoleFacade:
                 # access-history write above still records that the row was
                 # served.
                 writes.append(
-                    self._disclose_against_grant(patient_grants, row.patient_id, doctor_id)
+                    self._degrade_safe_write(
+                        write=self._disclose_against_grant(
+                            patient_grants, row.patient_id, doctor_id
+                        )
+                    )
                 )
         await asyncio.gather(*writes)
 
@@ -326,6 +334,21 @@ class DoctorConsoleFacade:
                 "doctor-console profile resolution failed; degrading to anonymous rows",
             )
             return {}
+
+    async def _degrade_safe_write(self, *, write: Awaitable[None]) -> None:
+        """Run one per-row ledger write, degrading that row's entry on failure.
+
+        A single row's ledger write must never take down the whole list: on
+        failure a warning is logged (no patient id or PHI) and that row's
+        ledger entry is skipped, while the other rows' writes proceed
+        (error-handling-observability §2).
+        """
+        try:
+            await write
+        except Exception:
+            # No ``exc_info``: a traceback frame or exception message can
+            # carry a patient id or PHI (error-handling-observability §2).
+            logger.warning("doctor-console per-row ledger write failed; degrading that row's entry")
 
     async def list_doctor_cases(self, *, doctor_id: int) -> DoctorCasesListView:
         """Return the doctor's open care cases as displayable rows (#646).
@@ -398,14 +421,19 @@ class DoctorConsoleFacade:
         # Same concurrent ledger fan-out as the Patients list (#903): every
         # open-case row's access-log write (under the cases marker) and every
         # granted row's egress-disclosure write run concurrently instead of
-        # serially, with what is written unchanged.
+        # serially, with what is written unchanged. Each write is degrade-safe
+        # (#907): a single row's ledger write failure logs a warning with no
+        # patient id or PHI and skips that row's entry instead of failing the
+        # whole list.
         writes: list[Awaitable[None]] = []
         for row in rows:
             writes.append(
-                self._health_facade.log_doctor_patient_view(
-                    patient_id=row.patient_id,
-                    doctor_id=doctor_id,
-                    scope=_CASES_SCOPE_MARKER,
+                self._degrade_safe_write(
+                    write=self._health_facade.log_doctor_patient_view(
+                        patient_id=row.patient_id,
+                        doctor_id=doctor_id,
+                        scope=_CASES_SCOPE_MARKER,
+                    )
                 )
             )
             patient_grants = grants_by_patient.get(row.patient_id, [])
@@ -416,7 +444,11 @@ class DoctorConsoleFacade:
                 # fabricated for it. The access-history write above still
                 # records that the row was served.
                 writes.append(
-                    self._disclose_against_grant(patient_grants, row.patient_id, doctor_id)
+                    self._degrade_safe_write(
+                        write=self._disclose_against_grant(
+                            patient_grants, row.patient_id, doctor_id
+                        )
+                    )
                 )
         await asyncio.gather(*writes)
 
