@@ -44,10 +44,16 @@ NOW = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
 class StubConsentFacade:
     """Canned counterparty grants, recording the reverse lookup and egress rows."""
 
-    def __init__(self, grants: list[CounterpartyGrantView] | None = None) -> None:
+    def __init__(
+        self,
+        grants: list[CounterpartyGrantView] | None = None,
+        *,
+        fail_egress_on: set[int] | None = None,
+    ) -> None:
         self.grants = grants or []
         self.calls: list[tuple[str, str]] = []
         self.egress: list[dict] = []
+        self.fail_egress_on = fail_egress_on or set()
 
     async def list_counterparty_grants(
         self, *, counterparty_type: str, counterparty_id: str
@@ -56,6 +62,8 @@ class StubConsentFacade:
         return self.grants
 
     async def record_egress_disclosure(self, **kwargs: object) -> None:
+        if kwargs.get("patient_id") in self.fail_egress_on:
+            raise RuntimeError("consent ledger write failed")
         self.egress.append(dict(kwargs))
 
 
@@ -116,14 +124,20 @@ class StubHealthFacade:
     Patients list, so a caller that relies on that default is recorded the way
     the ledger would actually record it (MOD-012 passes a marker only for the
     surfaces it owns).
+
+    ``fail_on`` makes ``log_doctor_patient_view`` raise for the listed patient
+    ids, so a single row's ledger write can be exercised as failing (#907).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fail_on: set[int] | None = None) -> None:
         self.logged: list[tuple[int, int, str]] = []
+        self.fail_on = fail_on or set()
 
     async def log_doctor_patient_view(
         self, *, patient_id: int, doctor_id: int, scope: str = "doctor_patients_list"
     ) -> None:
+        if patient_id in self.fail_on:
+            raise RuntimeError("health ledger write failed")
         self.logged.append((patient_id, doctor_id, scope))
 
 
@@ -511,6 +525,91 @@ async def test_egress_skips_a_row_with_no_live_grant() -> None:
     # no egress row is fabricated - but the access-history row still records it.
     assert [row["patient_id"] for row in consent.egress] == [10]
     assert sorted(entry[0] for entry in health.logged) == [10, 99]
+
+
+# ---------------------------------------------------------------------------
+# Degrade-safe per-row ledger writes (#907)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_one_failing_access_log_write_degrades_that_row_but_returns_all_rows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Patient 10's access-log write raises; the cases list still returns both
+    # rows, skips only patient 10's access-log entry, keeps patient 20's
+    # egress disclosure, and logs one warning with no patient id or PHI.
+    health = StubHealthFacade(fail_on={10})
+    consent = StubConsentFacade([_grant(patient_id=10), _grant(patient_id=20)])
+    care = StubCareFacade([_case(case_id=1, patient_id=10), _case(case_id=2, patient_id=20)])
+    facade = _facade(consent=consent, care=care, health=health)
+
+    with caplog.at_level(logging.WARNING, logger="modules.doctor.facade"):
+        result = await facade.list_doctor_cases(doctor_id=_DOCTOR_ID)
+
+    assert [row.case_id for row in result.items] == [1, 2]
+    # Patient 10's row was served but its access-log entry was skipped.
+    assert sorted(entry[0] for entry in health.logged) == [20]
+    # Both rows carry live grants, so both egress disclosures still happen.
+    assert [row["patient_id"] for row in consent.egress] == [10, 20]
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "10" not in warnings[0]
+    assert "20" not in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_one_failing_egress_write_degrades_that_row_but_returns_all_rows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Patient 10's egress-disclosure write raises; the cases list still
+    # returns both rows, skips only patient 10's egress entry, keeps every
+    # row's access-log, and logs one warning with no patient id or PHI.
+    health = StubHealthFacade()
+    consent = StubConsentFacade([_grant(patient_id=10), _grant(patient_id=20)], fail_egress_on={10})
+    care = StubCareFacade([_case(case_id=1, patient_id=10), _case(case_id=2, patient_id=20)])
+    facade = _facade(consent=consent, care=care, health=health)
+
+    with caplog.at_level(logging.WARNING, logger="modules.doctor.facade"):
+        result = await facade.list_doctor_cases(doctor_id=_DOCTOR_ID)
+
+    assert [row.case_id for row in result.items] == [1, 2]
+    # Every served row is still access-logged.
+    assert sorted(entry[0] for entry in health.logged) == [10, 20]
+    # Patient 10's egress entry was skipped; patient 20's remains.
+    assert [row["patient_id"] for row in consent.egress] == [20]
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "10" not in warnings[0]
+    assert "20" not in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_patients_list_one_failing_access_log_write_degrades_that_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Patient 10's access-log write raises; the patients list still returns
+    # both rows and skips only patient 10's access-log entry.
+    health = StubHealthFacade(fail_on={10})
+    consent = StubConsentFacade([_grant(patient_id=10), _grant(patient_id=20)])
+    care = StubCareFacade([_case(case_id=1, patient_id=10), _case(case_id=2, patient_id=20)])
+    facade = _facade(consent=consent, care=care, health=health)
+
+    with caplog.at_level(logging.WARNING, logger="modules.doctor.facade"):
+        result = await facade.list_doctor_patients(doctor_id=_DOCTOR_ID)
+
+    assert [row.patient_id for row in result.items] == [10, 20]
+    assert sorted(entry[0] for entry in health.logged) == [20]
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "10" not in warnings[0]
+    assert "20" not in warnings[0]
 
 
 # ---------------------------------------------------------------------------

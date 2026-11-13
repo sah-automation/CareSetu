@@ -109,8 +109,11 @@ class StubPartnerFacade:
 def _client(
     doctor_facade: StubDoctorConsoleFacade | None = None,
     partner_facade: StubPartnerFacade | None = None,
+    *,
+    settings: Settings | None = None,
 ) -> TestClient:
-    settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
+    if settings is None:
+        settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
     app = create_app(settings=settings)
     app.state.doctor_console_facade = (
         doctor_facade if doctor_facade is not None else StubDoctorConsoleFacade()
@@ -271,3 +274,66 @@ def test_cases_response_model_is_published_in_the_served_schema() -> None:
     ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
     assert ref.endswith("/DoctorCasesListView")
     assert "DoctorCaseRow" in schema["components"]["schemas"]
+
+
+# ---------------------------------------------------------------------------
+# CORS (ticket #906)
+# ---------------------------------------------------------------------------
+
+_CORS_ORIGIN = "https://caresetu-frontend.vercel.app"
+_NON_LISTED_ORIGIN = "https://evil.example.com"
+
+
+def _cors_client() -> TestClient:
+    settings = Settings(
+        gateway_jwt_verify_enabled=True,
+        gateway_jwt_signing_key=_SIGNING_KEY,
+        cors_allowed_origins=(_CORS_ORIGIN,),
+    )
+    return _client(settings=settings)
+
+
+def test_cors_preflight_echoes_configured_origin() -> None:
+    """Ticket #906 / FEAT-008: a cross-origin preflight OPTIONS to
+    /v1/doctor/cases echoes the configured origin as Access-Control-Allow-Origin."""
+    client = _cors_client()
+
+    response = client.options(
+        "/v1/doctor/cases",
+        headers={
+            "Origin": _CORS_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == _CORS_ORIGIN
+
+
+def test_cors_actual_request_echoes_configured_origin() -> None:
+    """Ticket #906 / FEAT-008: a cross-origin authenticated GET to
+    /v1/doctor/cases returns 200 and echoes the configured origin as
+    Access-Control-Allow-Origin."""
+    client = _cors_client()
+
+    response = client.get(
+        "/v1/doctor/cases",
+        headers={**_bearer(_token()), "Origin": _CORS_ORIGIN},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == _CORS_ORIGIN
+
+
+def test_cors_non_listed_origin_returns_no_allow_origin() -> None:
+    """Ticket #906 / FEAT-008: a cross-origin request from a non-listed origin to
+    /v1/doctor/cases returns 200 with no Access-Control-Allow-Origin header."""
+    client = _cors_client()
+
+    response = client.get(
+        "/v1/doctor/cases",
+        headers={**_bearer(_token()), "Origin": _NON_LISTED_ORIGIN},
+    )
+
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers
