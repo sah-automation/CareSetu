@@ -47,10 +47,9 @@ jobs:
       # seed touch the database - never a silent fallback to the localhost
       # defaults in alembic.ini / app config.
       DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
-      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
       # Operator MFA TOTP secret encryption (PHASE-5 S8, #261): the seed's
       # bootstrap-operator MFA enrollment (scripts/seed_demo.py) needs the AES
-      # key the MFA module reads as IAM_MFA_SECRET_KEY. Must match the Render
+      # key the MFA module reads as IAM_MFA_SECRET_KEY. Must match the Cloud Run
       # service env var of the same name so the encrypted TOTP secret seeded
       # here can be decrypted at runtime (security-phii-standards section 4).
       IAM_MFA_SECRET_KEY: ${{ secrets.IAM_MFA_SECRET_KEY }}
@@ -61,8 +60,6 @@ jobs:
         run: uv sync --project apps/backend
       - name: assert SUPABASE_DATABASE_URL is set
         run: test -n "$DATABASE_URL"
-      - name: assert RENDER_DEPLOY_HOOK_URL is set
-        run: test -n "$RENDER_DEPLOY_HOOK_URL"
       - name: assert IAM_MFA_SECRET_KEY is set
         run: test -n "$IAM_MFA_SECRET_KEY"
       - name: alembic upgrade head
