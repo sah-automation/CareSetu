@@ -75,24 +75,39 @@ jobs:
         working-directory: apps/backend
         run: uv run python -m scripts.seed_demo
 
-  deploy-render:
-    name: trigger Render deploy
+  deploy-cloudrun:
+    name: deploy backend to Cloud Run (asia-south1 / Mumbai)
     needs: migrate-and-seed
     runs-on: ubuntu-latest
     env:
-      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: asia-south1
+      CLOUD_RUN_SERVICE: caresetu-backend
     steps:
-      # --fail makes a non-2xx hook response fail the job instead of passing
-      # silently.
-      - name: fire Render deploy hook
-        run: curl --fail -X POST "$RENDER_DEPLOY_HOOK_URL"
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+      - name: Build and deploy backend to Cloud Run
+        run: |
+          gcloud run deploy caresetu-backend \
+            --source apps/backend \
+            --region asia-south1 \
+            --allow-unauthenticated \
+            --max-instances=1 \
+            --min-instances=0 \
+            --memory 512Mi \
+            --cpu 1 \
+            --set-env-vars "PYTHON_VERSION=3.13,APP_ENVIRONMENT=production,DISPATCHER_IN_PROCESS_ENABLED=true,DISPATCHER_MODE=inprocess,UVICORN_WORKERS=1,AI_ASYNC_ENABLED=false,AI_QUEUE_WORKER_ENABLED=false,DEMO_MODE=true,SMS_PROVIDER=mock,GATEWAY_JWT_VERIFY_ENABLED=true,GATEWAY_RATE_LIMIT_ENABLED=true,GATEWAY_ACCESS_TOKEN_TTL_SECONDS=7200,LOG_FORMAT=json,SENTRY_TRACES_SAMPLE_RATE=0.0,OTEL_ENABLED=false,OTEL_TRACES_SAMPLER_RATIO=1.0,METRICS_ENABLED=false,OBSERVABILITY_ENABLED=false,ERROR_CAPTURE_ENABLED=false,HTTP_COUNTER_ENABLED=false,EVALUATION_ENABLED=false,ANNOTATION_QUEUE_ENABLED=false,OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT=80,OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE=0.5,OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD=0.2,OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD=500,OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS=900,OBSERVABILITY_COST_OUTLIER_MULTIPLE=3,OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS=3,OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT=1,INTAKE_MEDIA_BACKEND=supabase,PROFILE_MEDIA_BACKEND=supabase,AI_PROVIDER=openai_compatible,AI_ALLOW_DEMO_PROVIDER=true,AI_WEBHOOK_TIMEOUT_SECONDS=10.0,AI_WEBHOOK_MAX_ATTEMPTS=3" \
+            --set-secrets "DATABASE_URL=DATABASE_URL:latest,CORS_ALLOWED_ORIGINS=CORS_ALLOWED_ORIGINS:latest,GATEWAY_JWT_SIGNING_KEY=GATEWAY_JWT_SIGNING_KEY:latest,IAM_MFA_SECRET_KEY=IAM_MFA_SECRET_KEY:latest,LANGFUSE_PUBLIC_KEY=LANGFUSE_PUBLIC_KEY:latest,LANGFUSE_SECRET_KEY=LANGFUSE_SECRET_KEY:latest,SENTRY_DSN=SENTRY_DSN:latest,OTEL_EXPORTER_OTLP_ENDPOINT=OTEL_EXPORTER_OTLP_ENDPOINT:latest,OTEL_EXPORTER_OTLP_HEADERS=OTEL_EXPORTER_OTLP_HEADERS:latest,OTEL_SERVICE_VERSION=OTEL_SERVICE_VERSION:latest,GRAFANA_URL=GRAFANA_URL:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest,INTAKE_MEDIA_KEY=INTAKE_MEDIA_KEY:latest,PROFILE_MEDIA_KEY=PROFILE_MEDIA_KEY:latest,AI_API_KEY=AI_API_KEY:latest,AI_BASE_URL=AI_BASE_URL:latest,AI_MODEL=AI_MODEL:latest,AI_ASR_MODEL=AI_ASR_MODEL:latest,AI_PRICING_TABLE=AI_PRICING_TABLE:latest,AI_FALLBACK_PROVIDER=AI_FALLBACK_PROVIDER:latest,AI_FALLBACK_BASE_URL=AI_FALLBACK_BASE_URL:latest,AI_FALLBACK_API_KEY=AI_FALLBACK_API_KEY:latest,AI_FALLBACK_MODEL=AI_FALLBACK_MODEL:latest,AI_WEBHOOK_URL=AI_WEBHOOK_URL:latest,AI_WEBHOOK_SECRET=AI_WEBHOOK_SECRET:latest,AI_WEBHOOK_SIGNING_SECRET=AI_WEBHOOK_SIGNING_SECRET:latest,AI_JOB_WEBHOOK_URL=AI_JOB_WEBHOOK_URL:latest,AI_JOB_WEBHOOK_SECRET=AI_JOB_WEBHOOK_SECRET:latest,AI_JOB_WEBHOOK_SIGNING_SECRET=AI_JOB_WEBHOOK_SIGNING_SECRET:latest"
 
   live-verify:
     name: live verify (reusable)
     # TEST-A2 (#134), TEST-B2 (#136), TEST-D (#137): the three live verification
-    # jobs extracted into a reusable workflow. Runs after Render deploy hook is
-    # fired; each job's own warm-up / retry window absorbs the build + cold
-    # start (plan §2, §3.A2/B2/D).
-    needs: deploy-render
+    # jobs extracted into a reusable workflow. Runs after the Cloud Run deploy;
+    # each job's own warm-up / retry window absorbs the build + cold start
+    # (plan §2, §3.A2/B2/D).
+    needs: deploy-cloudrun
     uses: ./.github/workflows/live-verify.yml
     secrets: inherit
