@@ -82,10 +82,13 @@ jobs:
       CLOUD_RUN_SERVICE: caresetu-backend
     steps:
       - uses: actions/checkout@v4
-      - uses: google-github-actions/setup-gcloud@v2
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
         with:
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ vars.GCP_PROJECT_ID }}
+          service_account_credentials: ${{ secrets.GCP_SA_KEY }}
+      - uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          project_id: '${{ vars.GCP_PROJECT_ID }}'
       - name: Build and deploy backend to Cloud Run
         run: |
           gcloud run deploy caresetu-backend \
