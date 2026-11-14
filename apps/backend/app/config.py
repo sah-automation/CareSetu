@@ -696,6 +696,14 @@ class Settings:
     otel_traces_sampler_ratio: float = DEFAULT_OTEL_TRACES_SAMPLER_RATIO
     otel_service_version: str = ""
     metrics_enabled: bool = False
+    # Prometheus remote-write metrics export (METRICS #916): when set, the
+    # Prometheus remote-write exporter takes priority over the OTLP metric
+    # exporter. The endpoint is the full Grafana Cloud Prometheus remote-write
+    # URL (e.g. https://prometheus-prod-XX-prod-region.grafana.net/api/prom/push).
+    # Headers use the same CSV key=value format as OTEL_EXPORTER_OTLP_HEADERS
+    # (typically Authorization=Basic <base64(user:api-key)>).
+    prometheus_remote_write_endpoint: str = ""
+    prometheus_remote_write_headers: tuple[str, ...] = ()
     observability_enabled: bool = False
     # Browsable Grafana base URL (C1b #707): the Grafana Cloud stack the OTLP
     # endpoint above exports into. NOT derived from
@@ -1768,6 +1776,9 @@ def get_settings() -> Settings:
         otel_service_version=os.environ.get("OTEL_SERVICE_VERSION", ""),
         grafana_url=os.environ.get("GRAFANA_URL", ""),
         metrics_enabled=_env_bool("METRICS_ENABLED", False),
+        # Prometheus remote-write metrics export (METRICS #916)
+        prometheus_remote_write_endpoint=os.environ.get("PROMETHEUS_REMOTE_WRITE_ENDPOINT", ""),
+        prometheus_remote_write_headers=_env_csv("PROMETHEUS_REMOTE_WRITE_HEADERS"),
         observability_enabled=_env_bool("OBSERVABILITY_ENABLED", False),
         observability_rollup_max_dates=_env_int(
             "OBSERVABILITY_ROLLUP_MAX_DATES", DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES

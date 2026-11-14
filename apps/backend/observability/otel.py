@@ -217,6 +217,12 @@ class OtelSettings(Protocol):
     @property
     def metrics_enabled(self) -> bool: ...
 
+    @property
+    def prometheus_remote_write_endpoint(self) -> str: ...
+
+    @property
+    def prometheus_remote_write_headers(self) -> tuple[str, ...]: ...
+
 
 def parse_otlp_headers(headers: Sequence[str]) -> dict[str, str]:
     """Parse the A5 ``OTEL_EXPORTER_OTLP_HEADERS`` CSV into an exporter map.
@@ -624,13 +630,16 @@ def init_metrics(
 ) -> bool:
     """Initialise OTel metrics once per process; never raises, never blocks boot.
 
-    Gated independently by ``METRICS_ENABLED``: when the gate is off (or the
-    OTLP endpoint is unset) it returns immediately - no SDK import, no reader,
-    no global meter-provider mutation - so the off path is inert. When on, it
-    wires an OTLP HTTP metric exporter over the same endpoint/headers as tracing
-    and (when an app is supplied) adds the request metrics middleware.
+    Gated independently by ``METRICS_ENABLED``: when the gate is off (or no
+    endpoint is configured) it returns immediately - no SDK import, no reader,
+    no global meter-provider mutation - so the off path is inert.
 
-    ``metric_reader`` overrides the periodic OTLP reader (a test seam) so a test
+    Exporter selection (METRICS #916):
+    1. ``PROMETHEUS_REMOTE_WRITE_ENDPOINT`` set -> Prometheus remote-write exporter
+    2. ``OTEL_EXPORTER_OTLP_ENDPOINT`` set -> OTLP metric exporter (existing behavior)
+    3. Neither set -> metrics disabled (inert)
+
+    ``metric_reader`` overrides the periodic reader (a test seam) so a test
     can export into an in-memory reader. Any SDK failure is logged and swallowed.
     """
     global _metrics_configured, _metrics_enabled, _meter_provider
@@ -640,12 +649,62 @@ def init_metrics(
     _metrics_configured = True
 
     if not settings.metrics_enabled:
-        log.info("metrics disabled; OTLP metrics export off")
+        log.info("metrics disabled; metrics export off")
         return False
 
-    endpoint = settings.otel_exporter_otlp_endpoint.strip()
-    if not endpoint:
-        log.info("metrics endpoint unset; OTLP metrics export off")
+    # Priority 1: Prometheus remote-write exporter
+    prom_endpoint = settings.prometheus_remote_write_endpoint.strip()
+    if prom_endpoint:
+        try:
+            from opentelemetry import metrics
+            from opentelemetry.exporter.prometheus_remote_write import (  # type: ignore[import-not-found]
+                PrometheusRemoteWriteMetricsExporter,
+            )
+            from opentelemetry.sdk.metrics import MeterProvider
+            from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+
+            reader = (
+                metric_reader
+                if metric_reader is not None
+                else PeriodicExportingMetricReader(
+                    PrometheusRemoteWriteMetricsExporter(
+                        endpoint=prom_endpoint,
+                        headers=parse_otlp_headers(settings.prometheus_remote_write_headers),
+                    )
+                )
+            )
+            provider = MeterProvider(
+                resource=_build_resource(settings, service),
+                metric_readers=[reader],
+            )
+            metrics.set_meter_provider(provider)
+            if app is not None:
+                app.add_middleware(_MetricsASGIMiddleware)
+        except Exception:
+            log.warning(
+                "metrics init failed; Prometheus remote-write metrics export disabled",
+                exc_info=True,
+            )
+            _meter_provider = None
+            _metrics_enabled = False
+            return False
+
+        _meter_provider = provider
+        _metrics_enabled = True
+        log.info(
+            "metrics initialised (service=%s, env=%s, exporter=prometheus_remote_write)",
+            service,
+            settings.app_environment,
+        )
+        return True
+
+    # Priority 2: OTLP metric exporter (existing behavior)
+    otlp_endpoint = settings.otel_exporter_otlp_endpoint.strip()
+    if not otlp_endpoint:
+        log.info(
+            "metrics endpoint unset (neither PROMETHEUS_REMOTE_WRITE_ENDPOINT "
+            "nor OTEL_EXPORTER_OTLP_ENDPOINT configured); metrics export off"
+        )
         return False
 
     try:
@@ -659,7 +718,7 @@ def init_metrics(
             if metric_reader is not None
             else PeriodicExportingMetricReader(
                 OTLPMetricExporter(
-                    endpoint=endpoint,
+                    endpoint=otlp_endpoint,
                     headers=parse_otlp_headers(settings.otel_exporter_otlp_headers),
                 )
             )
@@ -679,7 +738,11 @@ def init_metrics(
 
     _meter_provider = provider
     _metrics_enabled = True
-    log.info("metrics initialised (service=%s, env=%s)", service, settings.app_environment)
+    log.info(
+        "metrics initialised (service=%s, env=%s, exporter=otlp)",
+        service,
+        settings.app_environment,
+    )
     return True
 
 
