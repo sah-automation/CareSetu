@@ -116,13 +116,17 @@ def _build_egress_gate() -> tuple[AsyncEngine, ConsentFacade, BudgetMeter]:
     (PS-10, #408): it reports spend against the budget; exhaustion is logged,
     never a block.
     """
-    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    settings = get_settings()
+    from modules.intake.ai_config import AiConfigResolver
+
+    ai_config = AiConfigResolver(settings).resolve()
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
     return (
         engine,
         ConsentFacade(engine=engine),
         BudgetMeter(
             engine=engine,
-            monthly_budget_paise=get_settings().ai_monthly_budget_paise,
+            monthly_budget_paise=ai_config.monthly_budget_paise,
         ),
     )
 
@@ -263,8 +267,11 @@ async def _run_structuring_pipeline(
             return
 
         settings = get_settings()
-        configured_provider, configured_model = configured_plan()
-        gateway = _adapters.build_ai_gateway(settings)
+        from modules.intake.ai_config import AiConfigResolver
+
+        ai_config = AiConfigResolver(settings).resolve()
+        configured_provider, configured_model = configured_plan(ai_config=ai_config)
+        gateway = _adapters.build_ai_gateway(settings, ai_config=ai_config)
 
         # Resolve the transcript before any job is created, so an unstructurable
         # intake (voice with no clip, or no text at all) degrades to a logged

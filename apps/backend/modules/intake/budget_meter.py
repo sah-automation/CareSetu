@@ -23,6 +23,7 @@ the meter stays correct purely from what the pipeline writes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -80,8 +81,42 @@ class BudgetMeter:
     exhaustion is observed and reported, never enforced as a block.
     """
 
-    def __init__(self, engine: AsyncEngine, *, monthly_budget_paise: int) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        monthly_budget_paise: int | None = None,
+        settings: Any = None,
+        override_source: Any = None,
+        resolver: Any = None,
+        ai_config: Any = None,
+        **kwargs: Any,
+    ) -> None:
         self._engine = engine
+        if monthly_budget_paise is None:
+            from modules.intake.ai_config import AiConfigResolver
+
+            if ai_config is None:
+                if resolver is not None and hasattr(resolver, "resolve"):
+                    ai_config = resolver.resolve()
+                else:
+                    if settings is None:
+                        from app.config import get_settings
+
+                        try:
+                            settings = get_settings()
+                        except Exception:
+                            from app.config import Settings
+
+                            settings = Settings()
+                    ai_config = AiConfigResolver(
+                        settings, override_source=override_source, **kwargs
+                    ).resolve()
+            monthly_budget_paise = getattr(ai_config, "monthly_budget_paise", None)
+            if monthly_budget_paise is None:
+                monthly_budget_paise = getattr(ai_config, "ai_monthly_budget_paise", None)
+        if monthly_budget_paise is None:
+            raise ValueError("monthly_budget_paise must be provided")
         if monthly_budget_paise <= 0:
             raise ValueError("monthly_budget_paise must be positive")
         self._monthly_budget_paise = monthly_budget_paise

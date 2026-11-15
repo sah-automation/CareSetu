@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -42,18 +43,39 @@ from modules.intake.schema.models import intake_ai_jobs
 from observability.logging import get_trace_id
 
 
-def configured_plan() -> tuple[str, str]:
+def configured_plan(
+    *,
+    settings: Any = None,
+    override_source: Any = None,
+    resolver: Any = None,
+    ai_config: Any = None,
+    **kwargs: Any,
+) -> tuple[str, str]:
     """The deployment's configured (provider, model) - the pre-call booking.
 
-    ``AI_PROVIDER`` is a whitelist name so it is normalised to lower case; the
-    model falls back to the mock's own identity when the deployment names none,
-    so the booking column is never empty. This is the PLAN, not what served:
-    :func:`complete_ai_job` overwrites it with the effective values once the call
-    returns. Owned here so every metered leg books the same plan - the facade and
-    the pipeline resolve it once, from one place.
+    Reads through the AI config resolver (issue #919) with precedence
+    override -> env -> default. ``AI_PROVIDER`` is a whitelist name so it is
+    normalised to lower case; the model falls back to the mock's own identity when
+    the deployment names none, so the booking column is never empty.
     """
-    settings = get_settings()
-    return settings.ai_provider.strip().lower(), settings.ai_model or MOCK_AI_MODEL
+    from modules.intake.ai_config import AiConfigResolver
+
+    if ai_config is None:
+        if resolver is not None and hasattr(resolver, "resolve"):
+            ai_config = resolver.resolve()
+        else:
+            if settings is None:
+                settings = get_settings()
+            ai_config = AiConfigResolver(
+                settings, override_source=override_source, **kwargs
+            ).resolve()
+    provider = getattr(ai_config, "provider", None)
+    if provider is None:
+        provider = getattr(ai_config, "ai_provider", "mock")
+    model = getattr(ai_config, "model", None)
+    if not model:
+        model = getattr(ai_config, "ai_model", "") or MOCK_AI_MODEL
+    return str(provider).strip().lower(), str(model) or MOCK_AI_MODEL
 
 
 async def insert_ai_job(

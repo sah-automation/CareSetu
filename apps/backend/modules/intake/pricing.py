@@ -28,6 +28,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
 
 from app.config import (
     DEFAULT_AI_PRICING_TABLE,
@@ -71,16 +72,52 @@ PRICING_TABLE: Mapping[str, ModelPrice] = _to_pricing_table(
 )
 
 
-def resolve_pricing_table() -> Mapping[str, ModelPrice]:
-    """The effective table for this process: config/env rates, code default fallback.
+def resolve_pricing_table(
+    *,
+    settings: Any = None,
+    override_source: Any = None,
+    resolver: Any = None,
+    ai_config: Any = None,
+    overrides: Any = None,
+    override: Any = None,
+    source: Any = None,
+    db_overrides: Any = None,
+    **kwargs: Any,
+) -> Mapping[str, ModelPrice]:
+    """The effective table for this process: override -> env -> default.
 
-    Read from ``get_settings()`` so an ``AI_PRICING_TABLE`` value takes effect
-    without the module import freezing an incomplete table (the pipeline already
-    reads Settings at its own call sites this way). An empty configured table
-    (``AI_PRICING_TABLE=""``) falls back to the code-side ``PRICING_TABLE`` so
-    the free mock stays known-free until a deployment prices a model.
+    Reads through the AI config resolver (issue #919) so a dashboard override
+    takes precedence over the environment. An empty configured table falls back
+    to the code-side ``PRICING_TABLE`` so the free mock stays known-free.
     """
-    raw = get_settings().ai_pricing_table.strip()
+    from modules.intake.ai_config import AiConfigResolver
+
+    if ai_config is None:
+        if resolver is not None and hasattr(resolver, "resolve"):
+            ai_config = resolver.resolve()
+        else:
+            if settings is None:
+                settings = get_settings()
+            resolver = AiConfigResolver(
+                settings,
+                override_source=override_source
+                if override_source is not None
+                else (
+                    overrides
+                    if overrides is not None
+                    else (
+                        override
+                        if override is not None
+                        else (source if source is not None else db_overrides)
+                    )
+                ),
+                **kwargs,
+            )
+            ai_config = resolver.resolve()
+    raw = getattr(ai_config, "pricing_table_raw", None)
+    if raw is None:
+        raw = getattr(ai_config, "ai_pricing_table", "")
+    raw = str(raw or "").strip()
     if not raw:
         return PRICING_TABLE
     return _to_pricing_table(parse_ai_pricing_table(raw))
