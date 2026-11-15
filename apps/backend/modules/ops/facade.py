@@ -41,6 +41,14 @@ from modules.ops.schema.models import (
     ops_settings,
 )
 
+# AI knobs validated by ``validate_ai_setting``. Provider API key secrets
+# (``ai.api_key``, ``ai.fallback_api_key``) are editable but are not config knobs;
+# they are handled by the key-presence validation in ``write_setting`` instead.
+_EDITABLE_AI_CONFIG_KEYS: frozenset[str] = EDITABLE_AI_KEYS - {
+    "ai.api_key",
+    "ai.fallback_api_key",
+}
+
 
 class OpsFacade:
     """Typed public facade for ops."""
@@ -386,14 +394,14 @@ class OpsFacade:
         # already maps to the shared 400 envelope.
         catalog = None
         pricing_table = None
-        if setting_key in EDITABLE_AI_KEYS:
+        if setting_key in _EDITABLE_AI_CONFIG_KEYS:
             catalog = [dict(e) for e in self.get_ai_provider_catalog()]
             try:
                 pricing_table = parse_ai_pricing_table(self._settings.ai_pricing_table or "")
             except ValueError:
                 pricing_table = {}
         try:
-            if setting_key in EDITABLE_AI_KEYS:
+            if setting_key in _EDITABLE_AI_CONFIG_KEYS:
                 validate_ai_setting(
                     setting_key, value, catalog=catalog, pricing_table=pricing_table
                 )
@@ -419,6 +427,15 @@ class OpsFacade:
             if row is not None:
                 old_value = row["value"]
                 old_version = row["version"]
+
+            # Key-presence validation for provider API keys (issue #923).
+            # Non-mock providers require a resolvable key (the value being
+            # written, the environment, or a previously saved dashboard value)
+            # or the write is rejected. Mock providers require no key.
+            if setting_key in ("ai.api_key", "ai.fallback_api_key"):
+                await self._validate_provider_api_key_presence(
+                    connection, setting_key, value, old_value
+                )
 
             new_version = old_version + 1
 
@@ -495,3 +512,73 @@ class OpsFacade:
         self._cache.invalidate()
 
         return {"setting_key": setting_key, "value": value, "version": new_version}
+
+    def _provider_requires_api_key(self, provider_id: str) -> bool:
+        """Return True if a non-mock provider needs a resolvable API key.
+
+        A mock provider (empty ``api_key_env``) requires no key. Unknown or
+        unlisted providers fail closed and require a key.
+        """
+        provider_id = (provider_id or "").strip().lower()
+        if provider_id == "mock":
+            return False
+        try:
+            catalog = [dict(e) for e in self.get_ai_provider_catalog()]
+        except Exception:
+            # Fail closed: a malformed catalog still requires a key.
+            return True
+        for entry in catalog:
+            if str(entry.get("id", "")).strip().lower() == provider_id:
+                api_key_env = str(entry.get("api_key_env", "") or "").strip()
+                return bool(api_key_env)
+        return True
+
+    async def _validate_provider_api_key_presence(
+        self,
+        connection: Any,
+        setting_key: str,
+        value: Any,
+        old_value: Any | None,
+    ) -> None:
+        """Reject writes of a provider API key when no key is resolvable.
+
+        A resolvable key is the value being written, an environment value for
+        the provider's key, or a previously saved dashboard value. Mock
+        providers require no key.
+        """
+        from modules.ops.domain.exceptions import InvalidSettingWriteError
+
+        # Determine the provider this key belongs to and its current value.
+        provider_setting = "ai.provider" if setting_key == "ai.api_key" else "ai.fallback_provider"
+
+        provider_id: str | None = None
+        provider_result = await connection.execute(
+            select(ops_settings).where(ops_settings.c.setting_key == provider_setting)
+        )
+        provider_row = provider_result.mappings().first()
+        if provider_row is not None and provider_row["value"] not in (None, ""):
+            provider_id = str(provider_row["value"]).strip()
+        if not provider_id:
+            provider_id = str(getattr(self._settings, "ai_provider", "mock") or "mock").strip()
+
+        if not self._provider_requires_api_key(provider_id):
+            return  # mock provider: no key required
+
+        # The value being written counts as a resolvable (new) dashboard key.
+        if value is not None and str(value).strip() != "":
+            return
+
+        # Environment value for this key.
+        env_val, _ = self._resolver._get_from_env_or_default(setting_key)
+        if env_val is not None and str(env_val).strip() != "":
+            return
+
+        # Previously saved dashboard value.
+        if old_value is not None and str(old_value).strip() != "":
+            return
+
+        raise InvalidSettingWriteError(
+            setting_key,
+            f"No resolvable API key for provider {provider_id!r}; enter a key, "
+            "configure it in the environment, or save a dashboard value first.",
+        )

@@ -188,6 +188,9 @@ EDITABLE_AI_KEYS: frozenset[str] = frozenset(
         "ai.fallback_model",
         "ai.asr_model",
         "ai.pricing_table",
+        # Runtime-editable provider API keys (issue #923)
+        "ai.api_key",
+        "ai.fallback_api_key",
     }
 )
 
@@ -206,7 +209,6 @@ EDITABLE_NOTIFICATION_KEYS: frozenset[str] = frozenset(
 # Read-only keys that are never returned raw
 READ_ONLY_SENSITIVE_KEYS: frozenset[str] = frozenset(
     {
-        "ai.api_key",
         "ai.base_url",
         "gateway.jwt_signing_key",
         "iam.mfa_secret_key",
