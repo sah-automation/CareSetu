@@ -1,12 +1,16 @@
 "use client";
 
-// #797: the read-only AI section of the admin Settings page.
-// #798: the allowlisted AI knobs are now editable, with per-row save states,
-// validation copy, and the append-only setting history beneath the table.
-// Provider, model, API key and base URL stay read-only: the API's `editable`
-// flag is the only thing that decides whether a row gets a control.
+// #924: the catalog-driven "AI & LLM" section of the operator Settings page.
+// The section renders selects populated from the AI provider catalog endpoint,
+// with per-provider dependent model / ASR-model filtering, a marked "custom
+// model name" free-text escape hatch on the model selects, fallback
+// provider / model selects, a pricing-table textarea (one `model:price_in:
+// price_out` entry per line) with a USD-per-1M price preview alongside the
+// stored paise unit, and the provider's auto-derived base URL shown read-only.
+// Writes go through the settings client's string-value write support
+// (`writeSetting`). Non-admin operators see every control read-only.
 
-import { useState } from "react";
+import React, { useState } from "react";
 
 import { EmptyState } from "@/components/layout/EmptyState";
 import { Badge } from "@/components/ui/badge";
@@ -14,9 +18,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-errors";
 import type { OperatorSettingsStrings } from "@/lib/i18n/dictionaries";
 import {
+  fetchAiProviderCatalog,
   fetchEffectiveSettings,
   fetchSettingHistory,
   writeSetting,
+  type AiProviderCatalogEntry,
   type EffectiveSetting,
   type SettingHistoryEntry,
   type SettingSource,
@@ -25,11 +31,22 @@ import {
 import { usePanelRead } from "@/lib/operator/usePanelRead";
 
 import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
-import { isSecretKey } from "@/lib/operator/config-filter";
 
 type AiStrings = OperatorSettingsStrings["ai"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
-type Draft = string | boolean;
+
+// ~₹88.5/USD (#917): USD per 1M tokens = paise-per-token * 1e6 / 8850.
+const PAISE_PER_USD = 8850;
+
+const AI_FIELD_KEYS = [
+  "ai.provider",
+  "ai.model",
+  "ai.asr_model",
+  "ai.fallback_provider",
+  "ai.fallback_model",
+  "ai.pricing_table",
+] as const;
+type AiFieldKey = (typeof AI_FIELD_KEYS)[number];
 
 function sourceLabel(source: SettingSource, t: AiStrings): string {
   switch (source) {
@@ -40,18 +57,6 @@ function sourceLabel(source: SettingSource, t: AiStrings): string {
     case "default":
       return t.sources.default;
   }
-}
-
-function formatValue(value: unknown, t: AiStrings): string {
-  if (value === null || value === undefined) return t.notReturned;
-  if (typeof value === "boolean") return value ? t.yes : t.no;
-  if (Array.isArray(value)) {
-    return value.length === 0
-      ? t.emptyList
-      : value.map((item) => formatValue(item, t)).join(", ");
-  }
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
 }
 
 function formatTimestamp(iso: string): string {
@@ -68,202 +73,696 @@ function formatTimestamp(iso: string): string {
   }
 }
 
-/** The editable AI knobs are numbers and one boolean; infer the control. */
-function isBooleanSetting(setting: EffectiveSetting): boolean {
+function usdPer1M(paisePerToken: number): string {
+  const usd = (paisePerToken * 1_000_000) / PAISE_PER_USD;
+  return usd.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
+}
+
+interface ParsedPrice {
+  model: string;
+  priceIn: number;
+  priceOut: number;
+  usdIn: string;
+  usdOut: string;
+  valid: boolean;
+  error?: string;
+}
+
+function parsePricingTable(text: string): ParsedPrice[] {
+  const rows: ParsedPrice[] = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(":");
+    if (parts.length !== 3 || !parts[0]) {
+      rows.push({
+        model: line,
+        priceIn: NaN,
+        priceOut: NaN,
+        usdIn: "",
+        usdOut: "",
+        valid: false,
+        error: "expected 'model:price_in:price_out'",
+      });
+      continue;
+    }
+    const [model, inRaw, outRaw] = parts;
+    const priceIn = Number(inRaw.trim());
+    const priceOut = Number(outRaw.trim());
+    if (
+      !Number.isFinite(priceIn) ||
+      !Number.isFinite(priceOut) ||
+      priceIn < 0 ||
+      priceOut < 0
+    ) {
+      rows.push({
+        model: model.trim(),
+        priceIn,
+        priceOut,
+        usdIn: "",
+        usdOut: "",
+        valid: false,
+        error: "rates must be non-negative numbers",
+      });
+      continue;
+    }
+    rows.push({
+      model: model.trim(),
+      priceIn,
+      priceOut,
+      usdIn: usdPer1M(priceIn),
+      usdOut: usdPer1M(priceOut),
+      valid: true,
+    });
+  }
+  return rows;
+}
+
+function currentValueOf(settings: EffectiveSetting[], key: string): string {
+  const row = settings.find((s) => s.key === key);
+  const value = row?.value;
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function providerById(
+  providers: AiProviderCatalogEntry[],
+  id: string,
+): AiProviderCatalogEntry | undefined {
+  return providers.find((p) => p.id === id);
+}
+
+function optionsWithCurrent(options: string[], current: string): string[] {
+  if (current && !options.includes(current)) return [...options, current];
+  return options;
+}
+
+function AiFieldRow({
+  fieldKey,
+  label,
+  value,
+  source,
+  editable,
+  control,
+  saveStatus,
+  saveError,
+  onDraft,
+  onSave,
+  isAdmin,
+  t,
+}: {
+  fieldKey: string;
+  label: string;
+  value: string;
+  source: SettingSource | undefined;
+  editable: boolean;
+  control: React.ReactNode;
+  saveStatus: SaveStatus;
+  saveError: string | undefined;
+  onDraft: (value: string) => void;
+  onSave: () => void;
+  isAdmin: boolean;
+  t: AiStrings;
+}) {
+  const canEdit = editable && isAdmin;
+  const status = saveStatus;
+  const error = saveError;
   return (
-    typeof setting.value === "boolean" ||
-    setting.key.endsWith("_enabled") ||
-    setting.key.endsWith(".enabled")
+    <div
+      key={fieldKey}
+      data-testid={`settings-ai-row-${fieldKey}`}
+      className="mt-4 rounded-lg border border-hairline bg-surface p-3"
+    >
+      <div className="flex items-baseline gap-2 mb-1">
+        <span className="text-sm font-medium text-txt">{label}</span>
+        {source !== undefined ? (
+          <Badge
+            variant="secondary"
+            className="text-xs"
+            data-testid={`settings-ai-source-${fieldKey}`}
+          >
+            {sourceLabel(source, t)}
+          </Badge>
+        ) : null}
+      </div>
+      <div className="mb-2">{control}</div>
+      <div className="flex flex-col gap-1">
+        {canEdit ? (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={status === "saving"}
+              onClick={onSave}
+              className="inline-flex min-h-9 items-center rounded-md border border-hairline px-3 text-xs font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
+              data-testid={`settings-ai-save-${fieldKey}`}
+            >
+              {status === "saving" ? t.saving : t.save}
+            </button>
+            {status === "saved" && (
+              <span
+                className="text-xs text-success"
+                data-testid={`settings-ai-save-status-${fieldKey}`}
+              >
+                {t.saved}
+              </span>
+            )}
+            {status === "error" && error && (
+              <span
+                role="alert"
+                className="text-xs text-danger"
+                data-testid={`settings-ai-save-error-${fieldKey}`}
+              >
+                {error}
+              </span>
+            )}
+          </div>
+        ) : (
+          <span
+            className="text-xs text-txt-muted"
+            data-testid={`settings-ai-readonly-${fieldKey}`}
+          >
+            {t.readOnly}
+          </span>
+        )}
+      </div>
+    </div>
   );
 }
 
-function draftFor(
-  setting: EffectiveSetting,
-  drafts: Record<string, Draft>,
-): Draft {
-  const draft = drafts[setting.key];
-  if (draft !== undefined) return draft;
-  if (isBooleanSetting(setting)) return Boolean(setting.value);
-  return setting.value === null || setting.value === undefined
-    ? ""
-    : String(setting.value);
+interface AiSectionProps {
+  t: OperatorSettingsStrings;
+  isAdmin: boolean;
 }
 
-function buildWriteValue(
-  setting: EffectiveSetting,
-  raw: Draft,
-  t: AiStrings,
-): { ok: true; value: SettingWriteValue } | { ok: false; message: string } {
-  if (isBooleanSetting(setting)) {
-    return { ok: true, value: Boolean(raw) };
-  }
-  const text = typeof raw === "string" ? raw.trim() : "";
-  if (text === "") return { ok: false, message: t.validationRequired };
-  const numeric = Number(text);
-  if (!Number.isFinite(numeric)) {
-    return { ok: false, message: t.validationNumber };
-  }
-  return { ok: true, value: numeric };
-}
+export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
+  const ai = t.ai;
+  const settingsRead = usePanelRead(() => fetchEffectiveSettings());
+  const catalogRead = usePanelRead(() => fetchAiProviderCatalog());
+  const historyRead = usePanelRead(() => fetchSettingHistory());
 
-function AiSettingsTable({
-  settings,
-  t,
-  drafts,
-  saveStates,
-  saveErrors,
-  onDraft,
-  onSave,
-}: {
-  settings: EffectiveSetting[];
-  t: AiStrings;
-  drafts: Record<string, Draft>;
-  saveStates: Record<string, SaveStatus>;
-  saveErrors: Record<string, string>;
-  onDraft: (key: string, draft: Draft) => void;
-  onSave: (setting: EffectiveSetting) => void;
-}) {
+  const settings = settingsRead.data ?? [];
+  const providers = catalogRead.data ?? [];
+  const current: Record<AiFieldKey, string> = {} as Record<AiFieldKey, string>;
+  for (const key of AI_FIELD_KEYS) {
+    current[key] = currentValueOf(settings, key);
+  }
+  const currentSource: Record<AiFieldKey, SettingSource | undefined> =
+    {} as Record<AiFieldKey, SettingSource | undefined>;
+  const currentEditable: Record<AiFieldKey, boolean> = {} as Record<
+    AiFieldKey,
+    boolean
+  >;
+  for (const key of AI_FIELD_KEYS) {
+    const row = settings.find((s) => s.key === key);
+    currentSource[key] = row?.source;
+    currentEditable[key] = row?.editable ?? false;
+  }
+
+  const [drafts, setDrafts] = useState<Record<AiFieldKey, string>>(current);
+  const [customText, setCustomText] = useState<Record<AiFieldKey, string>>(
+    Object.fromEntries(AI_FIELD_KEYS.map((k) => [k, ""])) as Record<
+      AiFieldKey,
+      string
+    >,
+  );
+  const [saveStates, setSaveStates] = useState<Record<AiFieldKey, SaveStatus>>(
+    Object.fromEntries(AI_FIELD_KEYS.map((k) => [k, "idle"])) as Record<
+      AiFieldKey,
+      SaveStatus
+    >,
+  );
+  const [saveErrors, setSaveErrors] = useState<Record<AiFieldKey, string>>(
+    Object.fromEntries(AI_FIELD_KEYS.map((k) => [k, ""])) as Record<
+      AiFieldKey,
+      string
+    >,
+  );
+
+  const providerEntry = providerById(providers, drafts["ai.provider"]);
+  const fallbackProviderEntry = providerById(
+    providers,
+    drafts["ai.fallback_provider"],
+  );
+  const chatModels = optionsWithCurrent(
+    providerEntry?.chat_models ?? [],
+    drafts["ai.model"],
+  );
+  const asrModels = optionsWithCurrent(
+    providerEntry?.asr_models ?? [],
+    drafts["ai.asr_model"],
+  );
+  const fallbackChatModels = optionsWithCurrent(
+    fallbackProviderEntry?.chat_models ?? [],
+    drafts["ai.fallback_model"],
+  );
+
+  function handleDraft(key: AiFieldKey, value: string) {
+    setDrafts((cur) => ({ ...cur, [key]: value }));
+    setSaveStates((cur) => ({ ...cur, [key]: "idle" }));
+    setSaveErrors((cur) => {
+      const next = { ...cur };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function handleCustomDraft(key: AiFieldKey, value: string) {
+    setCustomText((cur) => ({ ...cur, [key]: value }));
+  }
+
+  async function handleSave(key: AiFieldKey) {
+    setSaveErrors((cur) => {
+      const next = { ...cur };
+      delete next[key];
+      return next;
+    });
+
+    let value = drafts[key];
+    if (key === "ai.model" || key === "ai.fallback_model") {
+      // When a custom model name is typed, prefer it over the select choice.
+      const custom = customText[key];
+      if (custom.trim()) value = custom.trim();
+    }
+
+    if (value === "") {
+      setSaveStates((cur) => ({ ...cur, [key]: "error" }));
+      setSaveErrors((cur) => ({ ...cur, [key]: ai.validationRequired }));
+      return;
+    }
+
+    // Client-side guard: a custom model requires a pricing-table entry.
+    if (key === "ai.model" || key === "ai.fallback_model") {
+      const entry = providerById(
+        providers,
+        key === "ai.model"
+          ? drafts["ai.provider"]
+          : drafts["ai.fallback_provider"],
+      );
+      const known = new Set([
+        ...(entry?.chat_models ?? []),
+        ...(entry?.asr_models ?? []),
+      ]);
+      if (!known.has(value)) {
+        const pricing = parsePricingTable(drafts["ai.pricing_table"]);
+        if (!pricing.some((row) => row.valid && row.model === value)) {
+          setSaveStates((cur) => ({ ...cur, [key]: "error" }));
+          setSaveErrors((cur) => ({ ...cur, [key]: ai.validationCustomPrice }));
+          return;
+        }
+      }
+    }
+
+    setSaveStates((cur) => ({ ...cur, [key]: "saving" }));
+    try {
+      await writeSetting(key, value as SettingWriteValue);
+      setSaveStates((cur) => ({ ...cur, [key]: "saved" }));
+      setDrafts((cur) => {
+        if (!(key in cur)) return cur;
+        const next = { ...cur };
+        delete next[key];
+        return next;
+      });
+      settingsRead.reload();
+    } catch (error) {
+      setSaveStates((cur) => ({ ...cur, [key]: "error" }));
+      setSaveErrors((cur) => ({
+        ...cur,
+        [key]:
+          error instanceof ApiError
+            ? error.message || ai.saveErrorExpected
+            : ai.saveError,
+      }));
+    }
+  }
+
+  const pricingRows = parsePricingTable(drafts["ai.pricing_table"]);
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm">
-        <caption className="sr-only">{t.description}</caption>
-        <thead>
-          <tr className="border-b border-hairline text-xs text-txt-muted">
-            <th scope="col" className="py-2 pr-3 font-medium">
-              {t.key}
-            </th>
-            <th scope="col" className="py-2 pr-3 font-medium">
-              {t.value}
-            </th>
-            <th scope="col" className="py-2 pr-3 font-medium">
-              {t.source}
-            </th>
-            <th scope="col" className="py-2 pr-3 font-medium">
-              {t.restartRequired}
-            </th>
-            <th scope="col" className="py-2 font-medium">
-              {t.actions}
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {settings.map((setting) => {
-            const status = saveStates[setting.key] ?? "idle";
-            const error = saveErrors[setting.key];
-            return (
-              <tr
-                key={setting.key}
-                data-testid={`settings-ai-row-${setting.key}`}
-                className="border-b border-hairline align-top last:border-0"
-              >
-                <th
-                  scope="row"
-                  className="py-2 pr-3 font-mono text-xs font-normal text-txt"
+    <CollapsibleSettingsSection
+      sectionKey="ai"
+      testId="settings-ai"
+      title={t.sections.ai}
+      description={ai.description}
+    >
+      {(settingsRead.status === "loading" ||
+        catalogRead.status === "loading") && (
+        <div data-testid="settings-ai-loading">
+          <Skeleton className="h-32 w-full" />
+        </div>
+      )}
+
+      {settingsRead.status === "error" && (
+        <div
+          role="alert"
+          data-testid="settings-ai-error"
+          className="rounded-md border border-danger-border bg-danger-soft px-3 py-2"
+        >
+          <p className="text-sm text-danger">
+            {settingsRead.error?.expected ? ai.errorExpected : ai.error}
+          </p>
+          <button
+            type="button"
+            onClick={settingsRead.reload}
+            data-testid="settings-ai-retry"
+            className="mt-2 inline-flex min-h-11 items-center rounded-md border border-danger-border px-3 text-xs font-medium text-danger hover:bg-danger-soft/60"
+          >
+            {t.retry}
+          </button>
+        </div>
+      )}
+
+      {catalogRead.status === "error" && (
+        <div
+          role="alert"
+          data-testid="settings-ai-catalog-error"
+          className="mt-3 rounded-md border border-danger-border bg-danger-soft px-3 py-2"
+        >
+          <p className="text-sm text-danger">{ai.catalogError}</p>
+          <button
+            type="button"
+            onClick={catalogRead.reload}
+            data-testid="settings-ai-catalog-retry"
+            className="mt-2 inline-flex min-h-11 items-center rounded-md border border-danger-border px-3 text-xs font-medium text-danger hover:bg-danger-soft/60"
+          >
+            {t.retry}
+          </button>
+        </div>
+      )}
+
+      {settingsRead.status === "ready" &&
+        catalogRead.status === "ready" &&
+        providers.length === 0 && (
+          <EmptyState title={ai.catalogEmpty} body={ai.catalogError} />
+        )}
+
+      {settingsRead.status === "ready" &&
+        catalogRead.status === "ready" &&
+        providers.length > 0 && (
+          <>
+            <p
+              className="mb-2 text-xs text-txt-muted"
+              data-testid="settings-ai-takeaway"
+            >
+              {ai.takeaway ? ai.takeaway(6) : "6 effective settings"}
+            </p>
+
+            <AiFieldRow
+              fieldKey="ai.provider"
+              label={ai.provider}
+              value={drafts["ai.provider"]}
+              source={currentSource["ai.provider"]}
+              editable={currentEditable["ai.provider"]}
+              control={
+                <select
+                  value={drafts["ai.provider"]}
+                  onChange={(event) =>
+                    handleDraft("ai.provider", event.target.value)
+                  }
+                  disabled={!isAdmin || !currentEditable["ai.provider"]}
+                  className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                  data-testid="settings-ai-provider-select"
                 >
-                  {setting.key}
-                </th>
-                <td
-                  className="py-2 pr-3 text-txt"
-                  data-testid={`settings-ai-value-${setting.key}`}
-                >
-                  {setting.editable && !setting.restart_required ? (
-                    isBooleanSetting(setting) ? (
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 accent-accent"
-                        checked={Boolean(draftFor(setting, drafts))}
-                        onChange={(event) =>
-                          onDraft(setting.key, event.target.checked)
-                        }
-                        data-testid={`settings-ai-input-${setting.key}`}
-                      />
-                    ) : (
-                      <input
-                        type="number"
-                        step="any"
-                        min={0}
-                        className="w-32 rounded-md border border-hairline px-2 py-1 text-sm text-txt"
-                        value={String(draftFor(setting, drafts))}
-                        onChange={(event) =>
-                          onDraft(setting.key, event.target.value)
-                        }
-                        data-testid={`settings-ai-input-${setting.key}`}
-                      />
-                    )
-                  ) : (
-                    formatValue(setting.value, t)
-                  )}
-                </td>
-                <td className="py-2 pr-3">
-                  <Badge
-                    variant="secondary"
-                    data-testid={`settings-ai-source-${setting.key}`}
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.display_name}
+                    </option>
+                  ))}
+                </select>
+              }
+              saveStatus={saveStates["ai.provider"] ?? "idle"}
+              saveError={saveErrors["ai.provider"]}
+              onDraft={(v) => handleDraft("ai.provider", v)}
+              onSave={() => void handleSave("ai.provider")}
+              isAdmin={isAdmin}
+              t={ai}
+            />
+
+            <AiFieldRow
+              fieldKey="ai.model"
+              label={ai.model}
+              value={drafts["ai.model"]}
+              source={currentSource["ai.model"]}
+              editable={currentEditable["ai.model"]}
+              control={
+                <div className="flex flex-col gap-1">
+                  <select
+                    value={drafts["ai.model"]}
+                    onChange={(event) =>
+                      handleDraft("ai.model", event.target.value)
+                    }
+                    disabled={!isAdmin || !currentEditable["ai.model"]}
+                    className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                    data-testid="settings-ai-model-select"
                   >
-                    {sourceLabel(setting.source, t)}
-                  </Badge>
-                </td>
-                <td className="py-2 pr-3">
-                  {setting.restart_required ? (
-                    <Badge
-                      variant="destructive"
-                      data-testid={`settings-ai-restart-${setting.key}`}
-                    >
-                      {t.restartRequired}
-                    </Badge>
-                  ) : (
-                    <span
-                      className="text-xs text-txt-muted"
-                      data-testid={`settings-ai-no-restart-${setting.key}`}
-                    >
-                      -
-                    </span>
+                    {chatModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                    <option key="__custom__" value="__custom__">
+                      {ai.customModelOption}
+                    </option>
+                  </select>
+                  {drafts["ai.model"] === "__custom__" && (
+                    <input
+                      type="text"
+                      value={customText["ai.model"]}
+                      onChange={(event) =>
+                        handleCustomDraft("ai.model", event.target.value)
+                      }
+                      placeholder={ai.customModel}
+                      disabled={!isAdmin || !currentEditable["ai.model"]}
+                      className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
+                      data-testid="settings-ai-model-custom"
+                    />
                   )}
-                </td>
-                <td className="py-2">
-                  {setting.editable && !setting.restart_required ? (
-                    <div className="flex flex-col gap-1">
-                      <button
-                        type="button"
-                        disabled={status === "saving"}
-                        onClick={() => onSave(setting)}
-                        className="inline-flex min-h-9 items-center rounded-md border border-hairline px-3 text-xs font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
-                        data-testid={`settings-ai-save-${setting.key}`}
-                      >
-                        {status === "saving" ? t.saving : t.save}
-                      </button>
-                      {status === "saved" && (
+                  <span
+                    className="text-xs text-txt-muted"
+                    data-testid="settings-ai-model-hint"
+                  >
+                    {drafts["ai.model"] === "__custom__"
+                      ? `${ai.customModelMarked} ${ai.customModel}`
+                      : ""}
+                  </span>
+                </div>
+              }
+              saveStatus={saveStates["ai.model"] ?? "idle"}
+              saveError={saveErrors["ai.model"]}
+              onDraft={(v) => handleDraft("ai.model", v)}
+              onSave={() => void handleSave("ai.model")}
+              isAdmin={isAdmin}
+              t={ai}
+            />
+
+            <AiFieldRow
+              fieldKey="ai.asr_model"
+              label={ai.asrModel}
+              value={drafts["ai.asr_model"]}
+              source={currentSource["ai.asr_model"]}
+              editable={currentEditable["ai.asr_model"]}
+              control={
+                <select
+                  value={drafts["ai.asr_model"]}
+                  onChange={(event) =>
+                    handleDraft("ai.asr_model", event.target.value)
+                  }
+                  disabled={!isAdmin || !currentEditable["ai.asr_model"]}
+                  className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                  data-testid="settings-ai-asr-select"
+                >
+                  {asrModels.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              }
+              saveStatus={saveStates["ai.asr_model"] ?? "idle"}
+              saveError={saveErrors["ai.asr_model"]}
+              onDraft={(v) => handleDraft("ai.asr_model", v)}
+              onSave={() => void handleSave("ai.asr_model")}
+              isAdmin={isAdmin}
+              t={ai}
+            />
+
+            <AiFieldRow
+              fieldKey="ai.fallback_provider"
+              label={ai.fallbackProvider}
+              value={drafts["ai.fallback_provider"]}
+              source={currentSource["ai.fallback_provider"]}
+              editable={currentEditable["ai.fallback_provider"]}
+              control={
+                <select
+                  value={drafts["ai.fallback_provider"]}
+                  onChange={(event) =>
+                    handleDraft("ai.fallback_provider", event.target.value)
+                  }
+                  disabled={
+                    !isAdmin || !currentEditable["ai.fallback_provider"]
+                  }
+                  className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                  data-testid="settings-ai-fallback-provider-select"
+                >
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.display_name}
+                    </option>
+                  ))}
+                </select>
+              }
+              saveStatus={saveStates["ai.fallback_provider"] ?? "idle"}
+              saveError={saveErrors["ai.fallback_provider"]}
+              onDraft={(v) => handleDraft("ai.fallback_provider", v)}
+              onSave={() => void handleSave("ai.fallback_provider")}
+              isAdmin={isAdmin}
+              t={ai}
+            />
+
+            <AiFieldRow
+              fieldKey="ai.fallback_model"
+              label={ai.fallbackModel}
+              value={drafts["ai.fallback_model"]}
+              source={currentSource["ai.fallback_model"]}
+              editable={currentEditable["ai.fallback_model"]}
+              control={
+                <div className="flex flex-col gap-1">
+                  <select
+                    value={drafts["ai.fallback_model"]}
+                    onChange={(event) =>
+                      handleDraft("ai.fallback_model", event.target.value)
+                    }
+                    disabled={!isAdmin || !currentEditable["ai.fallback_model"]}
+                    className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                    data-testid="settings-ai-fallback-model-select"
+                  >
+                    {fallbackChatModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                    <option key="__custom__" value="__custom__">
+                      {ai.customModelOption}
+                    </option>
+                  </select>
+                  {drafts["ai.fallback_model"] === "__custom__" && (
+                    <input
+                      type="text"
+                      value={customText["ai.fallback_model"]}
+                      onChange={(event) =>
+                        handleCustomDraft(
+                          "ai.fallback_model",
+                          event.target.value,
+                        )
+                      }
+                      placeholder={ai.customModel}
+                      disabled={
+                        !isAdmin || !currentEditable["ai.fallback_model"]
+                      }
+                      className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
+                      data-testid="settings-ai-fallback-model-custom"
+                    />
+                  )}
+                </div>
+              }
+              saveStatus={saveStates["ai.fallback_model"] ?? "idle"}
+              saveError={saveErrors["ai.fallback_model"]}
+              onDraft={(v) => handleDraft("ai.fallback_model", v)}
+              onSave={() => void handleSave("ai.fallback_model")}
+              isAdmin={isAdmin}
+              t={ai}
+            />
+
+            <AiFieldRow
+              fieldKey="ai.pricing_table"
+              label={ai.pricingTable}
+              value={drafts["ai.pricing_table"]}
+              source={currentSource["ai.pricing_table"]}
+              editable={currentEditable["ai.pricing_table"]}
+              control={
+                <div className="flex flex-col gap-1">
+                  <textarea
+                    value={drafts["ai.pricing_table"]}
+                    onChange={(event) =>
+                      handleDraft("ai.pricing_table", event.target.value)
+                    }
+                    disabled={!isAdmin || !currentEditable["ai.pricing_table"]}
+                    rows={4}
+                    className="w-64 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input font-mono"
+                    placeholder={ai.pricingPlaceholder}
+                    data-testid="settings-ai-pricing-table"
+                  />
+                  <span className="text-xs text-txt-muted">
+                    {ai.pricingHint}
+                  </span>
+                  {pricingRows.length > 0 && (
+                    <div className="mt-1 text-xs text-txt-sub">
+                      {pricingRows.map((row, i) => (
                         <span
-                          className="text-xs text-success"
-                          data-testid={`settings-ai-save-status-${setting.key}`}
+                          key={i}
+                          className="mr-3"
+                          data-testid={`settings-ai-pricing-preview-${row.model}`}
                         >
-                          {t.saved}
+                          {row.valid
+                            ? `${row.model}: ${ai.usdInput} $${row.usdIn} · ${ai.usdOutput} $${row.usdOut} ${ai.usdPer1M}`
+                            : `${row.model}: ${row.error}`}
                         </span>
-                      )}
-                      {status === "error" && (
-                        <span
-                          role="alert"
-                          className="text-xs text-danger"
-                          data-testid={`settings-ai-save-error-${setting.key}`}
-                        >
-                          {error}
-                        </span>
-                      )}
+                      ))}
                     </div>
-                  ) : (
-                    <span
-                      className="text-xs text-txt-muted"
-                      data-testid={`settings-ai-readonly-${setting.key}`}
-                    >
-                      {t.readOnly}
-                    </span>
                   )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+                </div>
+              }
+              saveStatus={saveStates["ai.pricing_table"] ?? "idle"}
+              saveError={saveErrors["ai.pricing_table"]}
+              onDraft={(v) => handleDraft("ai.pricing_table", v)}
+              onSave={() => void handleSave("ai.pricing_table")}
+              isAdmin={isAdmin}
+              t={ai}
+            />
+
+            <AiFieldRow
+              fieldKey="ai.base_url"
+              label={ai.baseUrl}
+              value={providerEntry?.base_url ?? ""}
+              source={currentSource["ai.provider"]}
+              editable={false}
+              control={
+                <span
+                  className="text-sm text-txt-muted font-mono"
+                  data-testid="settings-ai-base-url"
+                >
+                  {providerEntry?.base_url ?? "-"}
+                </span>
+              }
+              saveStatus="idle"
+              saveError={undefined}
+              onDraft={() => {}}
+              onSave={() => {}}
+              isAdmin={isAdmin}
+              t={ai}
+            />
+          </>
+        )}
+
+      {settingsRead.status === "ready" &&
+        catalogRead.status === "ready" &&
+        historyRead.status === "ready" && (
+          <AiHistory
+            entries={(historyRead.data ?? []).filter((e) =>
+              AI_FIELD_KEYS.includes(e.setting_key as AiFieldKey),
+            )}
+            t={ai}
+            status={historyRead.status}
+            errorMessage={
+              historyRead.error?.expected
+                ? ai.historyErrorExpected
+                : ai.historyError
+            }
+            onRetry={historyRead.reload}
+          />
+        )}
+    </CollapsibleSettingsSection>
   );
 }
 
@@ -362,7 +861,9 @@ function AiHistory({
                     {entry.setting_key}
                   </th>
                   <td className="py-2 pr-3 text-txt">
-                    {formatValue(entry.value, t)}
+                    {typeof entry.value === "string"
+                      ? entry.value
+                      : String(entry.value)}
                   </td>
                   <td className="py-2 pr-3 text-txt">{entry.version}</td>
                   <td className="py-2 pr-3 text-txt">
@@ -378,161 +879,5 @@ function AiHistory({
         </div>
       )}
     </div>
-  );
-}
-
-export function AiSettingsSection({ t }: { t: OperatorSettingsStrings }) {
-  const read = usePanelRead(() => fetchEffectiveSettings());
-  const history = usePanelRead(() => fetchSettingHistory());
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
-  const [saveStates, setSaveStates] = useState<Record<string, SaveStatus>>({});
-  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
-
-  const ai =
-    read.data?.filter(
-      (setting) => setting.key.startsWith("ai.") && !isSecretKey(setting.key),
-    ) ?? [];
-  const aiHistory =
-    history.data?.filter(
-      (entry) =>
-        entry.setting_key.startsWith("ai.") && !isSecretKey(entry.setting_key),
-    ) ?? [];
-
-  function handleDraft(key: string, draft: Draft) {
-    setDrafts((current) => ({ ...current, [key]: draft }));
-    setSaveStates((current) => ({ ...current, [key]: "idle" }));
-    setSaveErrors((current) => {
-      if (!(key in current)) return current;
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
-  }
-
-  async function handleSave(setting: EffectiveSetting) {
-    setSaveErrors((current) => {
-      if (!(setting.key in current)) return current;
-      const next = { ...current };
-      delete next[setting.key];
-      return next;
-    });
-
-    const built = buildWriteValue(setting, draftFor(setting, drafts), t.ai);
-    if (!built.ok) {
-      setSaveStates((current) => ({ ...current, [setting.key]: "error" }));
-      setSaveErrors((current) => ({
-        ...current,
-        [setting.key]: built.message,
-      }));
-      return;
-    }
-
-    setSaveStates((current) => ({ ...current, [setting.key]: "saving" }));
-    try {
-      await writeSetting(setting.key, built.value);
-      setSaveStates((current) => ({ ...current, [setting.key]: "saved" }));
-      setDrafts((current) => {
-        if (!(setting.key in current)) return current;
-        const next = { ...current };
-        delete next[setting.key];
-        return next;
-      });
-      read.reload();
-      history.reload();
-    } catch (error) {
-      setSaveStates((current) => ({ ...current, [setting.key]: "error" }));
-      setSaveErrors((current) => ({
-        ...current,
-        [setting.key]:
-          error instanceof ApiError
-            ? error.message || t.ai.saveErrorExpected
-            : t.ai.saveError,
-      }));
-    }
-  }
-
-  return (
-    <CollapsibleSettingsSection
-      sectionKey="ai"
-      testId="settings-ai"
-      title={t.sections.ai}
-      description={t.ai.description}
-    >
-      {read.status === "loading" && (
-        <div data-testid="settings-ai-loading">
-          <Skeleton className="h-32 w-full" />
-        </div>
-      )}
-
-      {read.status === "error" && (
-        <div
-          role="alert"
-          data-testid="settings-ai-error"
-          className="rounded-md border border-danger-border bg-danger-soft px-3 py-2"
-        >
-          <p className="text-sm text-danger">
-            {read.error?.expected ? t.ai.errorExpected : t.ai.error}
-          </p>
-          {read.errorTraceId ? (
-            <p
-              className="mt-0.5 font-mono text-xs text-txt-muted"
-              data-testid="settings-ai-error-trace-id"
-            >
-              {t.ai.traceLabel}: {read.errorTraceId}
-            </p>
-          ) : (
-            <p
-              className="mt-0.5 text-xs text-txt-muted"
-              data-testid="settings-ai-error-no-trace"
-            >
-              {t.ai.noTrace}
-            </p>
-          )}
-          <button
-            type="button"
-            onClick={read.reload}
-            data-testid="settings-ai-retry"
-            className="mt-2 inline-flex min-h-11 items-center rounded-md border border-danger-border px-3 text-xs font-medium text-danger hover:bg-danger-soft/60"
-          >
-            {t.retry}
-          </button>
-        </div>
-      )}
-
-      {read.status === "ready" && ai.length === 0 && (
-        <EmptyState title={t.ai.emptyTitle} body={t.ai.emptyBody} />
-      )}
-
-      {read.status === "ready" && ai.length > 0 && (
-        <>
-          <p
-            className="mb-2 text-xs text-txt-muted"
-            data-testid="settings-ai-takeaway"
-          >
-            {t.ai.takeaway(ai.length)}
-          </p>
-          <AiSettingsTable
-            settings={ai}
-            t={t.ai}
-            drafts={drafts}
-            saveStates={saveStates}
-            saveErrors={saveErrors}
-            onDraft={handleDraft}
-            onSave={(setting) => void handleSave(setting)}
-          />
-          <AiHistory
-            entries={aiHistory}
-            t={t.ai}
-            status={history.status}
-            errorMessage={
-              history.error?.expected
-                ? t.ai.historyErrorExpected
-                : t.ai.historyError
-            }
-            onRetry={history.reload}
-          />
-        </>
-      )}
-    </CollapsibleSettingsSection>
   );
 }

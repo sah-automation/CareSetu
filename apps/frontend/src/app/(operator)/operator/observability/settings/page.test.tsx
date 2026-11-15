@@ -17,6 +17,7 @@ import { useAuth } from "@/lib/auth/AuthContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
 import {
+  fetchAiProviderCatalog,
   fetchEffectiveSettings,
   fetchFeatureFlags,
   fetchFeatureFlagHistory,
@@ -24,6 +25,7 @@ import {
   fetchAlertDeliveries,
   writeFeatureFlag,
   writeSetting,
+  type AiProviderCatalogEntry,
   type EffectiveSetting,
   type FeatureFlag,
   type FeatureFlagHistoryEntry,
@@ -37,6 +39,7 @@ vi.mock("@/lib/operator/settings");
 
 const mockUseAuth = vi.mocked(useAuth);
 const mockFetchEffectiveSettings = vi.mocked(fetchEffectiveSettings);
+const mockFetchAiProviderCatalog = vi.mocked(fetchAiProviderCatalog);
 const mockFetchFeatureFlags = vi.mocked(fetchFeatureFlags);
 const mockFetchFeatureFlagHistory = vi.mocked(fetchFeatureFlagHistory);
 const mockFetchSettingHistory = vi.mocked(fetchSettingHistory);
@@ -66,16 +69,44 @@ function operatorAuth() {
 
 const settings: EffectiveSetting[] = [
   {
+    key: "ai.provider",
+    value: "mock",
+    source: "environment",
+    editable: false,
+    restart_required: false,
+  },
+  {
     key: "ai.model",
     value: null,
     source: "environment",
-    editable: false,
-    restart_required: true,
+    editable: true,
+    restart_required: false,
   },
   {
-    key: "ai.timeout_seconds",
-    value: 30,
-    source: "database",
+    key: "ai.asr_model",
+    value: "whisper-large-v3-turbo",
+    source: "default",
+    editable: true,
+    restart_required: false,
+  },
+  {
+    key: "ai.fallback_provider",
+    value: "mock",
+    source: "environment",
+    editable: false,
+    restart_required: false,
+  },
+  {
+    key: "ai.fallback_model",
+    value: null,
+    source: "environment",
+    editable: true,
+    restart_required: false,
+  },
+  {
+    key: "ai.pricing_table",
+    value: "mock-model:0:0",
+    source: "environment",
     editable: true,
     restart_required: false,
   },
@@ -113,40 +144,6 @@ const settings: EffectiveSetting[] = [
     source: "default",
     editable: true,
     restart_required: false,
-  },
-];
-
-const editableSettings: EffectiveSetting[] = [
-  {
-    key: "ai.timeout_seconds",
-    value: 30,
-    source: "database",
-    editable: true,
-    restart_required: false,
-  },
-  {
-    key: "ai.fallback_enabled",
-    value: false,
-    source: "default",
-    editable: true,
-    restart_required: false,
-  },
-];
-
-const historyEntries: SettingHistoryEntry[] = [
-  {
-    setting_key: "ai.timeout_seconds",
-    value: 20,
-    version: 2,
-    changed_by: 7,
-    changed_at: "2026-03-04T10:00:00Z",
-  },
-  {
-    setting_key: "notification.channels.email.enabled",
-    value: true,
-    version: 1,
-    changed_by: null,
-    changed_at: "2026-03-03T09:00:00Z",
   },
 ];
 
@@ -192,7 +189,7 @@ async function renderReady() {
   render(<ObservabilitySettingsPage />);
   await waitFor(() => {
     expect(
-      screen.getByTestId("settings-ai-row-ai.timeout_seconds"),
+      screen.getByTestId("settings-ai-row-ai.provider"),
     ).toBeInTheDocument();
   });
 }
@@ -223,6 +220,28 @@ describe("ObservabilitySettingsPage (#797)", () => {
       page: 1,
       page_size: 25,
     });
+    mockFetchAiProviderCatalog.mockResolvedValue([
+      {
+        id: "mock",
+        provider: "mock",
+        provider_id: "mock",
+        display_name: "Mock (offline)",
+        base_url: "",
+        chat_models: ["mock-model"],
+        asr_models: [],
+        api_key_env: "",
+      },
+      {
+        id: "openai_compatible",
+        provider: "openai_compatible",
+        provider_id: "openai_compatible",
+        display_name: "OpenAI-compatible",
+        base_url: "https://api.openai.com/v1",
+        chat_models: ["gpt-oss-120b", "gemini-3.6-flash", "mock-model"],
+        asr_models: ["whisper-large-v3-turbo", "whisper-large-v3"],
+        api_key_env: "AI_API_KEY",
+      },
+    ]);
   });
 
   it("renders the four-section shell", async () => {
@@ -250,36 +269,49 @@ describe("ObservabilitySettingsPage (#797)", () => {
     }
   });
 
-  it("shows effective AI values with source and restart-required badges", async () => {
+  it("shows effective AI values from the catalog with source badges", async () => {
     mockFetchEffectiveSettings.mockResolvedValue(settings);
+    mockFetchAiProviderCatalog.mockResolvedValue([
+      {
+        id: "mock",
+        provider: "mock",
+        provider_id: "mock",
+        display_name: "Mock (offline)",
+        base_url: "",
+        chat_models: ["mock-model"],
+        asr_models: [],
+        api_key_env: "",
+      },
+      {
+        id: "openai_compatible",
+        provider: "openai_compatible",
+        provider_id: "openai_compatible",
+        display_name: "OpenAI-compatible",
+        base_url: "https://api.openai.com/v1",
+        chat_models: ["gpt-oss-120b", "gemini-3.6-flash", "mock-model"],
+        asr_models: ["whisper-large-v3-turbo", "whisper-large-v3"],
+        api_key_env: "AI_API_KEY",
+      },
+    ]);
 
     render(<ObservabilitySettingsPage />);
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-row-ai.model"),
+        screen.getByTestId("settings-ai-row-ai.provider"),
       ).toBeInTheDocument();
     });
 
-    expect(
-      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
-    ).toHaveValue(30);
-    expect(
-      screen.getByTestId("settings-ai-source-ai.timeout_seconds"),
-    ).toHaveTextContent(en.ai.sources.database);
-    expect(
-      screen.getByTestId("settings-ai-restart-ai.model"),
-    ).toHaveTextContent(en.ai.restartRequired);
-    expect(
-      screen.getByTestId("settings-ai-no-restart-ai.timeout_seconds"),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("settings-ai-value-ai.model")).toHaveTextContent(
-      en.ai.notReturned,
+    expect(screen.getByTestId("settings-ai-model-select")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-ai-asr-select")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-ai-pricing-table")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-ai-base-url")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-ai-source-ai.model")).toHaveTextContent(
+      en.ai.sources.environment,
     );
     expect(screen.getByTestId("settings-ai-takeaway")).toHaveTextContent(
-      en.ai.takeaway(2),
+      en.ai.takeaway(6),
     );
-    // Only the AI section reads this endpoint in #797.
     expect(
       screen.queryByTestId(
         "settings-ai-row-notification.channels.email.enabled",
@@ -394,12 +426,12 @@ describe("ObservabilitySettingsPage (#797)", () => {
     expect(
       screen.getByTestId("settings-notifications-title"),
     ).toHaveTextContent(hi.sections.notifications);
-    expect(
-      screen.getByTestId("settings-ai-source-ai.timeout_seconds"),
-    ).toHaveTextContent(hi.ai.sources.database);
-    expect(
-      screen.getByTestId("settings-ai-save-ai.timeout_seconds"),
-    ).toHaveTextContent(hi.ai.save);
+    expect(screen.getByTestId("settings-ai-source-ai.model")).toHaveTextContent(
+      hi.ai.sources.environment,
+    );
+    expect(screen.getByTestId("settings-ai-save-ai.model")).toHaveTextContent(
+      hi.ai.save,
+    );
     expect(screen.getByTestId("settings-ai-history-title")).toHaveTextContent(
       hi.ai.historyTitle,
     );
@@ -415,100 +447,114 @@ describe("AiSettingsSection writes and history (#798)", () => {
     vi.clearAllMocks();
     __resetLangForTests();
     mockUseAuth.mockReturnValue(adminAuth());
-    mockFetchEffectiveSettings.mockResolvedValue(editableSettings);
+    mockFetchEffectiveSettings.mockResolvedValue(settings);
     mockFetchSettingHistory.mockResolvedValue([]);
+    mockFetchAiProviderCatalog.mockResolvedValue([
+      {
+        id: "mock",
+        provider: "mock",
+        provider_id: "mock",
+        display_name: "Mock (offline)",
+        base_url: "",
+        chat_models: ["mock-model"],
+        asr_models: [],
+        api_key_env: "",
+      },
+      {
+        id: "openai_compatible",
+        provider: "openai_compatible",
+        provider_id: "openai_compatible",
+        display_name: "OpenAI-compatible",
+        base_url: "https://api.openai.com/v1",
+        chat_models: ["gpt-oss-120b", "gemini-3.6-flash", "mock-model"],
+        asr_models: ["whisper-large-v3-turbo", "whisper-large-v3"],
+        api_key_env: "AI_API_KEY",
+      },
+    ]);
   });
 
   it("only gives editable rows a control", async () => {
-    mockFetchEffectiveSettings.mockResolvedValue(settings);
-
     await renderReady();
 
+    expect(screen.getByTestId("settings-ai-model-select")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-ai-asr-select")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-ai-pricing-table")).toBeInTheDocument();
+    // ai.provider is not editable in the fixture
     expect(
-      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
-    ).toBeInTheDocument();
-    expect(screen.queryByTestId("settings-ai-input-ai.model")).toBeNull();
-    expect(
-      screen.getByTestId("settings-ai-readonly-ai.model"),
+      screen.getByTestId("settings-ai-readonly-ai.provider"),
     ).toHaveTextContent(en.ai.readOnly);
+    // ai.pricing_table is editable, so it has a save button
+    expect(
+      screen.getByTestId("settings-ai-save-ai.pricing_table"),
+    ).toBeInTheDocument();
   });
 
   it("saves an edited value and refreshes effective values and history", async () => {
     mockWriteSetting.mockResolvedValue({
-      setting_key: "ai.timeout_seconds",
-      value: 20,
+      setting_key: "ai.model",
+      value: "gpt-oss-120b",
       version: 2,
     });
 
     await renderReady();
 
-    fireEvent.change(
-      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
-      {
-        target: { value: "20" },
-      },
-    );
-    screen.getByTestId("settings-ai-save-ai.timeout_seconds").click();
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-model-select"),
+      ).toBeInTheDocument();
+    });
+
+    // Switch to a provider that offers gpt-oss-120b, then select it
+    const providerSelect = screen.getByTestId(
+      "settings-ai-provider-select",
+    ) as HTMLSelectElement;
+    fireEvent.change(providerSelect, {
+      target: { value: "openai_compatible" },
+    });
 
     await waitFor(() => {
-      expect(mockWriteSetting).toHaveBeenCalledWith("ai.timeout_seconds", 20);
+      const modelSelect = screen.getByTestId(
+        "settings-ai-model-select",
+      ) as HTMLSelectElement;
+      expect(modelSelect).toHaveValue("gpt-oss-120b");
+    });
+
+    screen.getByTestId("settings-ai-save-ai.model").click();
+
+    await waitFor(() => {
+      expect(mockWriteSetting).toHaveBeenCalledWith("ai.model", "gpt-oss-120b");
     });
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-status-ai.timeout_seconds"),
+        screen.getByTestId("settings-ai-save-status-ai.model"),
       ).toHaveTextContent(en.ai.saved);
     });
-    // Called 3 times: initial AI + Notifications, then after save for AI + Notifications
     expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(3);
     expect(mockFetchSettingHistory).toHaveBeenCalledTimes(3);
-  });
-
-  it("saves a boolean with the checkbox value", async () => {
-    mockWriteSetting.mockResolvedValue({
-      setting_key: "ai.fallback_enabled",
-      value: true,
-      version: 1,
-    });
-
-    await renderReady();
-
-    fireEvent.click(
-      screen.getByTestId("settings-ai-input-ai.fallback_enabled"),
-    );
-    screen.getByTestId("settings-ai-save-ai.fallback_enabled").click();
-
-    await waitFor(() => {
-      expect(mockWriteSetting).toHaveBeenCalledWith(
-        "ai.fallback_enabled",
-        true,
-      );
-    });
   });
 
   it("refuses an empty value before calling the API", async () => {
     await renderReady();
 
-    fireEvent.change(
-      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
-      {
-        target: { value: "" },
-      },
-    );
-    screen.getByTestId("settings-ai-save-ai.timeout_seconds").click();
+    const modelSelect = screen.getByTestId(
+      "settings-ai-model-select",
+    ) as HTMLSelectElement;
+    fireEvent.change(modelSelect, { target: { value: "" } });
+    screen.getByTestId("settings-ai-save-ai.model").click();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.timeout_seconds"),
+        screen.getByTestId("settings-ai-save-error-ai.model"),
       ).toHaveTextContent(en.ai.validationRequired);
     });
     expect(mockWriteSetting).not.toHaveBeenCalled();
   });
 
-  it("shows the API's refusal message and keeps the row editable", async () => {
+  it("shows the API's refusal message for a failed write", async () => {
     mockWriteSetting.mockRejectedValue(
       new ApiError({
         code: "INVALID_SETTING_WRITE",
-        message: "AI timeout must be a number of seconds in (0, 30]",
+        message: "custom model needs a pricing entry",
         trace_id: "trace-798",
         details: {},
       }),
@@ -516,25 +562,35 @@ describe("AiSettingsSection writes and history (#798)", () => {
 
     await renderReady();
 
-    fireEvent.change(
-      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
-      {
-        target: { value: "45" },
-      },
-    );
-    screen.getByTestId("settings-ai-save-ai.timeout_seconds").click();
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-model-select"),
+      ).toBeInTheDocument();
+    });
+
+    // Switch to openai_compatible so gpt-oss-120b passes the custom-model guard
+    const providerSelect = screen.getByTestId(
+      "settings-ai-provider-select",
+    ) as HTMLSelectElement;
+    fireEvent.change(providerSelect, {
+      target: { value: "openai_compatible" },
+    });
+
+    await waitFor(() => {
+      const modelSelect = screen.getByTestId(
+        "settings-ai-model-select",
+      ) as HTMLSelectElement;
+      expect(modelSelect).toHaveValue("gpt-oss-120b");
+    });
+
+    screen.getByTestId("settings-ai-save-ai.model").click();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.timeout_seconds"),
-      ).toHaveTextContent("AI timeout must be a number of seconds in (0, 30]");
+        screen.getByTestId("settings-ai-save-error-ai.model"),
+      ).toHaveTextContent("custom model needs a pricing entry");
     });
-    expect(
-      screen.getByTestId("settings-ai-save-ai.timeout_seconds"),
-    ).toBeEnabled();
-    expect(
-      screen.getByTestId("settings-ai-input-ai.timeout_seconds"),
-    ).toHaveValue(45);
+    expect(screen.getByTestId("settings-ai-save-ai.model")).toBeEnabled();
   });
 
   it("shows the fallback copy for an unexpected write failure", async () => {
@@ -542,23 +598,53 @@ describe("AiSettingsSection writes and history (#798)", () => {
 
     await renderReady();
 
-    screen.getByTestId("settings-ai-save-ai.timeout_seconds").click();
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-model-select"),
+      ).toBeInTheDocument();
+    });
+
+    // Switch to openai_compatible so gpt-oss-120b passes the custom-model guard
+    const providerSelect = screen.getByTestId(
+      "settings-ai-provider-select",
+    ) as HTMLSelectElement;
+    fireEvent.change(providerSelect, {
+      target: { value: "openai_compatible" },
+    });
+
+    await waitFor(() => {
+      const modelSelect = screen.getByTestId(
+        "settings-ai-model-select",
+      ) as HTMLSelectElement;
+      expect(modelSelect).toHaveValue("gpt-oss-120b");
+    });
+
+    screen.getByTestId("settings-ai-save-ai.model").click();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.timeout_seconds"),
+        screen.getByTestId("settings-ai-save-error-ai.model"),
       ).toHaveTextContent(en.ai.saveError);
     });
   });
 
   it("lists AI history newest first and hides non-AI rows", async () => {
-    mockFetchSettingHistory.mockResolvedValue(historyEntries);
+    const history: SettingHistoryEntry[] = [
+      {
+        setting_key: "ai.model",
+        value: "gpt-oss-120b",
+        version: 2,
+        changed_by: 7,
+        changed_at: "2026-03-04T10:00:00Z",
+      },
+    ];
+    mockFetchSettingHistory.mockResolvedValue(history);
 
     await renderReady();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-history-row-ai.timeout_seconds-2"),
+        screen.getByTestId("settings-ai-history-row-ai.model-2"),
       ).toBeInTheDocument();
     });
     expect(
@@ -567,8 +653,8 @@ describe("AiSettingsSection writes and history (#798)", () => {
       ),
     ).toBeNull();
     expect(
-      screen.getByTestId("settings-ai-history-row-ai.timeout_seconds-2"),
-    ).toHaveTextContent("20");
+      screen.getByTestId("settings-ai-history-row-ai.model-2"),
+    ).toHaveTextContent("gpt-oss-120b");
   });
 
   it("says so when there is no history", async () => {

@@ -75,6 +75,52 @@ export interface FeatureFlagHistoryResponse {
   history: FeatureFlagHistoryEntry[];
 }
 
+export interface AiProviderCatalogEntry {
+  id: string;
+  provider: string;
+  provider_id: string;
+  display_name: string;
+  base_url: string;
+  chat_models: string[];
+  asr_models: string[];
+  api_key_env: string;
+}
+
+export interface AiProviderCatalogResponse {
+  providers: AiProviderCatalogEntry[];
+  catalog: AiProviderCatalogEntry[];
+}
+
+function isAiProviderCatalogEntry(
+  value: unknown,
+): value is AiProviderCatalogEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.id === "string" &&
+    typeof row.display_name === "string" &&
+    typeof row.base_url === "string" &&
+    Array.isArray(row.chat_models) &&
+    row.chat_models.every((m) => typeof m === "string") &&
+    Array.isArray(row.asr_models) &&
+    row.asr_models.every((m) => typeof m === "string") &&
+    typeof row.api_key_env === "string"
+  );
+}
+
+function isAiProviderCatalogResponse(
+  value: unknown,
+): value is AiProviderCatalogResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    Array.isArray(row.providers) &&
+    row.providers.every((p) => isAiProviderCatalogEntry(p)) &&
+    Array.isArray(row.catalog) &&
+    row.catalog.every((p) => isAiProviderCatalogEntry(p))
+  );
+}
+
 export interface AlertDeliveryRow {
   id: number;
   alert_id: string;
@@ -424,6 +470,23 @@ export async function writeSetting(
     isSettingWriteResult,
     "The API returned an unexpected setting write shape",
   );
+}
+
+/**
+ * Read the AI provider/model catalog. Each entry carries its display name,
+ * auto-derived base URL, chat and ASR model lists, and the provider's env
+ * API-key name. Admin-only; a non-admin session receives the API's own 403.
+ */
+export async function fetchAiProviderCatalog(): Promise<
+  AiProviderCatalogEntry[]
+> {
+  const data = await request<unknown>("/v1/operator/ai/catalog");
+  const read = guardShape(
+    data,
+    isAiProviderCatalogResponse,
+    "The API returned an unexpected AI catalog shape",
+  );
+  return read.providers;
 }
 
 /**

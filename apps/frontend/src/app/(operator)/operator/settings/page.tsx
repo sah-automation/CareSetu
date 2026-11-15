@@ -37,7 +37,7 @@ export default function SettingsPage() {
     <>
       <PageHeader title={t.title} description={t.description} />
       <div className="flex flex-col gap-4" data-testid="settings-shell">
-        <AiSettingsSection t={t} />
+        <AiSettingsSection t={t} isAdmin={isAdmin} />
 
         <FeatureFlagsSettingsSection t={t} />
 
