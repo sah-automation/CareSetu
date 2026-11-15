@@ -13,6 +13,7 @@ from app.db import AsyncEngineLike
 from bus.events import EVENT_AUDIT_EVENT, EVENT_OPS_RUNTIME_SETTING_CHANGED
 from modules.ops.domain.events import OpsRuntimeSettingChangedPayload
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
+from modules.ops.domain.setting_encryption_service import SettingEncryptionService
 from modules.ops.domain.settings import (
     ALL_EDITABLE_KEYS,
     EDITABLE_AI_KEYS,
@@ -59,6 +60,10 @@ class OpsFacade:
         )
         self._cache = OpsSettingsCache(ttl_seconds=ttl)
         self._resolver = EffectiveSettingsResolver(settings)
+        # Encryption service for dashboard-entered secrets (issue #921)
+        self._encryption_service = SettingEncryptionService(
+            getattr(settings, "ops_settings_encryption_key", "")
+        )
 
     async def get_effective_settings(self) -> list[EffectiveSetting]:
         cached = self._cache.get()
@@ -66,6 +71,7 @@ class OpsFacade:
             return cached
 
         db_overrides: dict[str, Any] = {}
+        history_timestamps: dict[str, str] = {}
         async with self._engine.begin() as connection:
             result = await connection.execute(select(ops_settings))
             for row in result.mappings():
@@ -75,9 +81,54 @@ class OpsFacade:
                     # value is JSONB; store raw for resolution logic
                     db_overrides[key] = value
 
+            # Query latest history timestamps for encrypted keys
+            for key in db_overrides:
+                if self._encryption_service.is_encrypted_key(key):
+                    ts_result = await connection.execute(
+                        select(ops_setting_history.c.changed_at)
+                        .where(ops_setting_history.c.setting_key == key)
+                        .order_by(
+                            ops_setting_history.c.changed_at.desc(),
+                            ops_setting_history.c.id.desc(),
+                        )
+                        .limit(1)
+                    )
+                    ts_row = ts_result.mappings().first()
+                    if ts_row is not None:
+                        history_timestamps[key] = ts_row["changed_at"].isoformat()
+
         resolved = self._resolver.resolve_all(db_overrides)
-        self._cache.set(resolved)
-        return resolved
+
+        def _history_reader(setting_key: str) -> str | None:
+            return history_timestamps.get(setting_key)
+
+        # Replace encrypted key values with masked status
+        masked_resolved = []
+        for item in resolved:
+            if self._encryption_service.is_encrypted_key(item.key):
+                # Get the DB value for this key to determine masked status
+                db_value = db_overrides.get(item.key)
+                masked_status = self._encryption_service.get_masked_status_with_resolver(
+                    item.key,
+                    item.source,
+                    self._resolver,
+                    db_value,
+                    _history_reader,
+                )
+                masked_resolved.append(
+                    EffectiveSetting(
+                        key=item.key,
+                        value=masked_status,
+                        source=item.source,
+                        editable=item.editable,
+                        restart_required=item.restart_required,
+                    )
+                )
+            else:
+                masked_resolved.append(item)
+
+        self._cache.set(masked_resolved)
+        return masked_resolved
 
     def get_ai_provider_catalog(self) -> list[Any]:
         from app.ai_provider_catalog import get_ai_provider_catalog
@@ -93,6 +144,8 @@ class OpsFacade:
 
         ``setting_key`` narrows the read to one key; the Settings AI section asks
         for the whole list once and filters the AI keys itself.
+
+        For encrypted setting keys, values are redacted.
         """
         statement = (
             select(ops_setting_history)
@@ -110,7 +163,7 @@ class OpsFacade:
             return [
                 SettingHistoryEntry(
                     setting_key=row["setting_key"],
-                    value=row["value"],
+                    value=self._encryption_service.redact_value(row["setting_key"], row["value"]),
                     version=row["version"],
                     changed_by=row["changed_by"],
                     changed_at=row["changed_at"].isoformat(),
@@ -341,6 +394,9 @@ class OpsFacade:
         except ValueError as exc:
             raise InvalidSettingWriteError(setting_key, str(exc)) from exc
 
+        # Encrypt value if this is an encrypted setting key
+        stored_value = self._encryption_service.encrypt_if_needed(setting_key, value)
+
         async with self._engine.begin() as connection:
             # Read existing setting for update (lock row)
             result = await connection.execute(
@@ -356,12 +412,12 @@ class OpsFacade:
 
             new_version = old_version + 1
 
-            # Upsert the setting
+            # Upsert the setting with encrypted value
             if row is None:
                 await connection.execute(
                     ops_settings.insert().values(
                         setting_key=setting_key,
-                        value=value,
+                        value=stored_value,
                         version=new_version,
                         updated_by=updated_by,
                     )
@@ -371,29 +427,30 @@ class OpsFacade:
                     ops_settings.update()
                     .where(ops_settings.c.setting_key == setting_key)
                     .values(
-                        value=value,
+                        value=stored_value,
                         updated_by=updated_by,
                         updated_at=datetime.now(UTC),
                         version=new_version,
                     )
                 )
 
-            # Record history
+            # Record history with redacted value
+            redacted_value = self._encryption_service.redact_value(setting_key, stored_value)
             await connection.execute(
                 ops_setting_history.insert().values(
                     setting_key=setting_key,
-                    value=value,
+                    value=redacted_value,
                     version=new_version,
                     changed_by=updated_by,
                 )
             )
 
-            # Emit audit event
+            # Emit audit event with redacted values
             audit_payload = {
                 "action": "setting.write",
                 "setting_key": setting_key,
-                "old_value": old_value,
-                "new_value": value,
+                "old_value": self._encryption_service.redact_value(setting_key, old_value),
+                "new_value": redacted_value,
                 "version": new_version,
                 "updated_by": updated_by,
             }

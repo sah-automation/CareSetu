@@ -211,6 +211,22 @@ READ_ONLY_SENSITIVE_KEYS: frozenset[str] = frozenset(
 )
 
 
+# Keys that are encrypted at rest when written via dashboard (issue #921).
+# These are dashboard-entered provider API keys and secrets. The encryption
+# key comes from OPS_SETTINGS_ENCRYPTION_KEY env var (dedicated, not shared
+# with IAM/Media keys). Reads return masked status only; history/audit redact.
+ENCRYPTED_SETTING_KEYS: frozenset[str] = frozenset(
+    {
+        "ai.api_key",
+        "ai.fallback_api_key",
+        "gateway.jwt_signing_key",
+        "langfuse.secret_key",
+        "smtp.credentials",
+        "slack.webhook_url",
+    }
+)
+
+
 # Composition-root gates / boot-time values are read-only
 COMPOSITION_ROOT_READ_ONLY_KEYS: frozenset[str] = frozenset(
     {

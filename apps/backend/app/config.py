@@ -348,6 +348,10 @@ DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED = False
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
 # Fail-closed: ``issue_operator_session`` refuses to verify without it.
+# Ops settings encryption (issue #921): the AES-256-GCM key for encrypting/decrypting
+# dashboard-entered provider API keys stored in ``ops.ops_settings``. Comes from the
+# ``OPS_SETTINGS_ENCRYPTION_KEY`` environment variable (never committed). A dedicated
+# key separate from IAM/Media keys per security-phii-standards §4.
 
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -603,6 +607,10 @@ class Settings:
     # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
     # refuses to verify without it.
     iam_mfa_secret_key: str = ""
+    # Ops settings encryption (issue #921): AES-256-GCM key for encrypting
+    # dashboard-entered provider API keys in ops settings. From
+    # ``OPS_SETTINGS_ENCRYPTION_KEY`` environment variable.
+    ops_settings_encryption_key: str = ""
     # Consecutive wrong operator TOTP codes before login locks, and how long
     # the lock lasts (PHASE-14B T17, #778). The defaults live in
     # ``modules.iam.domain.mfa_lockout`` so the policy and the environment share
@@ -1215,6 +1223,22 @@ class Settings:
                 "profile_media_jitter_fraction must be finite and between "
                 "0 inclusive and 1 exclusive"
             )
+        # Ops settings encryption key validation (issue #921): if provided,
+        # must be a valid base64-encoded 32-byte AES-256 key.
+        if self.ops_settings_encryption_key.strip():
+            try:
+                import base64
+
+                key_bytes = base64.b64decode(self.ops_settings_encryption_key.strip())
+                if len(key_bytes) != 32:
+                    raise ValueError(
+                        "OPS_SETTINGS_ENCRYPTION_KEY must be a base64-encoded 32-byte "
+                        f"(256-bit) key; got {len(key_bytes)} bytes"
+                    )
+            except Exception as exc:
+                raise ValueError(
+                    f"OPS_SETTINGS_ENCRYPTION_KEY must be valid base64; {exc}"
+                ) from exc
         if self.profile_media_circuit_breaker_threshold <= 0:
             raise ValueError("profile_media_circuit_breaker_threshold must be positive")
         if (
@@ -1716,6 +1740,7 @@ def get_settings() -> Settings:
             "PARTNER_CREDENTIAL_SWEEP_CRON", DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON
         ),
         iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
+        ops_settings_encryption_key=os.environ.get("OPS_SETTINGS_ENCRYPTION_KEY", ""),
         iam_operator_mfa_lockout_threshold=_env_int(
             "IAM_OPERATOR_MFA_LOCKOUT_THRESHOLD", DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD
         ),
