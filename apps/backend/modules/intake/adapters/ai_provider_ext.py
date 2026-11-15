@@ -181,9 +181,9 @@ class CircuitBreakerAiGateway:
 
 
 def build_ai_gateway(
-    settings: Settings | None = None,
-    *,
+    settings: Any = None,
     override_source: Any = None,
+    *,
     resolver: Any = None,
     ai_config: Any = None,
     overrides: Any = None,
@@ -209,6 +209,9 @@ def build_ai_gateway(
     """
     from modules.intake.ai_config import AiConfigResolver
 
+    if settings is not None and not isinstance(settings, Settings) and override_source is None:
+        override_source = settings
+        settings = None
     if settings is None:
         settings = get_settings()
     if ai_config is None:

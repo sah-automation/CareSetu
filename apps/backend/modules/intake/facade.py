@@ -1724,7 +1724,15 @@ class IntakeFacade:
             from modules.intake.ai_config import AiConfigResolver
 
             settings = get_settings()
-            ai_config = AiConfigResolver(settings).resolve()
+            resolver = self._ai_config_resolver
+            if resolver is None and self._ai_config_override_source is not None:
+                resolver = AiConfigResolver(
+                    settings, override_source=self._ai_config_override_source
+                )
+            if resolver is not None and hasattr(resolver, "resolve"):
+                ai_config = resolver.resolve()
+            else:
+                ai_config = AiConfigResolver(settings).resolve()
             configured_provider, configured_model = configured_plan(ai_config=ai_config)
 
         draft_failure: Ext002CallError | ValidationError

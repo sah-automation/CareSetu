@@ -44,9 +44,9 @@ from observability.logging import get_trace_id
 
 
 def configured_plan(
-    *,
     settings: Any = None,
     override_source: Any = None,
+    *,
     resolver: Any = None,
     ai_config: Any = None,
     **kwargs: Any,
@@ -58,7 +58,12 @@ def configured_plan(
     normalised to lower case; the model falls back to the mock's own identity when
     the deployment names none, so the booking column is never empty.
     """
+    from app.config import Settings
     from modules.intake.ai_config import AiConfigResolver
+
+    if settings is not None and not isinstance(settings, Settings) and override_source is None:
+        override_source = settings
+        settings = None
 
     if ai_config is None:
         if resolver is not None and hasattr(resolver, "resolve"):

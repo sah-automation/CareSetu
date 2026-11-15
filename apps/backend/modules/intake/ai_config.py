@@ -18,8 +18,8 @@ class AiConfig:
     asr_model: str = ""
     base_url: str = ""
     fallback_base_url: str = ""
-    api_key: str = ""
-    fallback_api_key: str = ""
+    api_key: str = field(default="", repr=False)
+    fallback_api_key: str = field(default="", repr=False)
     pricing_table_raw: str = ""
     pricing_table: Mapping[str, Any] = field(default_factory=dict)
     monthly_budget_paise: int = 200000
@@ -175,20 +175,20 @@ def _extract_overrides(source: Any) -> MutableMapping[str, Any]:
         if hasattr(source, meth) and callable(getattr(source, meth)):
             try:
                 result = getattr(source, meth)()
-            except Exception:
+            except (TypeError, AttributeError, RuntimeError):
                 result = None
             if isinstance(result, Mapping):
                 return dict(result)
     if callable(source) and not hasattr(source, "resolve"):
         try:
             result = source()
-        except Exception:
+        except (TypeError, RuntimeError):
             result = None
         if isinstance(result, Mapping):
             return dict(result)
     try:
         return dict(source)
-    except Exception:
+    except (TypeError, ValueError):
         return {}
 
 
@@ -231,10 +231,7 @@ def _pricing_table_from_raw(raw: str) -> Mapping[str, Any]:
     from app.config import parse_ai_pricing_table
     from modules.intake.pricing import PRICING_TABLE, ModelPrice
 
-    try:
-        parsed = parse_ai_pricing_table(raw) if raw.strip() else {}
-    except Exception:
-        parsed = {}
+    parsed = parse_ai_pricing_table(raw) if raw.strip() else {}
     table: dict[str, Any] = {}
     for model, (price_in, price_out) in parsed.items():
         table[model] = ModelPrice(price_in_paise=price_in, price_out_paise=price_out)
@@ -272,6 +269,8 @@ def _settings_value(settings: Settings, field: str) -> Any:
 
 
 class AiConfigResolver:
+    """Resolve effective AI config with precedence: override -> env -> default."""
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -451,7 +450,7 @@ class AiConfigResolver:
                 if inspect.iscoroutinefunction(fn):
                     try:
                         result = await fn()
-                    except Exception:
+                    except (RuntimeError, TypeError, ValueError, OSError):
                         result = None
                     if isinstance(result, Mapping):
                         overrides.update(_normalize_overrides(result))
@@ -464,7 +463,7 @@ class AiConfigResolver:
             if inspect.iscoroutinefunction(fn):
                 try:
                     effective = await fn()
-                except Exception:
+                except (RuntimeError, TypeError, ValueError, OSError):
                     effective = None
                 if isinstance(effective, (list, tuple)):
                     mapped: dict[str, Any] = {}
@@ -488,32 +487,30 @@ class AiConfigResolver:
 
 
 def resolve_ai_config(*args: Any, **kwargs: Any) -> AiConfig:
-    settings = None
-    if args:
+    kwargs = dict(kwargs)
+    settings = kwargs.pop("settings", None)
+    if settings is None and args:
         first = args[0]
         if isinstance(first, Settings):
             settings = first
             if len(args) > 1:
-                kwargs = dict(kwargs)
                 kwargs.setdefault("override_source", args[1])
         else:
-            kwargs = dict(kwargs)
             kwargs.setdefault("override_source", first)
     resolver = AiConfigResolver(settings, **kwargs)
     return resolver.resolve()
 
 
 async def aresolve_ai_config(*args: Any, **kwargs: Any) -> AiConfig:
-    settings = None
-    if args:
+    kwargs = dict(kwargs)
+    settings = kwargs.pop("settings", None)
+    if settings is None and args:
         first = args[0]
         if isinstance(first, Settings):
             settings = first
             if len(args) > 1:
-                kwargs = dict(kwargs)
                 kwargs.setdefault("override_source", args[1])
         else:
-            kwargs = dict(kwargs)
             kwargs.setdefault("override_source", first)
     resolver = AiConfigResolver(settings, **kwargs)
     return await resolver.aresolve()

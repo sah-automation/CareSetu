@@ -73,9 +73,9 @@ PRICING_TABLE: Mapping[str, ModelPrice] = _to_pricing_table(
 
 
 def resolve_pricing_table(
-    *,
     settings: Any = None,
     override_source: Any = None,
+    *,
     resolver: Any = None,
     ai_config: Any = None,
     overrides: Any = None,
@@ -90,7 +90,12 @@ def resolve_pricing_table(
     takes precedence over the environment. An empty configured table falls back
     to the code-side ``PRICING_TABLE`` so the free mock stays known-free.
     """
+    from app.config import Settings
     from modules.intake.ai_config import AiConfigResolver
+
+    if settings is not None and not isinstance(settings, Settings) and override_source is None:
+        override_source = settings
+        settings = None
 
     if ai_config is None:
         if resolver is not None and hasattr(resolver, "resolve"):
@@ -98,11 +103,9 @@ def resolve_pricing_table(
         else:
             if settings is None:
                 settings = get_settings()
-            resolver = AiConfigResolver(
-                settings,
-                override_source=override_source
-                if override_source is not None
-                else (
+            src = override_source
+            if src is None:
+                src = (
                     overrides
                     if overrides is not None
                     else (
@@ -110,9 +113,8 @@ def resolve_pricing_table(
                         if override is not None
                         else (source if source is not None else db_overrides)
                     )
-                ),
-                **kwargs,
-            )
+                )
+            resolver = AiConfigResolver(settings, override_source=src, **kwargs)
             ai_config = resolver.resolve()
     raw = getattr(ai_config, "pricing_table_raw", None)
     if raw is None:
