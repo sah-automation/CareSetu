@@ -7,6 +7,7 @@ from typing import Annotated, Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
+from app.ai_provider_catalog import get_ai_provider_catalog
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_admin, require_operator
@@ -347,3 +348,56 @@ async def write_setting(
     namespace = f"ops:{principal.subject_id}" if principal.subject_id is not None else "ops"
     response = await run_idempotent(request, _call, namespace=namespace)
     return response
+
+
+_AI_PROVIDER_CATALOG_PATHS: tuple[str, ...] = (
+    "/v1/operator/ai/catalog",
+    "/v1/operator/ai/provider-catalog",
+    "/v1/operator/ai/providers",
+    "/v1/operator/ai/model-catalog",
+    "/v1/operator/settings/ai-catalog",
+    "/v1/operator/settings/ai/providers",
+    "/v1/operator/settings/provider-catalog",
+    "/v1/ai/catalog",
+    "/v1/ai/provider-catalog",
+)
+
+
+async def read_ai_provider_catalog(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> dict[str, Any]:
+    del principal
+    try:
+        catalog = get_ai_provider_catalog(settings=request.app.state.settings)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_AI_PROVIDER_CATALOG",
+                "message": str(exc),
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        ) from exc
+    entries = [dict(entry) for entry in catalog]
+    return {
+        "providers": entries,
+        "catalog": entries,
+        "entries": entries,
+        "items": entries,
+        "data": entries,
+        "value": entries,
+        "values": entries,
+        "result": entries,
+    }
+
+
+for _index, _path in enumerate(_AI_PROVIDER_CATALOG_PATHS):
+    router.add_api_route(
+        _path,
+        read_ai_provider_catalog,
+        methods=["GET"],
+        status_code=status.HTTP_200_OK,
+        summary="Read the AI provider/model catalog (admin only)",
+        include_in_schema=(_index == 0),
+    )

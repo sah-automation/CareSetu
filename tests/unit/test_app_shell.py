@@ -267,6 +267,7 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         "/v1/operator/observability/alerts/{alert_id}/acknowledge",
         # MOD-014 ops (#771/#773): effective-settings read, settings write,
         # feature-flag list/read and the runtime flag write.
+        "/v1/operator/ai/catalog",
         "/v1/operator/settings",
         "/v1/operator/settings/effective",
         # #798: the append-only setting history the Settings AI section reads
