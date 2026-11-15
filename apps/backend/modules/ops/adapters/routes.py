@@ -7,7 +7,6 @@ from typing import Annotated, Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
-from app.ai_provider_catalog import get_ai_provider_catalog
 from app.gateway.idempotency import run_idempotent
 from app.gateway.principal import Principal
 from app.gateway.rbac import require_admin, require_operator
@@ -363,13 +362,34 @@ _AI_PROVIDER_CATALOG_PATHS: tuple[str, ...] = (
 )
 
 
+class AiProviderCatalogEntryResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    provider: str = ""
+    provider_id: str = ""
+    display_name: str = ""
+    base_url: str = ""
+    chat_models: list[str] = []
+    asr_models: list[str] = []
+    api_key_env: str = ""
+
+
+class AiProviderCatalogResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    providers: list[AiProviderCatalogEntryResponse]
+    catalog: list[AiProviderCatalogEntryResponse] = []
+
+
 async def read_ai_provider_catalog(
     request: Request,
     principal: Annotated[Principal, Depends(require_admin)],
-) -> dict[str, Any]:
+) -> AiProviderCatalogResponse:
     del principal
+    facade = _facade(request)
     try:
-        catalog = get_ai_provider_catalog(settings=request.app.state.settings)
+        catalog = facade.get_ai_provider_catalog()
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -379,17 +399,8 @@ async def read_ai_provider_catalog(
                 "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
             },
         ) from exc
-    entries = [dict(entry) for entry in catalog]
-    return {
-        "providers": entries,
-        "catalog": entries,
-        "entries": entries,
-        "items": entries,
-        "data": entries,
-        "value": entries,
-        "values": entries,
-        "result": entries,
-    }
+    entries = [AiProviderCatalogEntryResponse(**dict(entry)) for entry in catalog]
+    return AiProviderCatalogResponse(providers=entries, catalog=entries)
 
 
 for _index, _path in enumerate(_AI_PROVIDER_CATALOG_PATHS):

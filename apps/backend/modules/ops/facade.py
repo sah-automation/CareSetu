@@ -79,6 +79,11 @@ class OpsFacade:
         self._cache.set(resolved)
         return resolved
 
+    def get_ai_provider_catalog(self) -> list[Any]:
+        from app.ai_provider_catalog import get_ai_provider_catalog
+
+        return get_ai_provider_catalog(settings=self._settings)
+
     async def get_setting_history(
         self,
         setting_key: str | None = None,

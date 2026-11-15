@@ -225,7 +225,7 @@ DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
 # a KNOWN free model (never flagged); a model absent from the table is UNKNOWN,
 # so its 0 cost is logged (visible, not hidden) until its rate is configured.
 DEFAULT_AI_PRICING_TABLE = "mock-model:0:0"
-DEFAULT_AI_PROVIDER_CATALOG = ""
+DEFAULT_AI_PROVIDER_CATALOG_ENV = ""
 DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""
 DEFAULT_AI_FALLBACK_API_KEY = ""
@@ -657,7 +657,7 @@ class Settings:
     # default prices the free mock at 0; a paid deployment sets its serving
     # model's rate here or in the environment.
     ai_pricing_table: str = DEFAULT_AI_PRICING_TABLE
-    ai_provider_catalog: str = DEFAULT_AI_PROVIDER_CATALOG
+    ai_provider_catalog: str = DEFAULT_AI_PROVIDER_CATALOG_ENV
     ai_fallback_provider: str = DEFAULT_AI_FALLBACK_PROVIDER
     ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
     ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
@@ -977,9 +977,9 @@ class Settings:
                     "ai_provider='openai_compatible' requires AI_ASR_MODEL from the environment"
                 )
         if self.ai_provider_catalog.strip():
-            from app.ai_provider_catalog import _coerce_catalog
+            from app.ai_provider_catalog import get_ai_provider_catalog
 
-            _coerce_catalog(self.ai_provider_catalog)
+            get_ai_provider_catalog(self.ai_provider_catalog)
         fallback_vars = {
             "AI_FALLBACK_PROVIDER": self.ai_fallback_provider,
             "AI_FALLBACK_BASE_URL": self.ai_fallback_base_url,
@@ -1392,17 +1392,13 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _ai_provider_catalog_env() -> str:
-    for name in (
-        "AI_PROVIDER_CATALOG_JSON",
-        "AI_PROVIDER_CATALOG",
-        "AI_CATALOG_JSON",
-        "AI_CATALOG",
-        "AI_PROVIDER_CATALOG_OVERRIDE",
-    ):
+    from app.ai_provider_catalog import ENV_VAR_NAMES
+
+    for name in ENV_VAR_NAMES:
         raw = os.environ.get(name)
         if raw is not None and raw.strip() != "":
             return raw
-    return DEFAULT_AI_PROVIDER_CATALOG
+    return DEFAULT_AI_PROVIDER_CATALOG_ENV
 
 
 def _env_decimal(name: str, default: Decimal) -> Decimal:
