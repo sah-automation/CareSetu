@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from app.config import Settings
+from app.config import Settings, parse_ai_pricing_table
 from app.db import AsyncEngineLike
 from bus.events import EVENT_AUDIT_EVENT, EVENT_OPS_RUNTIME_SETTING_CHANGED
 from modules.ops.domain.events import OpsRuntimeSettingChangedPayload
@@ -384,9 +384,19 @@ class OpsFacade:
         # Validate value for the allowlisted knob family. A bad value is an
         # expected write refusal, so it becomes the same domain error the route
         # already maps to the shared 400 envelope.
+        catalog = None
+        pricing_table = None
+        if setting_key in EDITABLE_AI_KEYS:
+            catalog = [dict(e) for e in self.get_ai_provider_catalog()]
+            try:
+                pricing_table = parse_ai_pricing_table(self._settings.ai_pricing_table or "")
+            except ValueError:
+                pricing_table = {}
         try:
             if setting_key in EDITABLE_AI_KEYS:
-                validate_ai_setting(setting_key, value)
+                validate_ai_setting(
+                    setting_key, value, catalog=catalog, pricing_table=pricing_table
+                )
             elif setting_key in EDITABLE_NOTIFICATION_KEYS:
                 validate_notification_setting(setting_key, value)
             elif setting_key in EDITABLE_CACHE_REDIS_KEYS:

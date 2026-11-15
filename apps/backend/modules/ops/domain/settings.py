@@ -14,6 +14,7 @@ Flag reads are operator-visible.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -180,6 +181,13 @@ EDITABLE_AI_KEYS: frozenset[str] = frozenset(
         "ai.budget_alert_threshold_pct",
         "ai.timeout_seconds",
         "ai.fallback_enabled",
+        # Runtime-editable AI provider/model/ASR/pricing (issue #922)
+        "ai.provider",
+        "ai.model",
+        "ai.fallback_provider",
+        "ai.fallback_model",
+        "ai.asr_model",
+        "ai.pricing_table",
     }
 )
 
@@ -198,8 +206,6 @@ EDITABLE_NOTIFICATION_KEYS: frozenset[str] = frozenset(
 # Read-only keys that are never returned raw
 READ_ONLY_SENSITIVE_KEYS: frozenset[str] = frozenset(
     {
-        "ai.provider",
-        "ai.model",
         "ai.api_key",
         "ai.base_url",
         "gateway.jwt_signing_key",
@@ -376,6 +382,16 @@ class EffectiveSettingsResolver:
             return getattr(self._settings, "ai_provider", None), SettingSource.DEFAULT.value
         if key == "ai.model":
             return getattr(self._settings, "ai_model", None), SettingSource.DEFAULT.value
+        if key == "ai.fallback_provider":
+            return getattr(
+                self._settings, "ai_fallback_provider", None
+            ), SettingSource.DEFAULT.value
+        if key == "ai.fallback_model":
+            return getattr(self._settings, "ai_fallback_model", None), SettingSource.DEFAULT.value
+        if key == "ai.asr_model":
+            return getattr(self._settings, "ai_asr_model", None), SettingSource.DEFAULT.value
+        if key == "ai.pricing_table":
+            return getattr(self._settings, "ai_pricing_table", None), SettingSource.DEFAULT.value
         if key == "ai.api_key":
             return getattr(self._settings, "ai_api_key", None), SettingSource.DEFAULT.value
         if key == "ai.base_url":
@@ -553,15 +569,48 @@ def validate_feature_flag_write(flag: FeatureFlag, enabled: bool) -> None:
         )
 
 
-def validate_ai_setting(key: str, value: object) -> None:
-    """Validate an allowlisted operational AI knob write (#772).
+def validate_ai_setting(
+    key: str,
+    value: object,
+    catalog: list[dict[str, Any]] | None = None,
+    pricing_table: dict[str, tuple[Any, Any]] | None = None,
+) -> None:
+    """Validate an allowlisted operational AI knob write (#772/#922).
 
     The knobs mirror the boot-time config validation so a database override can
     never carry a value the process would have refused from the environment.
 
+    Provider/model/fallback/ASR writes are additionally fail-closed against the
+    AI provider catalog (#920): an unknown provider is rejected, a custom model
+    name is rejected unless a pricing-table entry exists, and an ASR model must
+    be listed in the catalog. Pricing-table strings must parse and carry
+    non-negative rates.
+
     Raises:
         ValueError: If the value is invalid for the given key.
     """
+    # Resolve the catalog and pricing table lazily when not supplied.
+    if catalog is None:
+        catalog = []
+    if pricing_table is None:
+        pricing_table = {}
+
+    # Collect known model names from the catalog (any provider).
+    catalog_chat_models: set[str] = set()
+    catalog_asr_models: set[str] = set()
+    catalog_provider_ids: set[str] = set()
+    if catalog:
+        for entry in catalog:
+            if not isinstance(entry, Mapping):
+                continue
+            pid = str(entry.get("id", "")).strip()
+            if pid:
+                catalog_provider_ids.add(pid)
+            for model in entry.get("chat_models") or []:
+                catalog_chat_models.add(str(model).strip())
+            for model in entry.get("asr_models") or []:
+                catalog_asr_models.add(str(model).strip())
+
     if key == "ai.monthly_budget_paise":
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError("AI monthly budget must be a positive integer (paise)")
@@ -574,6 +623,55 @@ def validate_ai_setting(key: str, value: object) -> None:
     elif key == "ai.fallback_enabled":
         if not isinstance(value, bool):
             raise ValueError("AI fallback enabled must be a boolean")
+    elif key == "ai.provider":
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("AI provider must be a non-empty string")
+        if value.strip().lower() not in catalog_provider_ids:
+            raise ValueError(
+                f"Unknown AI provider {value!r}; must be one of: "
+                + ", ".join(sorted(catalog_provider_ids))
+            )
+    elif key == "ai.model":
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("AI model must be a non-empty string")
+        model = value.strip()
+        if model not in catalog_chat_models and model not in pricing_table:
+            raise ValueError(
+                f"Custom AI model {model!r} is not in the catalog and has no "
+                "pricing-table entry; add it to AI_PRICING_TABLE"
+            )
+    elif key == "ai.fallback_provider":
+        if value is not None and value != "":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("AI fallback provider must be a non-empty string")
+            if value.strip().lower() not in catalog_provider_ids:
+                raise ValueError(
+                    f"Unknown AI fallback provider {value!r}; must be one of: "
+                    + ", ".join(sorted(catalog_provider_ids))
+                )
+    elif key == "ai.fallback_model":
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("AI fallback model must be a non-empty string")
+        model = value.strip()
+        if model not in catalog_chat_models and model not in pricing_table:
+            raise ValueError(
+                f"Custom AI fallback model {model!r} is not in the catalog and has no "
+                "pricing-table entry; add it to AI_PRICING_TABLE"
+            )
+    elif key == "ai.asr_model":
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("AI ASR model must be a non-empty string")
+        if value.strip() not in catalog_asr_models:
+            raise ValueError(
+                f"Unknown AI ASR model {value!r}; must be one of: "
+                + ", ".join(sorted(catalog_asr_models))
+            )
+    elif key == "ai.pricing_table":
+        if not isinstance(value, str):
+            raise ValueError("AI pricing table must be a string")
+        from app.config import parse_ai_pricing_table
+
+        parse_ai_pricing_table(value)
     else:
         raise ValueError(f"Unknown AI setting key: {key}")
 

@@ -126,7 +126,7 @@ def _facade(request: Request) -> OpsFacade:
 )
 async def read_effective_settings(
     request: Request,
-    principal: Annotated[Principal, Depends(require_admin)],
+    principal: Annotated[Principal, Depends(require_operator)],
 ) -> EffectiveSettingsResponse:
     del principal
     facade = _facade(request)
