@@ -1042,4 +1042,106 @@ describe("AiSettingsSection (#924)", () => {
     // password input (#930).
     expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
   });
+
+  // #934: every visible label is programmatically tied to its control.
+  it("associates every visible label with its control via htmlFor/id", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-row-ai.provider"),
+      ).toBeInTheDocument();
+    });
+
+    const pairs: Array<{
+      fieldKey: string;
+      controlTestId: string;
+      labelText: string;
+    }> = [
+      {
+        fieldKey: "ai.provider",
+        controlTestId: "settings-ai-provider-select",
+        labelText: en.provider,
+      },
+      {
+        fieldKey: "ai.model",
+        controlTestId: "settings-ai-model-select",
+        labelText: en.model,
+      },
+      {
+        fieldKey: "ai.asr_model",
+        controlTestId: "settings-ai-asr-select",
+        labelText: en.asrModel,
+      },
+      {
+        fieldKey: "ai.fallback_provider",
+        controlTestId: "settings-ai-fallback-provider-select",
+        labelText: en.fallbackProvider,
+      },
+      {
+        fieldKey: "ai.fallback_model",
+        controlTestId: "settings-ai-fallback-model-select",
+        labelText: en.fallbackModel,
+      },
+      {
+        fieldKey: "ai.pricing_table",
+        controlTestId: "settings-ai-pricing-table",
+        labelText: en.pricingTable,
+      },
+    ];
+
+    for (const { fieldKey, controlTestId, labelText } of pairs) {
+      const control = screen.getByTestId(controlTestId);
+      expect(control).toHaveAttribute("id", fieldKey);
+      const label = document.querySelector(`label[for="${fieldKey}"]`);
+      expect(label).not.toBeNull();
+      expect(label?.textContent).toBe(labelText);
+    }
+  });
+
+  // #934: the API key row (rendered inline, not via AiFieldRow) keeps the same
+  // label-to-control association when a key-requiring provider is selected.
+  it("associates the API key label with its input", async () => {
+    await renderSection(
+      adminAuth(),
+      providers,
+      apiKeySettings("missing", "default"),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-input"),
+      ).toBeInTheDocument();
+    });
+
+    const apiKeyInput = screen.getByTestId("settings-ai-api-key-input");
+    expect(apiKeyInput).toHaveAttribute("id", "ai.api_key");
+    expect(document.querySelector('label[for="ai.api_key"]')).not.toBeNull();
+  });
+
+  // #934: error text is announced as an alert.
+  it("renders save errors with role=alert", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-model-select"),
+      ).toBeInTheDocument();
+    });
+
+    const modelSelect = screen.getByTestId(
+      "settings-ai-model-select",
+    ) as HTMLSelectElement;
+    fireEvent.change(modelSelect, { target: { value: "__custom__" } });
+    fireEvent.change(screen.getByTestId("settings-ai-model-custom"), {
+      target: { value: "unpriced-model" },
+    });
+    screen.getByTestId("settings-ai-save-ai.model").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-error-ai.model"),
+      ).toHaveAttribute("role", "alert");
+    });
+  });
 });

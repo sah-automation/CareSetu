@@ -316,7 +316,9 @@ function AiFieldRow({
       className={variant === "block" ? "p-3" : `${CARD_FRAME} p-3`}
     >
       <div className="flex items-baseline gap-2 mb-1">
-        <span className="text-sm font-medium text-txt">{label}</span>
+        <label htmlFor={fieldKey} className="text-sm font-medium text-txt">
+          {label}
+        </label>
         {source !== undefined ? (
           <Badge
             variant="secondary"
@@ -716,6 +718,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                         }}
                         disabled={!isAdmin || !currentEditable["ai.provider"]}
                         className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        id="ai.provider"
                         data-testid="settings-ai-provider-select"
                       >
                         {providers.map((p) => (
@@ -750,9 +753,12 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                     className="p-3"
                   >
                     <div className="flex items-baseline gap-2 mb-1">
-                      <span className="text-sm font-medium text-txt">
+                      <label
+                        htmlFor="ai.api_key"
+                        className="text-sm font-medium text-txt"
+                      >
                         {ai.apiKeyLabel}
-                      </span>
+                      </label>
                       <Badge
                         variant="secondary"
                         className="text-xs"
@@ -777,6 +783,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                             disabled={!isAdmin || !currentEditableApiKey}
                             placeholder={ai.apiKeyPlaceholder}
                             className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                            id="ai.api_key"
                             data-testid="settings-ai-api-key-input"
                           />
                         </div>
@@ -849,6 +856,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                         }
                         disabled={!isAdmin || !currentEditable["ai.model"]}
                         className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        id="ai.model"
                         data-testid="settings-ai-model-select"
                       >
                         {chatModels.map((m) => (
@@ -906,6 +914,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                       }
                       disabled={!isAdmin || !currentEditable["ai.asr_model"]}
                       className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                      id="ai.asr_model"
                       data-testid="settings-ai-asr-select"
                     >
                       {asrModels.map((m) => (
@@ -940,6 +949,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                         !isAdmin || !currentEditable["ai.fallback_provider"]
                       }
                       className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                      id="ai.fallback_provider"
                       data-testid="settings-ai-fallback-provider-select"
                     >
                       {providers.map((p) => (
@@ -975,6 +985,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                           !isAdmin || !currentEditable["ai.fallback_model"]
                         }
                         className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        id="ai.fallback_model"
                         data-testid="settings-ai-fallback-model-select"
                       >
                         {fallbackChatModels.map((m) => (
@@ -1037,6 +1048,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                     rows={6}
                     className="w-full max-w-md rounded-md border border-hairline px-2 py-1.5 text-sm leading-relaxed text-txt bg-input font-mono"
                     placeholder={ai.pricingPlaceholder}
+                    id="ai.pricing_table"
                     data-testid="settings-ai-pricing-table"
                   />
                   <Badge

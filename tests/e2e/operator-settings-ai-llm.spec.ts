@@ -192,6 +192,14 @@ test("admin switches provider and model, saves, and sees effective values update
     { timeout: 60_000 },
   );
 
+  // The status band reflects the saved values after reload.
+  await expect(page.getByTestId("settings-ai-band-provider")).toHaveText(
+    /OpenAI-compatible/i,
+  );
+  await expect(page.getByTestId("settings-ai-band-model")).toHaveText(
+    /gpt-oss-120b/i,
+  );
+
   // History records the model change.
   const historyRow = page
     .locator('[data-testid^="settings-ai-history-row-ai.model-"]')
