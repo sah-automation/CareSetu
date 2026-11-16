@@ -94,9 +94,9 @@ function apiKeyStatusLabel(
   source: SettingSource | undefined,
   t: AiStrings,
 ): string {
-  const v = value === null || value === undefined ? "" : String(value);
-  if (v.startsWith("configured from environment")) return t.keyFromEnv;
-  if (v.startsWith("configured from dashboard")) {
+  if (source === "environment") return t.keyFromEnv;
+  if (source === "database") {
+    const v = value === null || value === undefined ? "" : String(value);
     const date = dashboardDate(v);
     return date ? `${t.keyFromDashboard}, set ${date}` : t.keyFromDashboard;
   }
@@ -338,7 +338,10 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
   const apiKeyRow = settings.find((s) => s.key === "ai.api_key");
   const currentEditableApiKey = apiKeyRow?.editable ?? false;
   const providerEntry = providerById(providers, drafts["ai.provider"]);
-  const apiKeyProviderEntry = providerById(providers, current["ai.provider"]);
+  const apiKeyProviderEntry = providerById(
+    providers,
+    drafts["ai.provider"] || current["ai.provider"],
+  );
   const providerRequiresKey = Boolean(
     apiKeyProviderEntry?.api_key_env &&
       String(apiKeyProviderEntry.api_key_env).trim() !== "",
