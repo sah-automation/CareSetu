@@ -804,180 +804,192 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               </div>
             </div>
 
-            <AiFieldRow
-              fieldKey="ai.model"
-              label={ai.model}
-              value={drafts["ai.model"]}
-              source={currentSource["ai.model"]}
-              editable={currentEditable["ai.model"]}
-              control={
-                <div className="flex flex-col gap-1">
-                  <select
-                    value={drafts["ai.model"]}
-                    onChange={(event) =>
-                      handleDraft("ai.model", event.target.value)
-                    }
-                    disabled={!isAdmin || !currentEditable["ai.model"]}
-                    className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
-                    data-testid="settings-ai-model-select"
-                  >
-                    {chatModels.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                    <option key="__custom__" value="__custom__">
-                      {ai.customModelOption}
-                    </option>
-                  </select>
-                  {drafts["ai.model"] === "__custom__" && (
-                    <input
-                      type="text"
-                      value={customText["ai.model"]}
-                      onChange={(event) =>
-                        handleCustomDraft("ai.model", event.target.value)
-                      }
-                      placeholder={ai.customModel}
-                      disabled={!isAdmin || !currentEditable["ai.model"]}
-                      className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
-                      data-testid="settings-ai-model-custom"
-                    />
-                  )}
-                  <span
-                    className="text-xs text-txt-muted"
-                    data-testid="settings-ai-model-hint"
-                  >
-                    {drafts["ai.model"] === "__custom__"
-                      ? `${ai.customModelMarked} ${ai.customModel}`
-                      : ""}
-                  </span>
-                </div>
-              }
-              saveStatus={saveStates["ai.model"] ?? "idle"}
-              saveError={saveErrors["ai.model"]}
-              onDraft={(v) => handleDraft("ai.model", v)}
-              onSave={() => void handleSave("ai.model")}
-              isAdmin={isAdmin}
-              t={ai}
-            />
+            {/* #931: the four model selects share one responsive block -
+                multi-column at the standard breakpoint, stacked on mobile. */}
+            <div data-testid="settings-ai-models-block" className={CARD_FRAME}>
+              <div className="grid grid-cols-1 gap-x-6 p-2 md:grid-cols-2">
+                <AiFieldRow
+                  variant="block"
+                  fieldKey="ai.model"
+                  label={ai.model}
+                  value={drafts["ai.model"]}
+                  source={currentSource["ai.model"]}
+                  editable={currentEditable["ai.model"]}
+                  control={
+                    <div className="flex flex-col gap-1">
+                      <select
+                        value={drafts["ai.model"]}
+                        onChange={(event) =>
+                          handleDraft("ai.model", event.target.value)
+                        }
+                        disabled={!isAdmin || !currentEditable["ai.model"]}
+                        className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        data-testid="settings-ai-model-select"
+                      >
+                        {chatModels.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                        <option key="__custom__" value="__custom__">
+                          {ai.customModelOption}
+                        </option>
+                      </select>
+                      {drafts["ai.model"] === "__custom__" && (
+                        <input
+                          type="text"
+                          value={customText["ai.model"]}
+                          onChange={(event) =>
+                            handleCustomDraft("ai.model", event.target.value)
+                          }
+                          placeholder={ai.customModel}
+                          disabled={!isAdmin || !currentEditable["ai.model"]}
+                          className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
+                          data-testid="settings-ai-model-custom"
+                        />
+                      )}
+                      <span
+                        className="text-xs text-txt-muted"
+                        data-testid="settings-ai-model-hint"
+                      >
+                        {drafts["ai.model"] === "__custom__"
+                          ? `${ai.customModelMarked} ${ai.customModel}`
+                          : ""}
+                      </span>
+                    </div>
+                  }
+                  saveStatus={saveStates["ai.model"] ?? "idle"}
+                  saveError={saveErrors["ai.model"]}
+                  onDraft={(v) => handleDraft("ai.model", v)}
+                  onSave={() => void handleSave("ai.model")}
+                  isAdmin={isAdmin}
+                  t={ai}
+                />
 
-            <AiFieldRow
-              fieldKey="ai.asr_model"
-              label={ai.asrModel}
-              value={drafts["ai.asr_model"]}
-              source={currentSource["ai.asr_model"]}
-              editable={currentEditable["ai.asr_model"]}
-              control={
-                <select
+                <AiFieldRow
+                  variant="block"
+                  fieldKey="ai.asr_model"
+                  label={ai.asrModel}
                   value={drafts["ai.asr_model"]}
-                  onChange={(event) =>
-                    handleDraft("ai.asr_model", event.target.value)
-                  }
-                  disabled={!isAdmin || !currentEditable["ai.asr_model"]}
-                  className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
-                  data-testid="settings-ai-asr-select"
-                >
-                  {asrModels.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-              }
-              saveStatus={saveStates["ai.asr_model"] ?? "idle"}
-              saveError={saveErrors["ai.asr_model"]}
-              onDraft={(v) => handleDraft("ai.asr_model", v)}
-              onSave={() => void handleSave("ai.asr_model")}
-              isAdmin={isAdmin}
-              t={ai}
-            />
-
-            <AiFieldRow
-              fieldKey="ai.fallback_provider"
-              label={ai.fallbackProvider}
-              value={drafts["ai.fallback_provider"]}
-              source={currentSource["ai.fallback_provider"]}
-              editable={currentEditable["ai.fallback_provider"]}
-              control={
-                <select
-                  value={drafts["ai.fallback_provider"]}
-                  onChange={(event) =>
-                    handleDraft("ai.fallback_provider", event.target.value)
-                  }
-                  disabled={
-                    !isAdmin || !currentEditable["ai.fallback_provider"]
-                  }
-                  className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
-                  data-testid="settings-ai-fallback-provider-select"
-                >
-                  {providers.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.display_name}
-                    </option>
-                  ))}
-                </select>
-              }
-              saveStatus={saveStates["ai.fallback_provider"] ?? "idle"}
-              saveError={saveErrors["ai.fallback_provider"]}
-              onDraft={(v) => handleDraft("ai.fallback_provider", v)}
-              onSave={() => void handleSave("ai.fallback_provider")}
-              isAdmin={isAdmin}
-              t={ai}
-            />
-
-            <AiFieldRow
-              fieldKey="ai.fallback_model"
-              label={ai.fallbackModel}
-              value={drafts["ai.fallback_model"]}
-              source={currentSource["ai.fallback_model"]}
-              editable={currentEditable["ai.fallback_model"]}
-              control={
-                <div className="flex flex-col gap-1">
-                  <select
-                    value={drafts["ai.fallback_model"]}
-                    onChange={(event) =>
-                      handleDraft("ai.fallback_model", event.target.value)
-                    }
-                    disabled={!isAdmin || !currentEditable["ai.fallback_model"]}
-                    className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
-                    data-testid="settings-ai-fallback-model-select"
-                  >
-                    {fallbackChatModels.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                    <option key="__custom__" value="__custom__">
-                      {ai.customModelOption}
-                    </option>
-                  </select>
-                  {drafts["ai.fallback_model"] === "__custom__" && (
-                    <input
-                      type="text"
-                      value={customText["ai.fallback_model"]}
+                  source={currentSource["ai.asr_model"]}
+                  editable={currentEditable["ai.asr_model"]}
+                  control={
+                    <select
+                      value={drafts["ai.asr_model"]}
                       onChange={(event) =>
-                        handleCustomDraft(
-                          "ai.fallback_model",
-                          event.target.value,
-                        )
+                        handleDraft("ai.asr_model", event.target.value)
                       }
-                      placeholder={ai.customModel}
+                      disabled={!isAdmin || !currentEditable["ai.asr_model"]}
+                      className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                      data-testid="settings-ai-asr-select"
+                    >
+                      {asrModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  }
+                  saveStatus={saveStates["ai.asr_model"] ?? "idle"}
+                  saveError={saveErrors["ai.asr_model"]}
+                  onDraft={(v) => handleDraft("ai.asr_model", v)}
+                  onSave={() => void handleSave("ai.asr_model")}
+                  isAdmin={isAdmin}
+                  t={ai}
+                />
+
+                <AiFieldRow
+                  variant="block"
+                  fieldKey="ai.fallback_provider"
+                  label={ai.fallbackProvider}
+                  value={drafts["ai.fallback_provider"]}
+                  source={currentSource["ai.fallback_provider"]}
+                  editable={currentEditable["ai.fallback_provider"]}
+                  control={
+                    <select
+                      value={drafts["ai.fallback_provider"]}
+                      onChange={(event) =>
+                        handleDraft("ai.fallback_provider", event.target.value)
+                      }
                       disabled={
-                        !isAdmin || !currentEditable["ai.fallback_model"]
+                        !isAdmin || !currentEditable["ai.fallback_provider"]
                       }
-                      className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
-                      data-testid="settings-ai-fallback-model-custom"
-                    />
-                  )}
-                </div>
-              }
-              saveStatus={saveStates["ai.fallback_model"] ?? "idle"}
-              saveError={saveErrors["ai.fallback_model"]}
-              onDraft={(v) => handleDraft("ai.fallback_model", v)}
-              onSave={() => void handleSave("ai.fallback_model")}
-              isAdmin={isAdmin}
-              t={ai}
-            />
+                      className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                      data-testid="settings-ai-fallback-provider-select"
+                    >
+                      {providers.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  }
+                  saveStatus={saveStates["ai.fallback_provider"] ?? "idle"}
+                  saveError={saveErrors["ai.fallback_provider"]}
+                  onDraft={(v) => handleDraft("ai.fallback_provider", v)}
+                  onSave={() => void handleSave("ai.fallback_provider")}
+                  isAdmin={isAdmin}
+                  t={ai}
+                />
+
+                <AiFieldRow
+                  variant="block"
+                  fieldKey="ai.fallback_model"
+                  label={ai.fallbackModel}
+                  value={drafts["ai.fallback_model"]}
+                  source={currentSource["ai.fallback_model"]}
+                  editable={currentEditable["ai.fallback_model"]}
+                  control={
+                    <div className="flex flex-col gap-1">
+                      <select
+                        value={drafts["ai.fallback_model"]}
+                        onChange={(event) =>
+                          handleDraft("ai.fallback_model", event.target.value)
+                        }
+                        disabled={
+                          !isAdmin || !currentEditable["ai.fallback_model"]
+                        }
+                        className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        data-testid="settings-ai-fallback-model-select"
+                      >
+                        {fallbackChatModels.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                        <option key="__custom__" value="__custom__">
+                          {ai.customModelOption}
+                        </option>
+                      </select>
+                      {drafts["ai.fallback_model"] === "__custom__" && (
+                        <input
+                          type="text"
+                          value={customText["ai.fallback_model"]}
+                          onChange={(event) =>
+                            handleCustomDraft(
+                              "ai.fallback_model",
+                              event.target.value,
+                            )
+                          }
+                          placeholder={ai.customModel}
+                          disabled={
+                            !isAdmin || !currentEditable["ai.fallback_model"]
+                          }
+                          className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
+                          data-testid="settings-ai-fallback-model-custom"
+                        />
+                      )}
+                    </div>
+                  }
+                  saveStatus={saveStates["ai.fallback_model"] ?? "idle"}
+                  saveError={saveErrors["ai.fallback_model"]}
+                  onDraft={(v) => handleDraft("ai.fallback_model", v)}
+                  onSave={() => void handleSave("ai.fallback_model")}
+                  isAdmin={isAdmin}
+                  t={ai}
+                />
+              </div>
+            </div>
 
             <AiFieldRow
               fieldKey="ai.pricing_table"

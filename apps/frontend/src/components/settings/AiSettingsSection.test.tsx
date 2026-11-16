@@ -207,7 +207,7 @@ describe("AiSettingsSection (#924)", () => {
     expect(asrSelect).toBeInTheDocument();
   });
 
-  it("re-filters models when the provider changes", async () => {
+  it("re-filters models and ASR options when the provider changes", async () => {
     await renderSection();
 
     await waitFor(() => {
@@ -229,6 +229,75 @@ describe("AiSettingsSection (#924)", () => {
       ) as HTMLSelectElement;
       expect(modelSelect).toHaveValue("gpt-oss-120b");
     });
+
+    // #931: the ASR list follows the same provider switch.
+    const asrSelect = screen.getByTestId(
+      "settings-ai-asr-select",
+    ) as HTMLSelectElement;
+    const asrValues = Array.from(asrSelect.options).map((o) => o.value);
+    expect(asrValues).toEqual(["whisper-large-v3-turbo", "whisper-large-v3"]);
+  });
+
+  it("#931: lays the four model selects out in one responsive grid block", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-models-block"),
+      ).toBeInTheDocument();
+    });
+
+    const block = screen.getByTestId("settings-ai-models-block");
+    for (const fieldKey of [
+      "ai.model",
+      "ai.asr_model",
+      "ai.fallback_provider",
+      "ai.fallback_model",
+    ]) {
+      const row = within(block).getByTestId(`settings-ai-row-${fieldKey}`);
+      expect(row).toBeInTheDocument();
+      // Every row keeps its source badge and its inline save/status slot
+      // (a save button when editable, a read-only marker otherwise).
+      expect(
+        within(row).getByTestId(`settings-ai-source-${fieldKey}`),
+      ).toBeInTheDocument();
+      const save = within(row).queryByTestId(`settings-ai-save-${fieldKey}`);
+      const readOnly = within(row).queryByTestId(
+        `settings-ai-readonly-${fieldKey}`,
+      );
+      expect(Boolean(save) !== Boolean(readOnly)).toBe(true);
+    }
+    // The pricing table stays outside the models block.
+    expect(within(block).queryByTestId("settings-ai-pricing-table")).toBeNull();
+  });
+
+  it("#931: reveals the custom-model input directly beneath its select", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-model-select"),
+      ).toBeInTheDocument();
+    });
+
+    const modelSelect = screen.getByTestId(
+      "settings-ai-model-select",
+    ) as HTMLSelectElement;
+    fireEvent.change(modelSelect, { target: { value: "__custom__" } });
+
+    const customInput = await screen.findByTestId("settings-ai-model-custom");
+    expect(customInput.previousElementSibling).toBe(modelSelect);
+
+    // The fallback-model select gets the same treatment.
+    const fallbackSelect = screen.getByTestId(
+      "settings-ai-fallback-model-select",
+    ) as HTMLSelectElement;
+    fireEvent.change(fallbackSelect, { target: { value: "__custom__" } });
+
+    const fallbackCustom = await screen.findByTestId(
+      "settings-ai-fallback-model-custom",
+    );
+    expect(fallbackCustom.previousElementSibling).toBe(fallbackSelect);
   });
 
   it("shows the custom-model escape hatch and preview price", async () => {
