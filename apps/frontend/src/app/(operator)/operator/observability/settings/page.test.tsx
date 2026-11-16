@@ -254,7 +254,7 @@ describe("ObservabilitySettingsPage (#797)", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-row-ai.timeout_seconds"),
+        screen.getByTestId("settings-ai-row-ai.model"),
       ).toBeInTheDocument();
     });
 
@@ -360,7 +360,7 @@ describe("ObservabilitySettingsPage (#797)", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-row-ai.timeout_seconds"),
+        screen.getByTestId("settings-ai-row-ai.model"),
       ).toBeInTheDocument();
     });
     // Called 3 times: initial AI + Notifications, then retry for AI + Notifications
@@ -512,6 +512,22 @@ describe("AiSettingsSection writes and history (#798)", () => {
       target: { value: "openai_compatible" },
     });
 
+    // #933: the draft state, not any DOM default selection, drives the write -
+    // pick the model explicitly before saving.
+    await waitFor(() => {
+      const modelSelect = screen.getByTestId(
+        "settings-ai-model-select",
+      ) as HTMLSelectElement;
+      expect(
+        Array.from(modelSelect.options).some(
+          (option) => option.value === "gpt-oss-120b",
+        ),
+      ).toBe(true);
+    });
+    fireEvent.change(screen.getByTestId("settings-ai-model-select"), {
+      target: { value: "gpt-oss-120b" },
+    });
+
     await waitFor(() => {
       const modelSelect = screen.getByTestId(
         "settings-ai-model-select",
@@ -576,6 +592,22 @@ describe("AiSettingsSection writes and history (#798)", () => {
       target: { value: "openai_compatible" },
     });
 
+    // #933: the draft state, not any DOM default selection, drives the write -
+    // pick the model explicitly before saving.
+    await waitFor(() => {
+      const modelSelect = screen.getByTestId(
+        "settings-ai-model-select",
+      ) as HTMLSelectElement;
+      expect(
+        Array.from(modelSelect.options).some(
+          (option) => option.value === "gpt-oss-120b",
+        ),
+      ).toBe(true);
+    });
+    fireEvent.change(screen.getByTestId("settings-ai-model-select"), {
+      target: { value: "gpt-oss-120b" },
+    });
+
     await waitFor(() => {
       const modelSelect = screen.getByTestId(
         "settings-ai-model-select",
@@ -610,6 +642,22 @@ describe("AiSettingsSection writes and history (#798)", () => {
     ) as HTMLSelectElement;
     fireEvent.change(providerSelect, {
       target: { value: "openai_compatible" },
+    });
+
+    // #933: the draft state, not any DOM default selection, drives the write -
+    // pick the model explicitly before saving.
+    await waitFor(() => {
+      const modelSelect = screen.getByTestId(
+        "settings-ai-model-select",
+      ) as HTMLSelectElement;
+      expect(
+        Array.from(modelSelect.options).some(
+          (option) => option.value === "gpt-oss-120b",
+        ),
+      ).toBe(true);
+    });
+    fireEvent.change(screen.getByTestId("settings-ai-model-select"), {
+      target: { value: "gpt-oss-120b" },
     });
 
     await waitFor(() => {

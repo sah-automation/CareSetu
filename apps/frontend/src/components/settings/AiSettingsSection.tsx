@@ -542,6 +542,9 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
         return next;
       });
       settingsRead.reload();
+      // #933: the history sub-section refreshes with the save, so the new
+      // version shows up without a manual retry.
+      historyRead.reload();
     } catch (error) {
       setSaveStates((cur) => ({ ...cur, [key]: "error" }));
       setSaveErrors((cur) => ({
@@ -569,6 +572,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
       setApiKeySaveStatus("saved");
       setApiKeyDraft("");
       settingsRead.reload();
+      historyRead.reload();
     } catch (error) {
       setApiKeySaveStatus("error");
       setApiKeySaveError(
@@ -591,11 +595,20 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
     >
       {(settingsRead.status === "loading" ||
         catalogRead.status === "loading") && (
-        <div data-testid="settings-ai-loading">
-          <Skeleton className="h-32 w-full" />
+        // #933: placeholders mirror the section's final anatomy (band, the two
+        // grouped blocks, the pricing card) so the layout does not jump when
+        // the data lands.
+        <div
+          data-testid="settings-ai-loading"
+          className="flex flex-col gap-3"
+          aria-hidden="true"
+        >
+          <Skeleton className="h-12 w-full rounded-lg" />
+          <Skeleton className="h-36 w-full rounded-lg" />
+          <Skeleton className="h-36 w-full rounded-lg" />
+          <Skeleton className="h-20 w-full rounded-lg" />
         </div>
       )}
-
       {settingsRead.status === "error" && (
         <div
           role="alert"
@@ -605,6 +618,21 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
           <p className="text-sm text-danger">
             {settingsRead.error?.expected ? ai.errorExpected : ai.error}
           </p>
+          {settingsRead.errorTraceId ? (
+            <p
+              className="mt-0.5 font-mono text-xs text-txt-muted"
+              data-testid="settings-ai-error-trace-id"
+            >
+              {ai.traceLabel}: {settingsRead.errorTraceId}
+            </p>
+          ) : (
+            <p
+              className="mt-0.5 text-xs text-txt-muted"
+              data-testid="settings-ai-error-no-trace"
+            >
+              {ai.noTrace}
+            </p>
+          )}
           <button
             type="button"
             onClick={settingsRead.reload}
@@ -615,7 +643,6 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
           </button>
         </div>
       )}
-
       {catalogRead.status === "error" && (
         <div
           role="alert"
@@ -633,13 +660,11 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
           </button>
         </div>
       )}
-
       {settingsRead.status === "ready" &&
         catalogRead.status === "ready" &&
         providers.length === 0 && (
           <EmptyState title={ai.catalogEmpty} body={ai.catalogError} />
         )}
-
       {settingsRead.status === "ready" &&
         catalogRead.status === "ready" &&
         providers.length > 0 && (
@@ -1056,24 +1081,22 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
             />
           </>
         )}
-
-      {settingsRead.status === "ready" &&
-        catalogRead.status === "ready" &&
-        historyRead.status === "ready" && (
-          <AiHistory
-            entries={(historyRead.data ?? []).filter((e) =>
-              AI_FIELD_KEYS.includes(e.setting_key as AiFieldKey),
-            )}
-            t={ai}
-            status={historyRead.status}
-            errorMessage={
-              historyRead.error?.expected
-                ? ai.historyErrorExpected
-                : ai.historyError
-            }
-            onRetry={historyRead.reload}
-          />
-        )}
+      // #933: the history owns its own loading, error and empty states.
+      {settingsRead.status === "ready" && catalogRead.status === "ready" && (
+        <AiHistory
+          entries={(historyRead.data ?? []).filter((e) =>
+            AI_FIELD_KEYS.includes(e.setting_key as AiFieldKey),
+          )}
+          t={ai}
+          status={historyRead.status}
+          errorMessage={
+            historyRead.error?.expected
+              ? ai.historyErrorExpected
+              : ai.historyError
+          }
+          onRetry={historyRead.reload}
+        />
+      )}
     </CollapsibleSettingsSection>
   );
 }
@@ -1092,8 +1115,10 @@ function AiHistory({
   onRetry: () => void;
 }) {
   return (
+    // #933: the history reads inside the same card frame as the section's
+    // other blocks; mono key cells and the horizontal-scroll wrapper stay.
     <div
-      className="mt-5 border-t border-hairline pt-4"
+      className="mt-5 rounded-lg border border-hairline bg-surface p-4"
       data-testid="settings-ai-history"
     >
       <h3

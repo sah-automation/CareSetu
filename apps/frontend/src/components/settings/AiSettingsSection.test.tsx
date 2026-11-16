@@ -519,6 +519,101 @@ describe("AiSettingsSection (#924)", () => {
     });
   });
 
+  // #933: the section's load, error, and empty states.
+  it("#933: shows skeleton placeholders while the section loads", async () => {
+    mockUseAuth.mockReturnValue(adminAuth());
+    mockFetchEffectiveSettings.mockReturnValue(new Promise(() => {}));
+    mockFetchAiProviderCatalog.mockReturnValue(new Promise(() => {}));
+
+    render(
+      <AiSettingsSection t={STRINGS.en.operatorSettings} isAdmin={true} />,
+    );
+
+    expect(screen.getByTestId("settings-ai-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-ai-band")).toBeNull();
+    expect(screen.queryByTestId("settings-ai-row-ai.provider")).toBeNull();
+  });
+
+  it("#933: shows the empty state when the provider catalog is empty", async () => {
+    await renderSection(adminAuth(), []);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("empty-state")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("empty-state-title")).toHaveTextContent(
+      en.catalogEmpty,
+    );
+    expect(screen.queryByTestId("settings-ai-band")).toBeNull();
+    expect(screen.queryByTestId("settings-ai-model-select")).toBeNull();
+  });
+
+  it("#933: shows a retryable error when the effective settings fail", async () => {
+    mockFetchEffectiveSettings
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce(settings);
+
+    await renderSection();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-ai-error")).toBeInTheDocument();
+    });
+    expect(screen.getByText(en.error)).toBeInTheDocument();
+    expect(screen.getByTestId("settings-ai-error-no-trace")).toHaveTextContent(
+      en.noTrace,
+    );
+
+    screen.getByTestId("settings-ai-retry").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-row-ai.provider"),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("#933: shows the API's trace id on an expected settings error", async () => {
+    mockFetchEffectiveSettings.mockRejectedValueOnce(
+      new ApiError({
+        code: "FORBIDDEN",
+        message: "Operator admin role required",
+        trace_id: "trace-933",
+        details: {},
+      }),
+    );
+
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-error-trace-id"),
+      ).toHaveTextContent("trace-933");
+    });
+    expect(screen.getByText(en.errorExpected)).toBeInTheDocument();
+  });
+
+  it("#933: shows a retryable error when the history read fails", async () => {
+    mockFetchSettingHistory
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce([]);
+
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-history-error"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(en.historyError)).toBeInTheDocument();
+
+    screen.getByTestId("settings-ai-history-retry").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-history-empty"),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("renders the Hindi locale", async () => {
     const hi = STRINGS.hi.operatorSettings.ai;
 
