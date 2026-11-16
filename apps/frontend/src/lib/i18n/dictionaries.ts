@@ -2750,6 +2750,9 @@ const en = {
       save: "Save",
       saving: "Saving...",
       saved: "Saved",
+      saveChanges: "Save changes",
+      savingChanges: "Saving…",
+      savedChanges: "Saved",
       validationRequired: "Enter a value.",
       validationNumber: "Enter a valid number.",
       saveError:
@@ -5243,6 +5246,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
         save: "सहेजें",
         saving: "सहेजा जा रहा है...",
         saved: "सहेजा गया",
+        saveChanges: "बदलाव सहेजें",
+        savingChanges: "सहेजा जा रहा है…",
+        savedChanges: "सहेजा गया",
         validationRequired: "एक मान दर्ज करें।",
         validationNumber: "सही संख्या दर्ज करें।",
         saveError:
