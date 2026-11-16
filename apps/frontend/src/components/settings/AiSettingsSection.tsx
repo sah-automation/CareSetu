@@ -998,34 +998,51 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               source={currentSource["ai.pricing_table"]}
               editable={currentEditable["ai.pricing_table"]}
               control={
-                <div className="flex flex-col gap-1">
+                // #932: prettified, not rebuilt - the raw textarea stays the
+                // editor (mono typeface, comfortable width/height) and the
+                // paise hint plus USD-per-1M preview render as tidy helper
+                // chips beneath it. Validation logic is untouched.
+                <div className="flex flex-col gap-1.5">
                   <textarea
                     value={drafts["ai.pricing_table"]}
                     onChange={(event) =>
                       handleDraft("ai.pricing_table", event.target.value)
                     }
                     disabled={!isAdmin || !currentEditable["ai.pricing_table"]}
-                    rows={4}
-                    className="w-64 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input font-mono"
+                    rows={6}
+                    className="w-full max-w-md rounded-md border border-hairline px-2 py-1.5 text-sm leading-relaxed text-txt bg-input font-mono"
                     placeholder={ai.pricingPlaceholder}
                     data-testid="settings-ai-pricing-table"
                   />
-                  <span className="text-xs text-txt-muted">
+                  <Badge
+                    variant="outline"
+                    className="w-fit border-hairline font-medium text-xs text-txt-muted"
+                    data-testid="settings-ai-pricing-hint"
+                  >
                     {ai.pricingHint}
-                  </span>
+                  </Badge>
                   {pricingRows.length > 0 && (
-                    <div className="mt-1 text-xs text-txt-sub">
-                      {pricingRows.map((row, i) => (
-                        <span
-                          key={i}
-                          className="mr-3"
-                          data-testid={`settings-ai-pricing-preview-${row.model}`}
-                        >
-                          {row.valid
-                            ? `${row.model}: ${ai.usdInput} $${row.usdIn} · ${ai.usdOutput} $${row.usdOut} ${ai.usdPer1M}`
-                            : `${row.model}: ${row.error}`}
-                        </span>
-                      ))}
+                    <div className="flex flex-wrap gap-1.5">
+                      {pricingRows.map((row, i) => {
+                        const chipClass =
+                          "max-w-full font-mono font-medium text-xs";
+                        return (
+                          <Badge
+                            key={i}
+                            variant={row.valid ? "secondary" : "outline"}
+                            className={
+                              row.valid
+                                ? chipClass
+                                : `${chipClass} border-danger-border bg-danger-soft text-danger`
+                            }
+                            data-testid={`settings-ai-pricing-preview-${row.model}`}
+                          >
+                            {row.valid
+                              ? `${row.model}: ${ai.usdInput} $${row.usdIn} · ${ai.usdOutput} $${row.usdOut} ${ai.usdPer1M}`
+                              : `${row.model}: ${row.error}`}
+                          </Badge>
+                        );
+                      })}
                     </div>
                   )}
                 </div>

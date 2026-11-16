@@ -369,6 +369,68 @@ describe("AiSettingsSection (#924)", () => {
     expect(mockWriteSetting).not.toHaveBeenCalled();
   });
 
+  // --- Pricing block reskin (#932): helper chips + inline validation ---
+
+  it("#932: renders the pricing hint and the USD-per-1M preview as helper chips", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-pricing-table"),
+      ).toBeInTheDocument();
+    });
+
+    // The paise-per-token hint line renders as a single helper chip.
+    expect(screen.getByTestId("settings-ai-pricing-hint")).toHaveTextContent(
+      en.pricingHint,
+    );
+
+    // The draft rows preview as USD-per-1M chips; 0 paise/token = $0.
+    const pricing = screen.getByTestId(
+      "settings-ai-pricing-table",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(pricing, { target: { value: "mock-model:0:0" } });
+
+    expect(
+      screen.getByTestId("settings-ai-pricing-preview-mock-model"),
+    ).toHaveTextContent(
+      `mock-model: ${en.usdInput} $0.00 · ${en.usdOutput} $0.00 ${en.usdPer1M}`,
+    );
+
+    // A malformed line previews as an inline error chip near the field.
+    fireEvent.change(pricing, {
+      target: { value: "mock-model:0:0\nbad-line" },
+    });
+
+    expect(
+      screen.getByTestId("settings-ai-pricing-preview-bad-line"),
+    ).toHaveTextContent("bad-line: expected 'model:price_in:price_out'");
+  });
+
+  it("#932: shows the missing-value validation inline for an empty pricing table", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-pricing-table"),
+      ).toBeInTheDocument();
+    });
+
+    const pricing = screen.getByTestId(
+      "settings-ai-pricing-table",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(pricing, { target: { value: "" } });
+
+    screen.getByTestId("settings-ai-save-ai.pricing_table").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-error-ai.pricing_table"),
+      ).toHaveTextContent(en.validationRequired);
+    });
+    expect(mockWriteSetting).not.toHaveBeenCalled();
+  });
+
   it("saves an admin edit end to end", async () => {
     mockWriteSetting.mockResolvedValue({
       setting_key: "ai.model",
