@@ -121,9 +121,10 @@ interface ParsedPrice {
   error?: string;
 }
 
-function parsePricingTable(text: string): ParsedPrice[] {
+function parsePricingTable(text: string | undefined): ParsedPrice[] {
   const rows: ParsedPrice[] = [];
-  for (const rawLine of text.split("\n")) {
+  const value = text ?? "";
+  for (const rawLine of value.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
     const parts = line.split(":");
