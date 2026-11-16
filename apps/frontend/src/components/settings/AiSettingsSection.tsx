@@ -50,6 +50,10 @@ const AI_FIELD_KEYS = [
 ] as const;
 type AiFieldKey = (typeof AI_FIELD_KEYS)[number];
 
+// #930: the shared surfaced frame for standalone rows and grouped blocks -
+// the block adds the row padding inside, the card rows add it here.
+const CARD_FRAME = "mt-4 rounded-lg border border-hairline bg-surface";
+
 function sourceLabel(source: SettingSource, t: AiStrings): string {
   switch (source) {
     case "database":
@@ -91,13 +95,24 @@ function dashboardDate(value: string): string {
   }
 }
 
+// #930: the one source->key-state mapping, shared by the status label and
+// the input's visibility, so a new source cannot desync the two.
+type ApiKeyState = "env" | "dashboard" | "missing";
+
+function apiKeyState(source: SettingSource | undefined): ApiKeyState {
+  if (source === "environment") return "env";
+  if (source === "database") return "dashboard";
+  return "missing";
+}
+
 function apiKeyStatusLabel(
   value: unknown,
   source: SettingSource | undefined,
   t: AiStrings,
 ): string {
-  if (source === "environment") return t.keyFromEnv;
-  if (source === "database") {
+  const state = apiKeyState(source);
+  if (state === "env") return t.keyFromEnv;
+  if (state === "dashboard") {
     const v = value === null || value === undefined ? "" : String(value);
     const date = dashboardDate(v);
     return date ? `${t.keyFromDashboard}, set ${date}` : t.keyFromDashboard;
@@ -273,6 +288,7 @@ function AiFieldRow({
   onSave,
   isAdmin,
   t,
+  variant = "card",
 }: {
   fieldKey: string;
   label: string;
@@ -286,6 +302,9 @@ function AiFieldRow({
   onSave: () => void;
   isAdmin: boolean;
   t: AiStrings;
+  // #930: "block" rows sit inside a grouped block (the wrapper supplies the
+  // card frame and the dividers); "card" rows keep the standalone frame.
+  variant?: "card" | "block";
 }) {
   const canEdit = editable && isAdmin;
   const status = saveStatus;
@@ -294,7 +313,7 @@ function AiFieldRow({
     <div
       key={fieldKey}
       data-testid={`settings-ai-row-${fieldKey}`}
-      className="mt-4 rounded-lg border border-hairline bg-surface p-3"
+      className={variant === "block" ? "p-3" : `${CARD_FRAME} p-3`}
     >
       <div className="flex items-baseline gap-2 mb-1">
         <span className="text-sm font-medium text-txt">{label}</span>
@@ -422,25 +441,33 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
 
   const apiKeyRow = settings.find((s) => s.key === "ai.api_key");
   const currentEditableApiKey = apiKeyRow?.editable ?? false;
-  const providerEntry = providerById(providers, drafts["ai.provider"]);
-  const apiKeyProviderEntry = providerById(
+  // The provider the provider block is about: the draft selection while it
+  // is unsaved, else the effective value. Drives the key-row visibility and
+  // the base-URL pill (#930).
+  const selectedProviderEntry = providerById(
     providers,
     drafts["ai.provider"] || current["ai.provider"],
   );
   const providerRequiresKey = Boolean(
-    apiKeyProviderEntry?.api_key_env &&
-      String(apiKeyProviderEntry.api_key_env).trim() !== "",
+    selectedProviderEntry?.api_key_env &&
+      String(selectedProviderEntry.api_key_env).trim() !== "",
   );
+  // #930: the masked status text stands alone whenever a key exists; only
+  // the missing state shows the password input.
+  const apiKeyConfigured = apiKeyState(apiKeyRow?.source) !== "missing";
+  // The model lists stay bound to the raw draft selection (no effective
+  // fallback): an unsaved provider pick re-filters its own model lists.
+  const draftProviderEntry = providerById(providers, drafts["ai.provider"]);
   const fallbackProviderEntry = providerById(
     providers,
     drafts["ai.fallback_provider"],
   );
   const chatModels = optionsWithCurrent(
-    providerEntry?.chat_models ?? [],
+    draftProviderEntry?.chat_models ?? [],
     drafts["ai.model"],
   );
   const asrModels = optionsWithCurrent(
-    providerEntry?.asr_models ?? [],
+    draftProviderEntry?.asr_models ?? [],
     drafts["ai.asr_model"],
   );
   const fallbackChatModels = optionsWithCurrent(
@@ -640,110 +667,142 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               {ai.takeaway ? ai.takeaway(6) : "6 effective settings"}
             </p>
 
-            <AiFieldRow
-              fieldKey="ai.provider"
-              label={ai.provider}
-              value={drafts["ai.provider"]}
-              source={currentSource["ai.provider"]}
-              editable={currentEditable["ai.provider"]}
-              control={
-                <select
+            <div
+              data-testid="settings-ai-provider-block"
+              className={CARD_FRAME}
+            >
+              <div className="divide-y divide-hairline">
+                <AiFieldRow
+                  variant="block"
+                  fieldKey="ai.provider"
+                  label={ai.provider}
                   value={drafts["ai.provider"]}
-                  onChange={(event) => {
-                    handleDraft("ai.provider", event.target.value);
-                    setApiKeyDraft("");
-                    setApiKeySaveStatus("idle");
-                    setApiKeySaveError(undefined);
-                  }}
-                  disabled={!isAdmin || !currentEditable["ai.provider"]}
-                  className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
-                  data-testid="settings-ai-provider-select"
-                >
-                  {providers.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.display_name}
-                    </option>
-                  ))}
-                </select>
-              }
-              saveStatus={saveStates["ai.provider"] ?? "idle"}
-              saveError={saveErrors["ai.provider"]}
-              onDraft={(v) => handleDraft("ai.provider", v)}
-              onSave={() => void handleSave("ai.provider")}
-              isAdmin={isAdmin}
-              t={ai}
-            />
-
-            {providerRequiresKey && (
-              <div
-                key="ai.api_key"
-                data-testid="settings-ai-row-ai.api_key"
-                className="mt-4 rounded-lg border border-hairline bg-surface p-3"
-              >
-                <div className="flex items-baseline gap-2 mb-1">
-                  <span className="text-sm font-medium text-txt">
-                    {ai.apiKeyLabel}
-                  </span>
-                  <Badge
-                    variant="secondary"
-                    className="text-xs"
-                    data-testid="settings-ai-api-key-status"
-                  >
-                    {apiKeyStatusLabel(apiKeyRow?.value, apiKeyRow?.source, ai)}
-                  </Badge>
-                </div>
-                <div className="mb-2">
-                  <input
-                    type="password"
-                    value={apiKeyDraft}
-                    onChange={(event) => setApiKeyDraft(event.target.value)}
-                    disabled={!isAdmin || !currentEditableApiKey}
-                    placeholder={ai.apiKeyPlaceholder}
-                    className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
-                    data-testid="settings-ai-api-key-input"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  {isAdmin && currentEditableApiKey ? (
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        disabled={apiKeySaveStatus === "saving"}
-                        onClick={handleSaveApiKey}
-                        className="inline-flex min-h-9 items-center rounded-md border border-hairline px-3 text-xs font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
-                        data-testid="settings-ai-save-ai.api_key"
+                  source={currentSource["ai.provider"]}
+                  editable={currentEditable["ai.provider"]}
+                  control={
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={drafts["ai.provider"]}
+                        onChange={(event) => {
+                          handleDraft("ai.provider", event.target.value);
+                          setApiKeyDraft("");
+                          setApiKeySaveStatus("idle");
+                          setApiKeySaveError(undefined);
+                        }}
+                        disabled={!isAdmin || !currentEditable["ai.provider"]}
+                        className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        data-testid="settings-ai-provider-select"
                       >
-                        {apiKeySaveStatus === "saving" ? ai.saving : ai.save}
-                      </button>
-                      {apiKeySaveStatus === "saved" && (
+                        {providers.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.display_name}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="inline-flex items-center gap-1 text-xs text-txt-muted">
+                        <span>{ai.baseUrl}</span>
                         <span
-                          className="text-xs text-success"
-                          data-testid="settings-ai-save-status-ai.api_key"
+                          className="max-w-64 truncate rounded-full border border-hairline px-2 py-0.5 font-mono text-txt"
+                          data-testid="settings-ai-base-url"
                         >
-                          {ai.saved}
+                          {selectedProviderEntry?.base_url || "-"}
                         </span>
-                      )}
-                      {apiKeySaveStatus === "error" && apiKeySaveError && (
-                        <span
-                          role="alert"
-                          className="text-xs text-danger"
-                          data-testid="settings-ai-save-error-ai.api_key"
-                        >
-                          {apiKeySaveError}
-                        </span>
-                      )}
+                      </span>
                     </div>
-                  ) : (
-                    <span
-                      className="text-xs text-txt-muted"
-                      data-testid="settings-ai-readonly-ai.api_key"
-                    >
-                      {ai.readOnly}
-                    </span>
-                  )}
-                </div>
+                  }
+                  saveStatus={saveStates["ai.provider"] ?? "idle"}
+                  saveError={saveErrors["ai.provider"]}
+                  onDraft={(v) => handleDraft("ai.provider", v)}
+                  onSave={() => void handleSave("ai.provider")}
+                  isAdmin={isAdmin}
+                  t={ai}
+                />
+
+                {providerRequiresKey && (
+                  <div
+                    key="ai.api_key"
+                    data-testid="settings-ai-row-ai.api_key"
+                    className="p-3"
+                  >
+                    <div className="flex items-baseline gap-2 mb-1">
+                      <span className="text-sm font-medium text-txt">
+                        {ai.apiKeyLabel}
+                      </span>
+                      <Badge
+                        variant="secondary"
+                        className="text-xs"
+                        data-testid="settings-ai-api-key-status"
+                      >
+                        {apiKeyStatusLabel(
+                          apiKeyRow?.value,
+                          apiKeyRow?.source,
+                          ai,
+                        )}
+                      </Badge>
+                    </div>
+                    {!apiKeyConfigured && (
+                      <>
+                        <div className="mb-2">
+                          <input
+                            type="password"
+                            value={apiKeyDraft}
+                            onChange={(event) =>
+                              setApiKeyDraft(event.target.value)
+                            }
+                            disabled={!isAdmin || !currentEditableApiKey}
+                            placeholder={ai.apiKeyPlaceholder}
+                            className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                            data-testid="settings-ai-api-key-input"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          {isAdmin && currentEditableApiKey ? (
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={apiKeySaveStatus === "saving"}
+                                onClick={handleSaveApiKey}
+                                className="inline-flex min-h-9 items-center rounded-md border border-hairline px-3 text-xs font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
+                                data-testid="settings-ai-save-ai.api_key"
+                              >
+                                {apiKeySaveStatus === "saving"
+                                  ? ai.saving
+                                  : ai.save}
+                              </button>
+                              {apiKeySaveStatus === "saved" && (
+                                <span
+                                  className="text-xs text-success"
+                                  data-testid="settings-ai-save-status-ai.api_key"
+                                >
+                                  {ai.saved}
+                                </span>
+                              )}
+                              {apiKeySaveStatus === "error" &&
+                                apiKeySaveError && (
+                                  <span
+                                    role="alert"
+                                    className="text-xs text-danger"
+                                    data-testid="settings-ai-save-error-ai.api_key"
+                                  >
+                                    {apiKeySaveError}
+                                  </span>
+                                )}
+                            </div>
+                          ) : (
+                            <span
+                              className="text-xs text-txt-muted"
+                              data-testid="settings-ai-readonly-ai.api_key"
+                            >
+                              {ai.readOnly}
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
+            </div>
 
             <AiFieldRow
               fieldKey="ai.model"
@@ -963,28 +1022,6 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               saveError={saveErrors["ai.pricing_table"]}
               onDraft={(v) => handleDraft("ai.pricing_table", v)}
               onSave={() => void handleSave("ai.pricing_table")}
-              isAdmin={isAdmin}
-              t={ai}
-            />
-
-            <AiFieldRow
-              fieldKey="ai.base_url"
-              label={ai.baseUrl}
-              value={providerEntry?.base_url ?? ""}
-              source={currentSource["ai.provider"]}
-              editable={false}
-              control={
-                <span
-                  className="text-sm text-txt-muted font-mono"
-                  data-testid="settings-ai-base-url"
-                >
-                  {providerEntry?.base_url ?? "-"}
-                </span>
-              }
-              saveStatus="idle"
-              saveError={undefined}
-              onDraft={() => {}}
-              onSave={() => {}}
               isAdmin={isAdmin}
               t={ai}
             />

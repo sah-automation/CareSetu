@@ -9,6 +9,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -482,7 +483,7 @@ describe("AiSettingsSection (#924)", () => {
     });
   });
 
-  // --- API key field: masked status states (#925) ---
+  // --- API key field: masked status states (#925, reskinned in #930) ---
 
   function apiKeySettings(
     apiKeyValue: string | null,
@@ -516,16 +517,13 @@ describe("AiSettingsSection (#924)", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-api-key-input"),
-      ).toBeInTheDocument();
+        screen.getByTestId("settings-ai-api-key-status"),
+      ).toHaveTextContent(en.keyFromEnv);
     });
-    expect(screen.getByTestId("settings-ai-api-key-input")).toHaveAttribute(
-      "type",
-      "password",
-    );
-    expect(screen.getByTestId("settings-ai-api-key-status")).toHaveTextContent(
-      en.keyFromEnv,
-    );
+    // Env-configured (#930): the masked status stands alone - no password
+    // input and no save control while a key exists.
+    expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+    expect(screen.queryByTestId("settings-ai-save-ai.api_key")).toBeNull();
   });
 
   it("renders the API key field with the dashboard status label and date", async () => {
@@ -539,13 +537,12 @@ describe("AiSettingsSection (#924)", () => {
     );
 
     await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-api-key-input"),
-      ).toBeInTheDocument();
+      const status = screen.getByTestId("settings-ai-api-key-status");
+      expect(status).toHaveTextContent(en.keyFromDashboard);
+      expect(status).toHaveTextContent(/set/);
     });
-    const status = screen.getByTestId("settings-ai-api-key-status");
-    expect(status).toHaveTextContent(en.keyFromDashboard);
-    expect(status).toHaveTextContent(/set/);
+    // Dashboard-configured (#930): masked status only, no password input.
+    expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
   });
 
   it("renders the API key field with the missing status label", async () => {
@@ -577,7 +574,40 @@ describe("AiSettingsSection (#924)", () => {
         screen.getByTestId("settings-ai-provider-select"),
       ).toBeInTheDocument();
     });
+    // No key required: neither the key row nor its input renders (#930).
+    expect(screen.queryByTestId("settings-ai-row-ai.api_key")).toBeNull();
     expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+  });
+
+  it("groups the provider select, base-URL pill, and key row in one block", async () => {
+    await renderSection(
+      adminAuth(),
+      providers,
+      apiKeySettings("missing", "default"),
+    );
+
+    const block = await screen.findByTestId("settings-ai-provider-block");
+    expect(
+      within(block).getByTestId("settings-ai-provider-select"),
+    ).toBeInTheDocument();
+    // The auto-derived base URL renders as a read-only mono pill beside the
+    // provider select.
+    expect(within(block).getByTestId("settings-ai-base-url")).toHaveTextContent(
+      "https://api.openai.com/v1",
+    );
+    // The provider row keeps its source badge in the label position.
+    expect(
+      within(block).getByTestId("settings-ai-source-ai.provider"),
+    ).toHaveTextContent(en.sources.environment);
+    // The key row sits beneath in the same block; the missing state shows
+    // the password input.
+    const keyRow = within(block).getByTestId("settings-ai-row-ai.api_key");
+    expect(
+      within(keyRow).getByTestId("settings-ai-api-key-status"),
+    ).toHaveTextContent(en.keyMissing);
+    expect(
+      within(keyRow).getByTestId("settings-ai-api-key-input"),
+    ).toHaveAttribute("type", "password");
   });
 
   it("saves an API key end to end and flips status to dashboard", async () => {
@@ -617,18 +647,16 @@ describe("AiSettingsSection (#924)", () => {
         "sk-live-dashboard-key",
       );
     });
-    await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-save-status-ai.api_key"),
-      ).toHaveTextContent(en.saved);
-    });
-    // Plaintext never renders anywhere.
-    expect(screen.queryByText("sk-live-dashboard-key")).toBeNull();
+    // After the reload the key is dashboard-configured: the masked status
+    // stands alone and the password input is gone (#930).
     await waitFor(() => {
       expect(
         screen.getByTestId("settings-ai-api-key-status"),
       ).toHaveTextContent(en.keyFromDashboard);
     });
+    expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+    // Plaintext never renders anywhere.
+    expect(screen.queryByText("sk-live-dashboard-key")).toBeNull();
   });
 
   it("shows the server's rejection message for a failed API key write", async () => {
@@ -720,9 +748,13 @@ describe("AiSettingsSection (#924)", () => {
     expect(
       screen.getByTestId("settings-ai-band-pricing-count"),
     ).toHaveTextContent(en.bandPricingEntries(2));
-    expect(screen.getByTestId("settings-ai-band-refresh")).toHaveTextContent(
-      en.bandRefreshed,
-    );
+    // The refreshed stamp lands in an effect after the band commits - wait
+    // for it instead of racing it.
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-ai-band-refresh")).toHaveTextContent(
+        en.bandRefreshed,
+      );
+    });
   });
 
   it("derives the status band without new network requests", async () => {
@@ -764,7 +796,7 @@ describe("AiSettingsSection (#924)", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-api-key-input"),
+        screen.getByTestId("settings-ai-api-key-status"),
       ).toBeInTheDocument();
     });
 
@@ -775,9 +807,8 @@ describe("AiSettingsSection (#924)", () => {
         screen.getByTestId("settings-ai-api-key-status"),
       ).toHaveTextContent(hi.keyFromEnv);
     });
-    expect(screen.getByTestId("settings-ai-api-key-input")).toHaveAttribute(
-      "type",
-      "password",
-    );
+    // Env-configured: the masked status stands alone in Hindi too, with no
+    // password input (#930).
+    expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
   });
 });
