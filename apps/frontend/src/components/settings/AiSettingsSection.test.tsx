@@ -219,6 +219,11 @@ describe("AiSettingsSection (#924)", () => {
     const providerSelect = screen.getByTestId(
       "settings-ai-provider-select",
     ) as HTMLSelectElement;
+    // Pre-change: the mock provider has no ASR models at all.
+    expect(
+      (screen.getByTestId("settings-ai-asr-select") as HTMLSelectElement)
+        .options.length,
+    ).toBe(0);
     fireEvent.change(providerSelect, {
       target: { value: "openai_compatible" },
     });

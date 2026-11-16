@@ -823,7 +823,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                           handleDraft("ai.model", event.target.value)
                         }
                         disabled={!isAdmin || !currentEditable["ai.model"]}
-                        className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
                         data-testid="settings-ai-model-select"
                       >
                         {chatModels.map((m) => (
@@ -844,7 +844,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                           }
                           placeholder={ai.customModel}
                           disabled={!isAdmin || !currentEditable["ai.model"]}
-                          className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
+                          className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
                           data-testid="settings-ai-model-custom"
                         />
                       )}
@@ -880,7 +880,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                         handleDraft("ai.asr_model", event.target.value)
                       }
                       disabled={!isAdmin || !currentEditable["ai.asr_model"]}
-                      className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                      className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
                       data-testid="settings-ai-asr-select"
                     >
                       {asrModels.map((m) => (
@@ -914,7 +914,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                       disabled={
                         !isAdmin || !currentEditable["ai.fallback_provider"]
                       }
-                      className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                      className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
                       data-testid="settings-ai-fallback-provider-select"
                     >
                       {providers.map((p) => (
@@ -949,7 +949,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                         disabled={
                           !isAdmin || !currentEditable["ai.fallback_model"]
                         }
-                        className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
                         data-testid="settings-ai-fallback-model-select"
                       >
                         {fallbackChatModels.map((m) => (
@@ -975,7 +975,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                           disabled={
                             !isAdmin || !currentEditable["ai.fallback_model"]
                           }
-                          className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
+                          className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
                           data-testid="settings-ai-fallback-model-custom"
                         />
                       )}
