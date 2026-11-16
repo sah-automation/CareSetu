@@ -2789,6 +2789,8 @@ const en = {
       pricingHint:
         "Prices are stored as paise per token. The preview shows USD per 1M tokens at ₹88.5/USD.",
       apiKeyStatus: "API key status",
+      apiKeyLabel: "API key",
+      apiKeyPlaceholder: "Enter API key …",
       keyConfigured: "Configured",
       keyMissing: "Not configured",
       keyFromEnv: "From environment",
@@ -5278,6 +5280,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
         pricingHint:
           "क़ीमतें प्रति टोकल पैसे में संग्रहीत की जाती हैं। पूर्वावलोकन ₹88.5/USD पर USD प्रति 1M टोकन दिखाता है।",
         apiKeyStatus: "API कुंजी स्थिति",
+        apiKeyLabel: "एपीआई कुंजी",
+        apiKeyPlaceholder: "एपीआई कुंजी दर्ज करें …",
         keyConfigured: "कॉन्फ़िगर किया गया",
         keyMissing: "कॉन्फ़िगर नहीं",
         keyFromEnv: "पर्यावरण से",

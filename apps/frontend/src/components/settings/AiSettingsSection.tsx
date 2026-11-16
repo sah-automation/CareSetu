@@ -73,6 +73,36 @@ function formatTimestamp(iso: string): string {
   }
 }
 
+function dashboardDate(value: string): string {
+  const match = value.match(/set (.+)$/);
+  if (!match) return "";
+  try {
+    return new Date(match[1]).toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return match[1];
+  }
+}
+
+function apiKeyStatusLabel(
+  value: unknown,
+  source: SettingSource | undefined,
+  t: AiStrings,
+): string {
+  const v = value === null || value === undefined ? "" : String(value);
+  if (v.startsWith("configured from environment")) return t.keyFromEnv;
+  if (v.startsWith("configured from dashboard")) {
+    const date = dashboardDate(v);
+    return date ? `${t.keyFromDashboard}, set ${date}` : t.keyFromDashboard;
+  }
+  return t.keyMissing;
+}
+
 function usdPer1M(paisePerToken: number): string {
   const usd = (paisePerToken * 1_000_000) / PAISE_PER_USD;
   return usd.toLocaleString(undefined, {
@@ -299,8 +329,20 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
       string
     >,
   );
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [apiKeySaveStatus, setApiKeySaveStatus] = useState<SaveStatus>("idle");
+  const [apiKeySaveError, setApiKeySaveError] = useState<string | undefined>(
+    undefined,
+  );
 
+  const apiKeyRow = settings.find((s) => s.key === "ai.api_key");
+  const currentEditableApiKey = apiKeyRow?.editable ?? false;
   const providerEntry = providerById(providers, drafts["ai.provider"]);
+  const apiKeyProviderEntry = providerById(providers, current["ai.provider"]);
+  const providerRequiresKey = Boolean(
+    apiKeyProviderEntry?.api_key_env &&
+      String(apiKeyProviderEntry.api_key_env).trim() !== "",
+  );
   const fallbackProviderEntry = providerById(
     providers,
     drafts["ai.fallback_provider"],
@@ -397,6 +439,31 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
     }
   }
 
+  async function handleSaveApiKey() {
+    setApiKeySaveError(undefined);
+    const value = apiKeyDraft;
+    if (value === "") {
+      setApiKeySaveStatus("error");
+      setApiKeySaveError(ai.validationRequired);
+      return;
+    }
+
+    setApiKeySaveStatus("saving");
+    try {
+      await writeSetting("ai.api_key", value as SettingWriteValue);
+      setApiKeySaveStatus("saved");
+      setApiKeyDraft("");
+      settingsRead.reload();
+    } catch (error) {
+      setApiKeySaveStatus("error");
+      setApiKeySaveError(
+        error instanceof ApiError
+          ? error.message || ai.saveErrorExpected
+          : ai.saveError,
+      );
+    }
+  }
+
   const pricingRows = parsePricingTable(drafts["ai.pricing_table"]);
 
   return (
@@ -477,9 +544,12 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               control={
                 <select
                   value={drafts["ai.provider"]}
-                  onChange={(event) =>
-                    handleDraft("ai.provider", event.target.value)
-                  }
+                  onChange={(event) => {
+                    handleDraft("ai.provider", event.target.value);
+                    setApiKeyDraft("");
+                    setApiKeySaveStatus("idle");
+                    setApiKeySaveError(undefined);
+                  }}
                   disabled={!isAdmin || !currentEditable["ai.provider"]}
                   className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
                   data-testid="settings-ai-provider-select"
@@ -498,6 +568,77 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               isAdmin={isAdmin}
               t={ai}
             />
+
+            {providerRequiresKey && (
+              <div
+                key="ai.api_key"
+                data-testid="settings-ai-row-ai.api_key"
+                className="mt-4 rounded-lg border border-hairline bg-surface p-3"
+              >
+                <div className="flex items-baseline gap-2 mb-1">
+                  <span className="text-sm font-medium text-txt">
+                    {ai.apiKeyLabel}
+                  </span>
+                  <Badge
+                    variant="secondary"
+                    className="text-xs"
+                    data-testid="settings-ai-api-key-status"
+                  >
+                    {apiKeyStatusLabel(apiKeyRow?.value, apiKeyRow?.source, ai)}
+                  </Badge>
+                </div>
+                <div className="mb-2">
+                  <input
+                    type="password"
+                    value={apiKeyDraft}
+                    onChange={(event) => setApiKeyDraft(event.target.value)}
+                    disabled={!isAdmin || !currentEditableApiKey}
+                    placeholder={ai.apiKeyPlaceholder}
+                    className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                    data-testid="settings-ai-api-key-input"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  {isAdmin && currentEditableApiKey ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={apiKeySaveStatus === "saving"}
+                        onClick={handleSaveApiKey}
+                        className="inline-flex min-h-9 items-center rounded-md border border-hairline px-3 text-xs font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
+                        data-testid="settings-ai-save-ai.api_key"
+                      >
+                        {apiKeySaveStatus === "saving" ? ai.saving : ai.save}
+                      </button>
+                      {apiKeySaveStatus === "saved" && (
+                        <span
+                          className="text-xs text-success"
+                          data-testid="settings-ai-save-status-ai.api_key"
+                        >
+                          {ai.saved}
+                        </span>
+                      )}
+                      {apiKeySaveStatus === "error" && apiKeySaveError && (
+                        <span
+                          role="alert"
+                          className="text-xs text-danger"
+                          data-testid="settings-ai-save-error-ai.api_key"
+                        >
+                          {apiKeySaveError}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <span
+                      className="text-xs text-txt-muted"
+                      data-testid="settings-ai-readonly-ai.api_key"
+                    >
+                      {ai.readOnly}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
 
             <AiFieldRow
               fieldKey="ai.model"

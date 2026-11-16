@@ -24,6 +24,7 @@ import {
   type AiProviderCatalogEntry,
   type EffectiveSetting,
   type SettingHistoryEntry,
+  type SettingSource,
 } from "@/lib/operator/settings";
 
 import { AiSettingsSection } from "@/components/settings/AiSettingsSection";
@@ -479,5 +480,233 @@ describe("AiSettingsSection (#924)", () => {
         screen.getByTestId("settings-ai-save-error-ai.model"),
       ).toHaveTextContent(en.validationCustomPrice);
     });
+  });
+
+  // --- API key field: masked status states (#925) ---
+
+  function apiKeySettings(
+    apiKeyValue: string | null,
+    source: SettingSource,
+    provider = "openai_compatible",
+  ): EffectiveSetting[] {
+    return [
+      {
+        key: "ai.provider",
+        value: provider,
+        source: "environment",
+        editable: true,
+        restart_required: false,
+      },
+      {
+        key: "ai.api_key",
+        value: apiKeyValue,
+        source,
+        editable: true,
+        restart_required: false,
+      },
+    ];
+  }
+
+  it("renders the API key field with the env status label", async () => {
+    await renderSection(
+      adminAuth(),
+      providers,
+      apiKeySettings("configured from environment", "environment"),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-input"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("settings-ai-api-key-input")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    expect(screen.getByTestId("settings-ai-api-key-status")).toHaveTextContent(
+      en.keyFromEnv,
+    );
+  });
+
+  it("renders the API key field with the dashboard status label and date", async () => {
+    await renderSection(
+      adminAuth(),
+      providers,
+      apiKeySettings(
+        "configured from dashboard, set 2026-03-04T10:00:00Z",
+        "database",
+      ),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-input"),
+      ).toBeInTheDocument();
+    });
+    const status = screen.getByTestId("settings-ai-api-key-status");
+    expect(status).toHaveTextContent(en.keyFromDashboard);
+    expect(status).toHaveTextContent(/set/);
+  });
+
+  it("renders the API key field with the missing status label", async () => {
+    await renderSection(
+      adminAuth(),
+      providers,
+      apiKeySettings("missing", "default"),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-input"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("settings-ai-api-key-status")).toHaveTextContent(
+      en.keyMissing,
+    );
+  });
+
+  it("hides the API key field for the mock provider (no key required)", async () => {
+    await renderSection(
+      adminAuth(),
+      providers,
+      apiKeySettings("missing", "default", "mock"),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-provider-select"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+  });
+
+  it("saves an API key end to end and flips status to dashboard", async () => {
+    mockWriteSetting.mockResolvedValue({
+      setting_key: "ai.api_key",
+      value: "sk-live-dashboard-key",
+      version: 1,
+    });
+
+    await renderSection(
+      adminAuth(),
+      providers,
+      apiKeySettings("missing", "default"),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-input"),
+      ).toBeInTheDocument();
+    });
+    // The reload after a successful write resolves to the dashboard state.
+    mockFetchEffectiveSettings.mockResolvedValue(
+      apiKeySettings(
+        "configured from dashboard, set 2026-03-04T10:00:00Z",
+        "database",
+      ),
+    );
+
+    fireEvent.change(screen.getByTestId("settings-ai-api-key-input"), {
+      target: { value: "sk-live-dashboard-key" },
+    });
+    screen.getByTestId("settings-ai-save-ai.api_key").click();
+
+    await waitFor(() => {
+      expect(mockWriteSetting).toHaveBeenCalledWith(
+        "ai.api_key",
+        "sk-live-dashboard-key",
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-status-ai.api_key"),
+      ).toHaveTextContent(en.saved);
+    });
+    // Plaintext never renders anywhere.
+    expect(screen.queryByText("sk-live-dashboard-key")).toBeNull();
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-status"),
+      ).toHaveTextContent(en.keyFromDashboard);
+    });
+  });
+
+  it("shows the server's rejection message for a failed API key write", async () => {
+    mockWriteSetting.mockRejectedValue(
+      new ApiError({
+        code: "INVALID_SETTING_WRITE",
+        message: "non-mock provider requires a resolvable API key",
+        trace_id: "trace-925",
+        details: {},
+      }),
+    );
+
+    await renderSection(
+      adminAuth(),
+      providers,
+      apiKeySettings("missing", "default"),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-input"),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("settings-ai-api-key-input"), {
+      target: { value: "sk-key" },
+    });
+    screen.getByTestId("settings-ai-save-ai.api_key").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-error-ai.api_key"),
+      ).toHaveTextContent("non-mock provider requires a resolvable API key");
+    });
+  });
+
+  it("renders the API key field in Hindi", async () => {
+    const hi = STRINGS.hi.operatorSettings.ai;
+    mockFetchEffectiveSettings.mockResolvedValue(
+      apiKeySettings("configured from environment", "environment"),
+    );
+
+    function LangFlipHost() {
+      const { lang, setLang } = useLang();
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() => setLang(lang === "en" ? "hi" : "en")}
+          >
+            flip-lang
+          </button>
+          <AiSettingsSection
+            t={STRINGS[lang].operatorSettings}
+            isAdmin={true}
+          />
+        </>
+      );
+    }
+
+    render(<LangFlipHost />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-input"),
+      ).toBeInTheDocument();
+    });
+
+    screen.getByText("flip-lang").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-api-key-status"),
+      ).toHaveTextContent(hi.keyFromEnv);
+    });
+    expect(screen.getByTestId("settings-ai-api-key-input")).toHaveAttribute(
+      "type",
+      "password",
+    );
   });
 });
