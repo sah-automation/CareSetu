@@ -1027,70 +1027,75 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               </div>
             </div>
 
-            <AiFieldRow
-              fieldKey="ai.pricing_table"
-              label={ai.pricingTable}
-              value={drafts["ai.pricing_table"]}
-              source={currentSource["ai.pricing_table"]}
-              editable={currentEditable["ai.pricing_table"]}
-              control={
-                // #932: prettified, not rebuilt - the raw textarea stays the
-                // editor (mono typeface, comfortable width/height) and the
-                // paise hint plus USD-per-1M preview render as tidy helper
-                // chips beneath it. Validation logic is untouched.
-                <div className="flex flex-col gap-1.5">
-                  <textarea
-                    value={drafts["ai.pricing_table"]}
-                    onChange={(event) =>
-                      handleDraft("ai.pricing_table", event.target.value)
-                    }
-                    disabled={!isAdmin || !currentEditable["ai.pricing_table"]}
-                    rows={6}
-                    className="w-full max-w-md rounded-md border border-hairline px-2 py-1.5 text-sm leading-relaxed text-txt bg-input font-mono"
-                    placeholder={ai.pricingPlaceholder}
-                    id="ai.pricing_table"
-                    data-testid="settings-ai-pricing-table"
-                  />
-                  <Badge
-                    variant="outline"
-                    className="w-fit border-hairline font-medium text-xs text-txt-muted"
-                    data-testid="settings-ai-pricing-hint"
-                  >
-                    {ai.pricingHint}
-                  </Badge>
-                  {pricingRows.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {pricingRows.map((row, i) => {
-                        const chipClass =
-                          "max-w-full font-mono font-medium text-xs";
-                        return (
-                          <Badge
-                            key={i}
-                            variant={row.valid ? "secondary" : "outline"}
-                            className={
-                              row.valid
-                                ? chipClass
-                                : `${chipClass} border-danger-border bg-danger-soft text-danger`
-                            }
-                            data-testid={`settings-ai-pricing-preview-${row.model}`}
-                          >
-                            {row.valid
-                              ? `${row.model}: ${ai.usdInput} $${row.usdIn} · ${ai.usdOutput} $${row.usdOut} ${ai.usdPer1M}`
-                              : `${row.model}: ${row.error}`}
-                          </Badge>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              }
-              saveStatus={saveStates["ai.pricing_table"] ?? "idle"}
-              saveError={saveErrors["ai.pricing_table"]}
-              onDraft={(v) => handleDraft("ai.pricing_table", v)}
-              onSave={() => void handleSave("ai.pricing_table")}
-              isAdmin={isAdmin}
-              t={ai}
-            />
+            <div data-testid="settings-ai-pricing-block" className={CARD_FRAME}>
+              <AiFieldRow
+                variant="block"
+                fieldKey="ai.pricing_table"
+                label={ai.pricingTable}
+                value={drafts["ai.pricing_table"]}
+                source={currentSource["ai.pricing_table"]}
+                editable={currentEditable["ai.pricing_table"]}
+                control={
+                  // #932: prettified, not rebuilt - the raw textarea stays the
+                  // editor (mono typeface, comfortable width/height) and the
+                  // paise hint plus USD-per-1M preview render as tidy helper
+                  // chips beneath it. Validation logic is untouched.
+                  <div className="flex flex-col gap-1.5">
+                    <textarea
+                      value={drafts["ai.pricing_table"]}
+                      onChange={(event) =>
+                        handleDraft("ai.pricing_table", event.target.value)
+                      }
+                      disabled={
+                        !isAdmin || !currentEditable["ai.pricing_table"]
+                      }
+                      rows={6}
+                      className="w-full max-w-md rounded-md border border-hairline px-2 py-1.5 text-sm leading-relaxed text-txt bg-input font-mono"
+                      placeholder={ai.pricingPlaceholder}
+                      id="ai.pricing_table"
+                      data-testid="settings-ai-pricing-table"
+                    />
+                    <Badge
+                      variant="outline"
+                      className="w-fit border-hairline font-medium text-xs text-txt-muted"
+                      data-testid="settings-ai-pricing-hint"
+                    >
+                      {ai.pricingHint}
+                    </Badge>
+                    {pricingRows.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {pricingRows.map((row, i) => {
+                          const chipClass =
+                            "max-w-full font-mono font-medium text-xs";
+                          return (
+                            <Badge
+                              key={i}
+                              variant={row.valid ? "secondary" : "outline"}
+                              className={
+                                row.valid
+                                  ? chipClass
+                                  : `${chipClass} border-danger-border bg-danger-soft text-danger`
+                              }
+                              data-testid={`settings-ai-pricing-preview-${row.model}`}
+                            >
+                              {row.valid
+                                ? `${row.model}: ${ai.usdInput} $${row.usdIn} · ${ai.usdOutput} $${row.usdOut} ${ai.usdPer1M}`
+                                : `${row.model}: ${row.error}`}
+                            </Badge>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                }
+                saveStatus={saveStates["ai.pricing_table"] ?? "idle"}
+                saveError={saveErrors["ai.pricing_table"]}
+                onDraft={(v) => handleDraft("ai.pricing_table", v)}
+                onSave={() => void handleSave("ai.pricing_table")}
+                isAdmin={isAdmin}
+                t={ai}
+              />
+            </div>
           </>
         )}
       // #933: the history owns its own loading, error and empty states.

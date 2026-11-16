@@ -407,6 +407,25 @@ describe("AiSettingsSection (#924)", () => {
     ).toHaveTextContent("bad-line: expected 'model:price_in:price_out'");
   });
 
+  // #935: US2 - pricing is a distinct grouped block like provider/models/history.
+  it("#935: wraps the pricing row in a settings-ai-pricing-block block", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-pricing-block"),
+      ).toBeInTheDocument();
+    });
+
+    const block = screen.getByTestId("settings-ai-pricing-block");
+    expect(
+      within(block).getByTestId("settings-ai-pricing-table"),
+    ).toBeInTheDocument();
+    expect(
+      within(block).getByTestId("settings-ai-pricing-hint"),
+    ).toBeInTheDocument();
+  });
+
   it("#932: shows the missing-value validation inline for an empty pricing table", async () => {
     await renderSection();
 
