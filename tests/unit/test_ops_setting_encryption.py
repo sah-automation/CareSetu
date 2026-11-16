@@ -185,7 +185,10 @@ def test_service_masked_status_non_encrypted_key_returns_empty() -> None:
 def test_service_disabled_when_no_encryption_key() -> None:
     service = SettingEncryptionService("")
     assert service._enabled is False
-    # No-op when disabled
-    assert service.encrypt_if_needed("ai.api_key", "test-plaintext-value") == "test-plaintext-value"
+    # Fail closed: a non-empty encrypted value cannot be stored plaintext.
+    with pytest.raises(SettingEncryptionError):
+        service.encrypt_if_needed("ai.api_key", "test-plaintext-value")
+    # Empty values are still passed through (nothing to protect).
+    assert service.encrypt_if_needed("ai.api_key", "") == ""
     assert service.redact_value("ai.api_key", "v1:abc") == "v1:abc"
     assert service.get_masked_status("ai.api_key", "database", db_value="v1:abc") == ""

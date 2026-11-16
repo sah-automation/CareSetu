@@ -35,8 +35,10 @@ import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 type AiStrings = OperatorSettingsStrings["ai"];
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 
-// ~₹88.5/USD (#917): USD per 1M tokens = paise-per-token * 1e6 / 8850.
-const PAISE_PER_USD = 8850;
+// ~₹88.5/USD (#917): FX rate for the USD-per-1M price preview, from config.
+// USD per 1M tokens = paise-per-token * 1e6 / PAISE_PER_USD.
+const PAISE_PER_USD =
+  Number(process.env.NEXT_PUBLIC_PAISE_PER_USD ?? "8850") || 8850;
 
 const AI_FIELD_KEYS = [
   "ai.provider",

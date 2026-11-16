@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -12,6 +13,8 @@ from app.gateway.principal import Principal
 from app.gateway.rbac import require_admin, require_operator
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError, InvalidSettingWriteError
 from modules.ops.facade import OpsFacade
+
+logger = logging.getLogger(__name__)
 
 
 class EffectiveSettingResponse(BaseModel):
@@ -391,11 +394,12 @@ async def read_ai_provider_catalog(
     try:
         catalog = facade.get_ai_provider_catalog()
     except Exception as exc:
+        logger.exception("failed to read AI provider catalog")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
-                "code": "INVALID_AI_PROVIDER_CATALOG",
-                "message": str(exc),
+                "code": "AI_PROVIDER_CATALOG_READ_FAILED",
+                "message": "Unable to load the AI provider catalog.",
                 "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
             },
         ) from exc

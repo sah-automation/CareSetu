@@ -412,8 +412,13 @@ class OpsFacade:
         except ValueError as exc:
             raise InvalidSettingWriteError(setting_key, str(exc)) from exc
 
-        # Encrypt value if this is an encrypted setting key
-        stored_value = self._encryption_service.encrypt_if_needed(setting_key, value)
+        # Encrypt value if this is an encrypted setting key. A missing master
+        # key means the value cannot be stored - refuse the write (fail closed)
+        # through the same write-validation contract.
+        try:
+            stored_value = self._encryption_service.encrypt_if_needed(setting_key, value)
+        except ValueError as exc:
+            raise InvalidSettingWriteError(setting_key, str(exc)) from exc
 
         async with self._engine.begin() as connection:
             # Read existing setting for update (lock row)
@@ -511,7 +516,14 @@ class OpsFacade:
         # Invalidate cache so the next effective read resolves the new value
         self._cache.invalidate()
 
-        return {"setting_key": setting_key, "value": value, "version": new_version}
+        # Never echo plaintext key material in the write response. Encrypted
+        # settings are confirmed with a masked value only; the readable masked
+        # status comes from get_effective_settings (issue #927 #22).
+        if self._encryption_service.is_encrypted_key(setting_key):
+            response_value: Any = "[REDACTED]"
+        else:
+            response_value = value
+        return {"setting_key": setting_key, "value": response_value, "version": new_version}
 
     def _provider_requires_api_key(self, provider_id: str) -> bool:
         """Return True if a non-mock provider needs a resolvable API key.

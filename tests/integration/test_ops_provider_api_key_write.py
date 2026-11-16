@@ -82,7 +82,9 @@ class TestProviderApiKeyWrite:
             setting_key="ai.api_key", value="sk-live-dashboard-key-123", updated_by=7
         )
         assert result["setting_key"] == "ai.api_key"
-        assert result["value"] == "sk-live-dashboard-key-123"
+        # The write response must never echo plaintext key material.
+        assert result["value"] == "[REDACTED]"
+        assert "sk-live-dashboard-key-123" not in str(result["value"])
         assert result["version"] == 1
 
         stored = await _read_db_value(engine, "ai.api_key")
@@ -206,3 +208,35 @@ class TestProviderApiKeyWrite:
         assert payload["old_value"] is None
         assert payload["new_value"] == "[REDACTED]"
         assert "sk-secret-key" not in str(payload)
+
+    async def test_write_encrypted_key_without_master_key_is_rejected(
+        self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fail closed: no OPS_SETTINGS_ENCRYPTION_KEY means no non-empty
+        # encrypted value may be stored plaintext.
+        monkeypatch.delenv("OPS_SETTINGS_ENCRYPTION_KEY", raising=False)
+        monkeypatch.delenv("AI_API_KEY", raising=False)
+        monkeypatch.delenv("AI_PROVIDER", raising=False)
+        facade = OpsFacade(engine=engine, settings=get_settings())
+
+        await facade.write_setting(
+            setting_key="ai.provider",
+            value="openai_compatible",
+            updated_by=7,
+        )
+        with pytest.raises(InvalidSettingWriteError):
+            await facade.write_setting(setting_key="ai.api_key", value="sk-live-key", updated_by=7)
+
+        # Nothing was persisted for the key.
+        assert await _read_db_value(engine, "ai.api_key") is None
+
+    async def test_write_response_masks_fallback_api_key(
+        self, facade: OpsFacade, engine: AsyncEngine
+    ) -> None:
+        result = await facade.write_setting(
+            setting_key="ai.fallback_api_key", value="sk-fallback-live-key", updated_by=7
+        )
+        assert result["value"] == "[REDACTED]"
+        assert "sk-fallback-live-key" not in str(result["value"])
+        stored = await _read_db_value(engine, "ai.fallback_api_key")
+        assert stored is not None and is_encrypted_value(stored) is True

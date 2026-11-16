@@ -224,7 +224,9 @@ DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
 # provider and tier. The default prices the free mock at an explicit 0 so it is
 # a KNOWN free model (never flagged); a model absent from the table is UNKNOWN,
 # so its 0 cost is logged (visible, not hidden) until its rate is configured.
-DEFAULT_AI_PRICING_TABLE = "mock-model:0:0"
+DEFAULT_AI_PRICING_TABLE = (
+    "mock-model:0:0,openai/gpt-oss-120b:0.0013275:0.00531,gemini-3.6-flash:0.013275:0.066375"
+)
 DEFAULT_AI_PROVIDER_CATALOG_ENV = ""
 DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""

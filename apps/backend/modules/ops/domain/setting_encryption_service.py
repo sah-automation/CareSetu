@@ -12,6 +12,7 @@ from typing import Any
 from modules.ops.domain.setting_encryption import (
     encrypt_setting_value,
     is_encrypted_value,
+    SettingEncryptionError,
 )
 from modules.ops.domain.settings import ENCRYPTED_SETTING_KEYS
 
@@ -33,11 +34,17 @@ class SettingEncryptionService:
 
     def encrypt_if_needed(self, setting_key: str, value: Any) -> Any:
         """Encrypt value if the key is in ENCRYPTED_SETTING_KEYS and encryption is enabled."""
-        if not self._enabled or not self.is_encrypted_key(setting_key):
+        if not self.is_encrypted_key(setting_key):
             return value
 
         if value is None or value == "":
             return value
+
+        if not self._enabled:
+            raise SettingEncryptionError(
+                "ops_settings_encryption_key is required to write encrypted setting "
+                f"{setting_key!r}; a non-empty value cannot be stored plaintext"
+            )
 
         # Convert value to string for encryption
         if isinstance(value, (dict, list)):
