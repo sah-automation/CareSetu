@@ -10,7 +10,7 @@
 // Writes go through the settings client's string-value write support
 // (`writeSetting`). Non-admin operators see every control read-only.
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import { EmptyState } from "@/components/layout/EmptyState";
 import { Badge } from "@/components/ui/badge";
@@ -192,6 +192,74 @@ function optionsWithCurrent(options: string[], current: string): string[] {
   return options;
 }
 
+// #929: the static status band at the top of the AI section - one glance at
+// which provider, which models, the auto-derived base URL, how many pricing
+// entries metering has, and when the config was last loaded. Presentation
+// only: every value derives from the effective settings and the provider
+// catalog the section already fetches (no new requests, no live metering).
+// The accent chips reuse the patient/doctor surfaces' chip idiom
+// (bg-accent-soft/text-accent-strong pill) so the pattern lifts into the
+// other settings sections later.
+function AiStatusBand({
+  providerName,
+  model,
+  asrModel,
+  baseUrl,
+  pricingEntries,
+  refreshedAt,
+  t,
+}: {
+  providerName: string;
+  model: string;
+  asrModel: string;
+  baseUrl: string;
+  pricingEntries: number;
+  refreshedAt: string | null;
+  t: AiStrings;
+}) {
+  const chipClassName =
+    "inline-flex items-center rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong";
+  return (
+    <div
+      data-testid="settings-ai-band"
+      className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-hairline bg-surface p-3"
+    >
+      <span className={chipClassName} data-testid="settings-ai-band-provider">
+        {t.provider}: {providerName || "-"}
+      </span>
+      <span className={chipClassName} data-testid="settings-ai-band-model">
+        {t.model}: {model || "-"}
+      </span>
+      <span className={chipClassName} data-testid="settings-ai-band-asr">
+        {t.asrModel}: {asrModel || "-"}
+      </span>
+      <span className="inline-flex items-center gap-1 text-xs text-txt-muted">
+        <span>{t.baseUrl}</span>
+        <span
+          className="max-w-64 truncate rounded-full border border-hairline px-2 py-0.5 font-mono text-txt"
+          data-testid="settings-ai-band-base-url"
+        >
+          {baseUrl || "-"}
+        </span>
+      </span>
+      <span
+        className={chipClassName}
+        data-testid="settings-ai-band-pricing-count"
+      >
+        {t.bandPricingEntries(pricingEntries)}
+      </span>
+      <span
+        className="text-xs text-txt-muted"
+        data-testid="settings-ai-band-refresh"
+      >
+        {refreshedAt
+          ? `${t.bandRefreshed} ${formatTimestamp(refreshedAt)}`
+          : ""}
+      </span>
+    </div>
+  );
+}
+
 function AiFieldRow({
   fieldKey,
   label,
@@ -294,6 +362,20 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
   const settingsRead = usePanelRead(() => fetchEffectiveSettings());
   const catalogRead = usePanelRead(() => fetchAiProviderCatalog());
   const historyRead = usePanelRead(() => fetchSettingHistory());
+
+  // #929: when the band's data last landed (both reads together). A
+  // presentation stamp only - it never drives a fetch.
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
+  useEffect(() => {
+    if (settingsRead.status === "ready" && catalogRead.status === "ready") {
+      setRefreshedAt(new Date().toISOString());
+    }
+  }, [
+    settingsRead.status,
+    settingsRead.data,
+    catalogRead.status,
+    catalogRead.data,
+  ]);
 
   const settings = settingsRead.data ?? [];
   const providers = catalogRead.data ?? [];
@@ -471,6 +553,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
   }
 
   const pricingRows = parsePricingTable(drafts["ai.pricing_table"]);
+  const bandProviderEntry = providerById(providers, current["ai.provider"]);
 
   return (
     <CollapsibleSettingsSection
@@ -534,6 +617,22 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
         catalogRead.status === "ready" &&
         providers.length > 0 && (
           <>
+            <AiStatusBand
+              providerName={
+                bandProviderEntry?.display_name ?? current["ai.provider"]
+              }
+              model={current["ai.model"]}
+              asrModel={current["ai.asr_model"]}
+              baseUrl={bandProviderEntry?.base_url ?? ""}
+              pricingEntries={
+                parsePricingTable(current["ai.pricing_table"]).filter(
+                  (row) => row.valid,
+                ).length
+              }
+              refreshedAt={refreshedAt}
+              t={ai}
+            />
+
             <p
               className="mb-2 text-xs text-txt-muted"
               data-testid="settings-ai-takeaway"

@@ -665,6 +665,77 @@ describe("AiSettingsSection (#924)", () => {
     });
   });
 
+  // --- Status band (#929) ---
+
+  const bandSettings: EffectiveSetting[] = [
+    {
+      key: "ai.provider",
+      value: "openai_compatible",
+      source: "environment",
+      editable: true,
+      restart_required: false,
+    },
+    {
+      key: "ai.model",
+      value: "gpt-oss-120b",
+      source: "environment",
+      editable: true,
+      restart_required: false,
+    },
+    {
+      key: "ai.asr_model",
+      value: "whisper-large-v3-turbo",
+      source: "default",
+      editable: true,
+      restart_required: false,
+    },
+    {
+      key: "ai.pricing_table",
+      value: "gpt-oss-120b:100:200\nwhisper-large-v3-turbo:50:50\nbad-line",
+      source: "environment",
+      editable: true,
+      restart_required: false,
+    },
+  ];
+
+  it("renders the status band from effective settings and the catalog", async () => {
+    await renderSection(adminAuth(), providers, bandSettings);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-ai-band")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("settings-ai-band-provider")).toHaveTextContent(
+      "OpenAI-compatible",
+    );
+    expect(screen.getByTestId("settings-ai-band-model")).toHaveTextContent(
+      "gpt-oss-120b",
+    );
+    expect(screen.getByTestId("settings-ai-band-asr")).toHaveTextContent(
+      "whisper-large-v3-turbo",
+    );
+    expect(screen.getByTestId("settings-ai-band-base-url")).toHaveTextContent(
+      "https://api.openai.com/v1",
+    );
+    // Only the two well-formed pricing lines count; "bad-line" does not.
+    expect(
+      screen.getByTestId("settings-ai-band-pricing-count"),
+    ).toHaveTextContent(en.bandPricingEntries(2));
+    expect(screen.getByTestId("settings-ai-band-refresh")).toHaveTextContent(
+      en.bandRefreshed,
+    );
+  });
+
+  it("derives the status band without new network requests", async () => {
+    await renderSection(adminAuth(), providers, bandSettings);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-ai-band")).toBeInTheDocument();
+    });
+    expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(1);
+    expect(mockFetchAiProviderCatalog).toHaveBeenCalledTimes(1);
+    expect(mockFetchSettingHistory).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the API key field in Hindi", async () => {
     const hi = STRINGS.hi.operatorSettings.ai;
     mockFetchEffectiveSettings.mockResolvedValue(
