@@ -136,6 +136,19 @@ async function expandSection(page: Page, testId: string): Promise<void> {
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
 }
 
+// #939: click the section's one "Save changes" button and wait for the
+// aggregate banner to report the saved state (exact text, so a backend
+// refusal that merely contains the word "saved" can never pass).
+async function saveAndExpectSaved(page: Page): Promise<void> {
+  const saveChanges = page.getByTestId("settings-ai-save-changes");
+  await expect(saveChanges).toBeVisible({ timeout: 30_000 });
+  await saveChanges.click();
+  await expect(page.getByTestId("settings-ai-save-banner")).toHaveText(
+    /^Saved$/,
+    { timeout: 30_000 },
+  );
+}
+
 test("admin switches provider and model, saves, and sees effective values update", async ({
   page,
   request,
@@ -152,6 +165,16 @@ test("admin switches provider and model, saves, and sees effective values update
   const providerSelect = page.getByTestId("settings-ai-provider-select");
   await expect(providerSelect).toBeVisible({ timeout: 60_000 });
 
+  // Re-run robustness (#939): "Save changes" only writes fields whose draft
+  // differs from the effective value, so a database override left by a
+  // previous run would make the target switch a silent no-op. When the
+  // effective provider already matches the target, park it on the mock
+  // provider first so the final save is a real write.
+  if ((await providerSelect.inputValue()) === PROVIDER_OPENAI) {
+    await providerSelect.selectOption(PROVIDER_MOCK);
+    await saveAndExpectSaved(page);
+  }
+
   // Dependent filtering: switching provider re-filters the chat model options.
   await providerSelect.selectOption(PROVIDER_OPENAI);
 
@@ -166,13 +189,7 @@ test("admin switches provider and model, saves, and sees effective values update
 
   // #939: one "Save changes" button writes every changed field; the aggregate
   // banner reports the saved state.
-  const saveChanges = page.getByTestId("settings-ai-save-changes");
-  await expect(saveChanges).toBeVisible({ timeout: 30_000 });
-  await saveChanges.click();
-  await expect(page.getByTestId("settings-ai-save-banner")).toHaveText(
-    /Saved/i,
-    { timeout: 30_000 },
-  );
+  await saveAndExpectSaved(page);
 
   // Persistence: the saved values become the database override, so the
   // effective source badge flips to "Database override" after a reload.
@@ -241,21 +258,24 @@ test("pricing save with USD preview visible; invalid price input shows the rejec
     `settings-ai-pricing-preview-${MODEL_OPENAI}`,
   );
 
+  // Re-run robustness (#939): a pricing database override left by a previous
+  // run would make the target fill a silent no-op save. Park a different
+  // valid value first when the effective pricing table already matches.
+  const targetPricing = `${MODEL_OPENAI}:100:200`;
+  if ((await pricing.inputValue()) === targetPricing) {
+    await pricing.fill(`${MODEL_OPENAI}:101:201`);
+    await saveAndExpectSaved(page);
+  }
+
   // Valid pricing: preview shows USD per 1M tokens.
-  await pricing.fill(`${MODEL_OPENAI}:100:200`);
+  await pricing.fill(targetPricing);
   await expect(preview).toBeVisible({ timeout: 30_000 });
   await expect(preview).toContainText("USD per 1M tokens");
   await expect(preview).toContainText(MODEL_OPENAI);
 
   // #939: the pricing draft is saved by the section's one "Save changes"
   // button (together with the provider/model drafts made above).
-  const saveChanges = page.getByTestId("settings-ai-save-changes");
-  await expect(saveChanges).toBeVisible({ timeout: 30_000 });
-  await saveChanges.click();
-  await expect(page.getByTestId("settings-ai-save-banner")).toHaveText(
-    /Saved/i,
-    { timeout: 30_000 },
-  );
+  await saveAndExpectSaved(page);
 
   // Invalid price input: preview shows the rejection, no USD value.
   await pricing.fill(`${MODEL_OPENAI}:abc:200`);
