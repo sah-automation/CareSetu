@@ -305,7 +305,8 @@ describe("ObservabilitySettingsPage (#797)", () => {
     expect(screen.getByTestId("settings-ai-model-select")).toBeInTheDocument();
     expect(screen.getByTestId("settings-ai-asr-select")).toBeInTheDocument();
     expect(screen.getByTestId("settings-ai-pricing-table")).toBeInTheDocument();
-    expect(screen.getByTestId("settings-ai-base-url")).toBeInTheDocument();
+    // #939: the Base URL pill is gone from the status band.
+    expect(screen.queryByTestId("settings-ai-base-url")).toBeNull();
     expect(screen.getByTestId("settings-ai-source-ai.model")).toHaveTextContent(
       en.ai.sources.environment,
     );
@@ -429,8 +430,8 @@ describe("ObservabilitySettingsPage (#797)", () => {
     expect(screen.getByTestId("settings-ai-source-ai.model")).toHaveTextContent(
       hi.ai.sources.environment,
     );
-    expect(screen.getByTestId("settings-ai-save-ai.model")).toHaveTextContent(
-      hi.ai.save,
+    expect(screen.getByTestId("settings-ai-save-changes")).toHaveTextContent(
+      hi.ai.saveChanges,
     );
     expect(screen.getByTestId("settings-ai-history-title")).toHaveTextContent(
       hi.ai.historyTitle,
@@ -483,67 +484,40 @@ describe("AiSettingsSection writes and history (#798)", () => {
     expect(
       screen.getByTestId("settings-ai-readonly-ai.provider"),
     ).toHaveTextContent(en.ai.readOnly);
-    // ai.pricing_table is editable, so it has a save button
-    expect(
-      screen.getByTestId("settings-ai-save-ai.pricing_table"),
-    ).toBeInTheDocument();
+    // #939: one shared Save changes button; per-row save buttons are gone.
+    expect(screen.getByTestId("settings-ai-save-changes")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-ai-save-ai.model")).toBeNull();
   });
 
   it("saves an edited value and refreshes effective values and history", async () => {
     mockWriteSetting.mockResolvedValue({
-      setting_key: "ai.model",
-      value: "gpt-oss-120b",
+      setting_key: "ai.pricing_table",
+      value: "mock-model:100:200",
       version: 2,
     });
 
     await renderReady();
 
     await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-model-select"),
-      ).toBeInTheDocument();
+      expect(screen.getByTestId("settings-ai-save-changes")).toBeEnabled();
     });
 
-    // Switch to a provider that offers gpt-oss-120b, then select it
-    const providerSelect = screen.getByTestId(
-      "settings-ai-provider-select",
-    ) as HTMLSelectElement;
-    fireEvent.change(providerSelect, {
-      target: { value: "openai_compatible" },
+    // #939: edit the pricing table, then save everything with one click.
+    fireEvent.change(screen.getByTestId("settings-ai-pricing-table"), {
+      target: { value: "mock-model:100:200" },
     });
-
-    // #933: the draft state, not any DOM default selection, drives the write -
-    // pick the model explicitly before saving.
-    await waitFor(() => {
-      const modelSelect = screen.getByTestId(
-        "settings-ai-model-select",
-      ) as HTMLSelectElement;
-      expect(
-        Array.from(modelSelect.options).some(
-          (option) => option.value === "gpt-oss-120b",
-        ),
-      ).toBe(true);
-    });
-    fireEvent.change(screen.getByTestId("settings-ai-model-select"), {
-      target: { value: "gpt-oss-120b" },
-    });
+    fireEvent.click(screen.getByTestId("settings-ai-save-changes"));
 
     await waitFor(() => {
-      const modelSelect = screen.getByTestId(
-        "settings-ai-model-select",
-      ) as HTMLSelectElement;
-      expect(modelSelect).toHaveValue("gpt-oss-120b");
-    });
-
-    screen.getByTestId("settings-ai-save-ai.model").click();
-
-    await waitFor(() => {
-      expect(mockWriteSetting).toHaveBeenCalledWith("ai.model", "gpt-oss-120b");
+      expect(mockWriteSetting).toHaveBeenCalledWith(
+        "ai.pricing_table",
+        "mock-model:100:200",
+      );
     });
     await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-save-status-ai.model"),
-      ).toHaveTextContent(en.ai.saved);
+      expect(screen.getByTestId("settings-ai-save-banner")).toHaveTextContent(
+        en.ai.savedChanges,
+      );
     });
     expect(mockFetchEffectiveSettings).toHaveBeenCalledTimes(3);
     expect(mockFetchSettingHistory).toHaveBeenCalledTimes(3);
@@ -552,15 +526,16 @@ describe("AiSettingsSection writes and history (#798)", () => {
   it("refuses an empty value before calling the API", async () => {
     await renderReady();
 
-    const modelSelect = screen.getByTestId(
-      "settings-ai-model-select",
-    ) as HTMLSelectElement;
-    fireEvent.change(modelSelect, { target: { value: "" } });
-    screen.getByTestId("settings-ai-save-ai.model").click();
+    // #939: clearing a field that has an effective value makes it dirty with
+    // an empty draft; Save changes must block it before calling the API.
+    fireEvent.change(screen.getByTestId("settings-ai-asr-select"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByTestId("settings-ai-save-changes"));
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.model"),
+        screen.getByTestId("settings-ai-field-error-ai.asr_model"),
       ).toHaveTextContent(en.ai.validationRequired);
     });
     expect(mockWriteSetting).not.toHaveBeenCalled();
@@ -584,45 +559,25 @@ describe("AiSettingsSection writes and history (#798)", () => {
       ).toBeInTheDocument();
     });
 
-    // Switch to openai_compatible so gpt-oss-120b passes the custom-model guard
-    const providerSelect = screen.getByTestId(
-      "settings-ai-provider-select",
-    ) as HTMLSelectElement;
-    fireEvent.change(providerSelect, {
-      target: { value: "openai_compatible" },
-    });
-
-    // #933: the draft state, not any DOM default selection, drives the write -
-    // pick the model explicitly before saving.
-    await waitFor(() => {
-      const modelSelect = screen.getByTestId(
-        "settings-ai-model-select",
-      ) as HTMLSelectElement;
-      expect(
-        Array.from(modelSelect.options).some(
-          (option) => option.value === "gpt-oss-120b",
-        ),
-      ).toBe(true);
-    });
+    // Pick a custom model WITH a pricing entry so client-side validation
+    // passes and the write reaches the API, which then rejects it.
     fireEvent.change(screen.getByTestId("settings-ai-model-select"), {
-      target: { value: "gpt-oss-120b" },
+      target: { value: "__custom__" },
     });
-
-    await waitFor(() => {
-      const modelSelect = screen.getByTestId(
-        "settings-ai-model-select",
-      ) as HTMLSelectElement;
-      expect(modelSelect).toHaveValue("gpt-oss-120b");
+    fireEvent.change(screen.getByTestId("settings-ai-model-custom"), {
+      target: { value: "some-model" },
     });
-
-    screen.getByTestId("settings-ai-save-ai.model").click();
+    fireEvent.change(screen.getByTestId("settings-ai-pricing-table"), {
+      target: { value: "some-model:1:2" },
+    });
+    fireEvent.click(screen.getByTestId("settings-ai-save-changes"));
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.model"),
+        screen.getByTestId("settings-ai-field-error-ai.model"),
       ).toHaveTextContent("custom model needs a pricing entry");
     });
-    expect(screen.getByTestId("settings-ai-save-ai.model")).toBeEnabled();
+    expect(screen.getByTestId("settings-ai-save-changes")).toBeEnabled();
   });
 
   it("shows the fallback copy for an unexpected write failure", async () => {
@@ -636,42 +591,14 @@ describe("AiSettingsSection writes and history (#798)", () => {
       ).toBeInTheDocument();
     });
 
-    // Switch to openai_compatible so gpt-oss-120b passes the custom-model guard
-    const providerSelect = screen.getByTestId(
-      "settings-ai-provider-select",
-    ) as HTMLSelectElement;
-    fireEvent.change(providerSelect, {
-      target: { value: "openai_compatible" },
+    fireEvent.change(screen.getByTestId("settings-ai-pricing-table"), {
+      target: { value: "mock-model:100:200" },
     });
-
-    // #933: the draft state, not any DOM default selection, drives the write -
-    // pick the model explicitly before saving.
-    await waitFor(() => {
-      const modelSelect = screen.getByTestId(
-        "settings-ai-model-select",
-      ) as HTMLSelectElement;
-      expect(
-        Array.from(modelSelect.options).some(
-          (option) => option.value === "gpt-oss-120b",
-        ),
-      ).toBe(true);
-    });
-    fireEvent.change(screen.getByTestId("settings-ai-model-select"), {
-      target: { value: "gpt-oss-120b" },
-    });
-
-    await waitFor(() => {
-      const modelSelect = screen.getByTestId(
-        "settings-ai-model-select",
-      ) as HTMLSelectElement;
-      expect(modelSelect).toHaveValue("gpt-oss-120b");
-    });
-
-    screen.getByTestId("settings-ai-save-ai.model").click();
+    fireEvent.click(screen.getByTestId("settings-ai-save-changes"));
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.model"),
+        screen.getByTestId("settings-ai-field-error-ai.pricing_table"),
       ).toHaveTextContent(en.ai.saveError);
     });
   });

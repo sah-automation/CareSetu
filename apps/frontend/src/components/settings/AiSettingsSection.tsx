@@ -3,17 +3,20 @@
 // #924: the catalog-driven "AI & LLM" section of the operator Settings page.
 // The section renders selects populated from the AI provider catalog endpoint,
 // with per-provider dependent model / ASR-model filtering, a marked "custom
-// model name" free-text escape hatch on the model selects, fallback
-// provider / model selects, a pricing-table textarea (one `model:price_in:
-// price_out` entry per line) with a USD-per-1M price preview alongside the
-// stored paise unit, and the provider's auto-derived base URL shown read-only.
-// Writes go through the settings client's string-value write support
-// (`writeSetting`). Non-admin operators see every control read-only.
+// model name" free-text escape hatch on the model selects, and a pricing-table
+// textarea (one `model:price_in:price_out` entry per line) with a USD-per-1M
+// price preview alongside the stored paise unit. One primary "Save changes"
+// button writes every field whose draft differs from the effective value,
+// sequentially, stopping on the first error (#939); failures render as an
+// aggregate banner plus inline errors under the failing fields. Writes go
+// through the settings client's string-value write support (`writeSetting`).
+// Non-admin operators see every control read-only.
 
 import React, { useEffect, useState } from "react";
 
 import { EmptyState } from "@/components/layout/EmptyState";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-errors";
 import type { OperatorSettingsStrings } from "@/lib/i18n/dictionaries";
@@ -33,7 +36,7 @@ import { usePanelRead } from "@/lib/operator/usePanelRead";
 import { CollapsibleSettingsSection } from "./CollapsibleSettingsSection";
 
 type AiStrings = OperatorSettingsStrings["ai"];
-type SaveStatus = "idle" | "saving" | "saved" | "error";
+type FormStatus = "idle" | "saving" | "saved" | "error";
 
 // ~₹88.5/USD (#917): FX rate for the USD-per-1M price preview, from config.
 // USD per 1M tokens = paise-per-token * 1e6 / PAISE_PER_USD.
@@ -53,6 +56,10 @@ type AiFieldKey = (typeof AI_FIELD_KEYS)[number];
 // #930: the shared surfaced frame for standalone rows and grouped blocks -
 // the block adds the row padding inside, the card rows add it here.
 const CARD_FRAME = "mt-4 rounded-lg border border-hairline bg-surface";
+
+// #939: fields sit on the default white background - border only.
+const FIELD_CLASS =
+  "rounded-md border border-hairline px-2 py-1 text-sm text-txt";
 
 function sourceLabel(source: SettingSource, t: AiStrings): string {
   switch (source) {
@@ -208,18 +215,16 @@ function optionsWithCurrent(options: string[], current: string): string[] {
 }
 
 // #929: the static status band at the top of the AI section - one glance at
-// which provider, which models, the auto-derived base URL, how many pricing
-// entries metering has, and when the config was last loaded. Presentation
-// only: every value derives from the effective settings and the provider
-// catalog the section already fetches (no new requests, no live metering).
-// The accent chips reuse the patient/doctor surfaces' chip idiom
-// (bg-accent-soft/text-accent-strong pill) so the pattern lifts into the
-// other settings sections later.
+// which provider, which models, how many pricing entries metering has, and
+// when the config was last loaded. Presentation only: every value derives
+// from the effective settings and the provider catalog the section already
+// fetches (no new requests, no live metering). The accent chips reuse the
+// patient/doctor surfaces' chip idiom (bg-accent-soft/text-accent-strong
+// pill) so the pattern lifts into the other settings sections later.
 function AiStatusBand({
   providerName,
   model,
   asrModel,
-  baseUrl,
   pricingEntries,
   refreshedAt,
   t,
@@ -227,7 +232,6 @@ function AiStatusBand({
   providerName: string;
   model: string;
   asrModel: string;
-  baseUrl: string;
   pricingEntries: number;
   refreshedAt: string | null;
   t: AiStrings;
@@ -248,15 +252,6 @@ function AiStatusBand({
       <span className={chipClassName} data-testid="settings-ai-band-asr">
         {t.asrModel}: {asrModel || "-"}
       </span>
-      <span className="inline-flex items-center gap-1 text-xs text-txt-muted">
-        <span>{t.baseUrl}</span>
-        <span
-          className="max-w-64 truncate rounded-full border border-hairline px-2 py-0.5 font-mono text-txt"
-          data-testid="settings-ai-band-base-url"
-        >
-          {baseUrl || "-"}
-        </span>
-      </span>
       <span
         className={chipClassName}
         data-testid="settings-ai-band-pricing-count"
@@ -275,43 +270,35 @@ function AiStatusBand({
   );
 }
 
+// #939: a row is label + source badge + control, with a field-level error
+// under the control when a save failed. There is no per-row save control -
+// the section saves through its one primary button.
 function AiFieldRow({
   fieldKey,
   label,
-  value,
   source,
   editable,
-  control,
-  saveStatus,
-  saveError,
-  onDraft,
-  onSave,
   isAdmin,
+  control,
+  error,
   t,
   variant = "card",
 }: {
   fieldKey: string;
   label: string;
-  value: string;
   source: SettingSource | undefined;
   editable: boolean;
-  control: React.ReactNode;
-  saveStatus: SaveStatus;
-  saveError: string | undefined;
-  onDraft: (value: string) => void;
-  onSave: () => void;
   isAdmin: boolean;
+  control: React.ReactNode;
+  error?: string;
   t: AiStrings;
   // #930: "block" rows sit inside a grouped block (the wrapper supplies the
   // card frame and the dividers); "card" rows keep the standalone frame.
   variant?: "card" | "block";
 }) {
   const canEdit = editable && isAdmin;
-  const status = saveStatus;
-  const error = saveError;
   return (
     <div
-      key={fieldKey}
       data-testid={`settings-ai-row-${fieldKey}`}
       className={variant === "block" ? "p-3" : `${CARD_FRAME} p-3`}
     >
@@ -330,45 +317,23 @@ function AiFieldRow({
         ) : null}
       </div>
       <div className="mb-2">{control}</div>
-      <div className="flex flex-col gap-1">
-        {canEdit ? (
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={status === "saving"}
-              onClick={onSave}
-              className="inline-flex min-h-9 items-center rounded-md border border-hairline px-3 text-xs font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
-              data-testid={`settings-ai-save-${fieldKey}`}
-            >
-              {status === "saving" ? t.saving : t.save}
-            </button>
-            {status === "saved" && (
-              <span
-                className="text-xs text-success"
-                data-testid={`settings-ai-save-status-${fieldKey}`}
-              >
-                {t.saved}
-              </span>
-            )}
-            {status === "error" && error && (
-              <span
-                role="alert"
-                className="text-xs text-danger"
-                data-testid={`settings-ai-save-error-${fieldKey}`}
-              >
-                {error}
-              </span>
-            )}
-          </div>
-        ) : (
-          <span
-            className="text-xs text-txt-muted"
-            data-testid={`settings-ai-readonly-${fieldKey}`}
-          >
-            {t.readOnly}
-          </span>
-        )}
-      </div>
+      {error ? (
+        <span
+          role="alert"
+          className="text-xs text-danger"
+          data-testid={`settings-ai-field-error-${fieldKey}`}
+        >
+          {error}
+        </span>
+      ) : null}
+      {!canEdit ? (
+        <span
+          className="text-xs text-txt-muted"
+          data-testid={`settings-ai-readonly-${fieldKey}`}
+        >
+          {t.readOnly}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -416,36 +381,27 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
     currentEditable[key] = row?.editable ?? false;
   }
 
-  const [drafts, setDrafts] = useState<Record<AiFieldKey, string>>(current);
+  // #939: drafts are overrides over the effective values, so a field the
+  // operator never touched is never dirty and never written by Save changes.
+  const [draftOverrides, setDraftOverrides] = useState<
+    Partial<Record<AiFieldKey, string>>
+  >({});
+  const drafts = { ...current, ...draftOverrides };
   const [customText, setCustomText] = useState<Record<AiFieldKey, string>>(
     Object.fromEntries(AI_FIELD_KEYS.map((k) => [k, ""])) as Record<
       AiFieldKey,
       string
     >,
   );
-  const [saveStates, setSaveStates] = useState<Record<AiFieldKey, SaveStatus>>(
-    Object.fromEntries(AI_FIELD_KEYS.map((k) => [k, "idle"])) as Record<
-      AiFieldKey,
-      SaveStatus
-    >,
-  );
-  const [saveErrors, setSaveErrors] = useState<Record<AiFieldKey, string>>(
-    Object.fromEntries(AI_FIELD_KEYS.map((k) => [k, ""])) as Record<
-      AiFieldKey,
-      string
-    >,
-  );
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [formStatus, setFormStatus] = useState<FormStatus>("idle");
+  const [formError, setFormError] = useState<string | undefined>(undefined);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
-  const [apiKeySaveStatus, setApiKeySaveStatus] = useState<SaveStatus>("idle");
-  const [apiKeySaveError, setApiKeySaveError] = useState<string | undefined>(
-    undefined,
-  );
 
   const apiKeyRow = settings.find((s) => s.key === "ai.api_key");
   const currentEditableApiKey = apiKeyRow?.editable ?? false;
   // The provider the provider block is about: the draft selection while it
-  // is unsaved, else the effective value. Drives the key-row visibility and
-  // the base-URL pill (#930).
+  // is unsaved, else the effective value. Drives the key-row visibility.
   const selectedProviderEntry = providerById(
     providers,
     drafts["ai.provider"] || current["ai.provider"],
@@ -477,39 +433,48 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
     drafts["ai.fallback_model"],
   );
 
-  function handleDraft(key: AiFieldKey, value: string) {
-    setDrafts((cur) => ({ ...cur, [key]: value }));
-    setSaveStates((cur) => ({ ...cur, [key]: "idle" }));
-    setSaveErrors((cur) => {
+  function clearFormFeedback() {
+    setFormStatus("idle");
+    setFormError(undefined);
+  }
+
+  function clearFieldError(key: string) {
+    setFieldErrors((cur) => {
+      if (!(key in cur)) return cur;
       const next = { ...cur };
       delete next[key];
       return next;
     });
+  }
+
+  function handleDraft(key: AiFieldKey, value: string) {
+    setDraftOverrides((cur) => ({ ...cur, [key]: value }));
+    clearFormFeedback();
+    clearFieldError(key);
+  }
+
+  function handleApiKeyDraft(value: string) {
+    setApiKeyDraft(value);
+    clearFormFeedback();
+    clearFieldError("ai.api_key");
   }
 
   function handleCustomDraft(key: AiFieldKey, value: string) {
     setCustomText((cur) => ({ ...cur, [key]: value }));
   }
 
-  async function handleSave(key: AiFieldKey) {
-    setSaveErrors((cur) => {
-      const next = { ...cur };
-      delete next[key];
-      return next;
-    });
-
+  function resolveSaveValue(key: AiFieldKey): string {
     let value = drafts[key];
     if (key === "ai.model" || key === "ai.fallback_model") {
       // When a custom model name is typed, prefer it over the select choice.
       const custom = customText[key];
       if (custom.trim()) value = custom.trim();
     }
+    return value;
+  }
 
-    if (value === "") {
-      setSaveStates((cur) => ({ ...cur, [key]: "error" }));
-      setSaveErrors((cur) => ({ ...cur, [key]: ai.validationRequired }));
-      return;
-    }
+  function validateValue(key: AiFieldKey, value: string): string | undefined {
+    if (value === "") return ai.validationRequired;
 
     // Client-side guard: a custom model requires a pricing-table entry.
     if (key === "ai.model" || key === "ai.fallback_model") {
@@ -526,63 +491,90 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
       if (!known.has(value)) {
         const pricing = parsePricingTable(drafts["ai.pricing_table"]);
         if (!pricing.some((row) => row.valid && row.model === value)) {
-          setSaveStates((cur) => ({ ...cur, [key]: "error" }));
-          setSaveErrors((cur) => ({ ...cur, [key]: ai.validationCustomPrice }));
-          return;
+          return ai.validationCustomPrice;
         }
       }
     }
-
-    setSaveStates((cur) => ({ ...cur, [key]: "saving" }));
-    try {
-      await writeSetting(key, value as SettingWriteValue);
-      setSaveStates((cur) => ({ ...cur, [key]: "saved" }));
-      setDrafts((cur) => {
-        if (!(key in cur)) return cur;
-        const next = { ...cur };
-        delete next[key];
-        return next;
-      });
-      settingsRead.reload();
-      // #933: the history sub-section refreshes with the save, so the new
-      // version shows up without a manual retry.
-      historyRead.reload();
-    } catch (error) {
-      setSaveStates((cur) => ({ ...cur, [key]: "error" }));
-      setSaveErrors((cur) => ({
-        ...cur,
-        [key]:
-          error instanceof ApiError
-            ? error.message || ai.saveErrorExpected
-            : ai.saveError,
-      }));
-    }
+    return undefined;
   }
 
-  async function handleSaveApiKey() {
-    setApiKeySaveError(undefined);
-    const value = apiKeyDraft;
-    if (value === "") {
-      setApiKeySaveStatus("error");
-      setApiKeySaveError(ai.validationRequired);
+  async function handleSaveChanges() {
+    clearFormFeedback();
+    setFieldErrors({});
+
+    const apiKeyChanged =
+      providerRequiresKey && !apiKeyConfigured && apiKeyDraft !== "";
+
+    // Write order follows the DOM: provider, then its API key, then the
+    // model/fallback fields, then the pricing table.
+    const entries: Array<{ key: AiFieldKey | "ai.api_key"; value: string }> =
+      [];
+    for (const key of AI_FIELD_KEYS) {
+      if (drafts[key] === current[key]) continue;
+      entries.push({ key, value: resolveSaveValue(key) });
+      if (key === "ai.provider" && apiKeyChanged) {
+        entries.push({ key: "ai.api_key", value: apiKeyDraft });
+      }
+    }
+    if (apiKeyChanged && !entries.some((e) => e.key === "ai.api_key")) {
+      entries.push({ key: "ai.api_key", value: apiKeyDraft });
+    }
+    if (entries.length === 0) return;
+
+    // Client-side validation first: every failing field shows its own
+    // inline error and nothing reaches the API (ui-blueprint §9.5).
+    const errors: Record<string, string> = {};
+    for (const entry of entries) {
+      // The key draft cannot be empty: apiKeyChanged already requires a
+      // non-empty draft, so there is nothing to validate for it.
+      if (entry.key === "ai.api_key") continue;
+      const validationError = validateValue(entry.key, entry.value);
+      if (validationError) errors[entry.key] = validationError;
+    }
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      setFormStatus("error");
+      setFormError(Object.values(errors)[0]);
       return;
     }
 
-    setApiKeySaveStatus("saving");
-    try {
-      await writeSetting("ai.api_key", value as SettingWriteValue);
-      setApiKeySaveStatus("saved");
-      setApiKeyDraft("");
-      settingsRead.reload();
-      historyRead.reload();
-    } catch (error) {
-      setApiKeySaveStatus("error");
-      setApiKeySaveError(
-        error instanceof ApiError
-          ? error.message || ai.saveErrorExpected
-          : ai.saveError,
-      );
+    setFormStatus("saving");
+    let savedAny = false;
+    for (const entry of entries) {
+      try {
+        await writeSetting(entry.key, entry.value);
+        if (entry.key === "ai.api_key") {
+          setApiKeyDraft("");
+        } else {
+          // The write landed: the override drops and the draft falls back to
+          // the reloaded effective value.
+          setDraftOverrides((cur) => {
+            const next = { ...cur };
+            delete next[entry.key as AiFieldKey];
+            return next;
+          });
+        }
+        savedAny = true;
+      } catch (error) {
+        const message =
+          error instanceof ApiError
+            ? error.message || ai.saveErrorExpected
+            : ai.saveError;
+        setFieldErrors((cur) => ({ ...cur, [entry.key]: message }));
+        setFormStatus("error");
+        setFormError(message);
+        // Earlier writes in this run landed on the server: refresh the
+        // effective values so saved fields stop looking dirty.
+        if (savedAny) {
+          settingsRead.reload();
+          historyRead.reload();
+        }
+        return;
+      }
     }
+    setFormStatus("saved");
+    settingsRead.reload();
+    historyRead.reload();
   }
 
   const pricingRows = parsePricingTable(drafts["ai.pricing_table"]);
@@ -597,9 +589,6 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
     >
       {(settingsRead.status === "loading" ||
         catalogRead.status === "loading") && (
-        // #933: placeholders mirror the section's final anatomy (band, the two
-        // grouped blocks, the pricing card) so the layout does not jump when
-        // the data lands.
         <div
           data-testid="settings-ai-loading"
           className="flex flex-col gap-3"
@@ -677,7 +666,6 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               }
               model={current["ai.model"]}
               asrModel={current["ai.asr_model"]}
-              baseUrl={bandProviderEntry?.base_url ?? ""}
               pricingEntries={
                 parsePricingTable(current["ai.pricing_table"]).filter(
                   (row) => row.valid,
@@ -703,21 +691,24 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                   variant="block"
                   fieldKey="ai.provider"
                   label={ai.provider}
-                  value={drafts["ai.provider"]}
                   source={currentSource["ai.provider"]}
                   editable={currentEditable["ai.provider"]}
+                  isAdmin={isAdmin}
+                  t={ai}
+                  error={fieldErrors["ai.provider"]}
                   control={
-                    <div className="flex flex-wrap items-center gap-2">
+                    // #939: the provider select and the API key field sit
+                    // side by side in one row; the key input is the wider
+                    // of the two.
+                    <div className="flex flex-wrap items-start gap-3">
                       <select
                         value={drafts["ai.provider"]}
                         onChange={(event) => {
                           handleDraft("ai.provider", event.target.value);
                           setApiKeyDraft("");
-                          setApiKeySaveStatus("idle");
-                          setApiKeySaveError(undefined);
                         }}
                         disabled={!isAdmin || !currentEditable["ai.provider"]}
-                        className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        className={`${FIELD_CLASS} w-48`}
                         id="ai.provider"
                         data-testid="settings-ai-provider-select"
                       >
@@ -727,112 +718,68 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                           </option>
                         ))}
                       </select>
-                      <span className="inline-flex items-center gap-1 text-xs text-txt-muted">
-                        <span>{ai.baseUrl}</span>
-                        <span
-                          className="max-w-64 truncate rounded-full border border-hairline px-2 py-0.5 font-mono text-txt"
-                          data-testid="settings-ai-base-url"
+                      {providerRequiresKey && (
+                        <div
+                          className="flex flex-col gap-1"
+                          data-testid="settings-ai-row-ai.api_key"
                         >
-                          {selectedProviderEntry?.base_url || "-"}
-                        </span>
-                      </span>
-                    </div>
-                  }
-                  saveStatus={saveStates["ai.provider"] ?? "idle"}
-                  saveError={saveErrors["ai.provider"]}
-                  onDraft={(v) => handleDraft("ai.provider", v)}
-                  onSave={() => void handleSave("ai.provider")}
-                  isAdmin={isAdmin}
-                  t={ai}
-                />
-
-                {providerRequiresKey && (
-                  <div
-                    key="ai.api_key"
-                    data-testid="settings-ai-row-ai.api_key"
-                    className="p-3"
-                  >
-                    <div className="flex items-baseline gap-2 mb-1">
-                      <label
-                        htmlFor="ai.api_key"
-                        className="text-sm font-medium text-txt"
-                      >
-                        {ai.apiKeyLabel}
-                      </label>
-                      <Badge
-                        variant="secondary"
-                        className="text-xs"
-                        data-testid="settings-ai-api-key-status"
-                      >
-                        {apiKeyStatusLabel(
-                          apiKeyRow?.value,
-                          apiKeyRow?.source,
-                          ai,
-                        )}
-                      </Badge>
-                    </div>
-                    {!apiKeyConfigured && (
-                      <>
-                        <div className="mb-2">
-                          <input
-                            type="password"
-                            value={apiKeyDraft}
-                            onChange={(event) =>
-                              setApiKeyDraft(event.target.value)
-                            }
-                            disabled={!isAdmin || !currentEditableApiKey}
-                            placeholder={ai.apiKeyPlaceholder}
-                            className="w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
-                            id="ai.api_key"
-                            data-testid="settings-ai-api-key-input"
-                          />
-                        </div>
-                        <div className="flex flex-col gap-1">
-                          {isAdmin && currentEditableApiKey ? (
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                disabled={apiKeySaveStatus === "saving"}
-                                onClick={handleSaveApiKey}
-                                className="inline-flex min-h-9 items-center rounded-md border border-hairline px-3 text-xs font-medium text-txt-sub hover:bg-hairline-soft disabled:opacity-50"
-                                data-testid="settings-ai-save-ai.api_key"
-                              >
-                                {apiKeySaveStatus === "saving"
-                                  ? ai.saving
-                                  : ai.save}
-                              </button>
-                              {apiKeySaveStatus === "saved" && (
-                                <span
-                                  className="text-xs text-success"
-                                  data-testid="settings-ai-save-status-ai.api_key"
-                                >
-                                  {ai.saved}
-                                </span>
-                              )}
-                              {apiKeySaveStatus === "error" &&
-                                apiKeySaveError && (
-                                  <span
-                                    role="alert"
-                                    className="text-xs text-danger"
-                                    data-testid="settings-ai-save-error-ai.api_key"
-                                  >
-                                    {apiKeySaveError}
-                                  </span>
-                                )}
-                            </div>
-                          ) : (
-                            <span
-                              className="text-xs text-txt-muted"
-                              data-testid="settings-ai-readonly-ai.api_key"
+                          <div className="flex items-baseline gap-2">
+                            <label
+                              htmlFor="ai.api_key"
+                              className="text-sm font-medium text-txt"
                             >
-                              {ai.readOnly}
-                            </span>
+                              {ai.apiKeyLabel}
+                            </label>
+                            <Badge
+                              variant="secondary"
+                              className="text-xs"
+                              data-testid="settings-ai-api-key-status"
+                            >
+                              {apiKeyStatusLabel(
+                                apiKeyRow?.value,
+                                apiKeyRow?.source,
+                                ai,
+                              )}
+                            </Badge>
+                          </div>
+                          {!apiKeyConfigured && (
+                            <>
+                              <input
+                                type="password"
+                                value={apiKeyDraft}
+                                onChange={(event) =>
+                                  handleApiKeyDraft(event.target.value)
+                                }
+                                disabled={!isAdmin || !currentEditableApiKey}
+                                placeholder={ai.apiKeyPlaceholder}
+                                className={`${FIELD_CLASS} w-64`}
+                                id="ai.api_key"
+                                data-testid="settings-ai-api-key-input"
+                              />
+                              {fieldErrors["ai.api_key"] ? (
+                                <span
+                                  role="alert"
+                                  className="text-xs text-danger"
+                                  data-testid="settings-ai-field-error-ai.api_key"
+                                >
+                                  {fieldErrors["ai.api_key"]}
+                                </span>
+                              ) : null}
+                              {!isAdmin || !currentEditableApiKey ? (
+                                <span
+                                  className="text-xs text-txt-muted"
+                                  data-testid="settings-ai-readonly-ai.api_key"
+                                >
+                                  {ai.readOnly}
+                                </span>
+                              ) : null}
+                            </>
                           )}
                         </div>
-                      </>
-                    )}
-                  </div>
-                )}
+                      )}
+                    </div>
+                  }
+                />
               </div>
             </div>
 
@@ -844,9 +791,11 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                   variant="block"
                   fieldKey="ai.model"
                   label={ai.model}
-                  value={drafts["ai.model"]}
                   source={currentSource["ai.model"]}
                   editable={currentEditable["ai.model"]}
+                  isAdmin={isAdmin}
+                  t={ai}
+                  error={fieldErrors["ai.model"]}
                   control={
                     <div className="flex flex-col gap-1">
                       <select
@@ -855,7 +804,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                           handleDraft("ai.model", event.target.value)
                         }
                         disabled={!isAdmin || !currentEditable["ai.model"]}
-                        className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        className={`${FIELD_CLASS} w-full md:w-48`}
                         id="ai.model"
                         data-testid="settings-ai-model-select"
                       >
@@ -877,7 +826,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                           }
                           placeholder={ai.customModel}
                           disabled={!isAdmin || !currentEditable["ai.model"]}
-                          className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
+                          className={`${FIELD_CLASS} w-full md:w-48 mt-1`}
                           data-testid="settings-ai-model-custom"
                         />
                       )}
@@ -891,21 +840,17 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                       </span>
                     </div>
                   }
-                  saveStatus={saveStates["ai.model"] ?? "idle"}
-                  saveError={saveErrors["ai.model"]}
-                  onDraft={(v) => handleDraft("ai.model", v)}
-                  onSave={() => void handleSave("ai.model")}
-                  isAdmin={isAdmin}
-                  t={ai}
                 />
 
                 <AiFieldRow
                   variant="block"
                   fieldKey="ai.asr_model"
                   label={ai.asrModel}
-                  value={drafts["ai.asr_model"]}
                   source={currentSource["ai.asr_model"]}
                   editable={currentEditable["ai.asr_model"]}
+                  isAdmin={isAdmin}
+                  t={ai}
+                  error={fieldErrors["ai.asr_model"]}
                   control={
                     <select
                       value={drafts["ai.asr_model"]}
@@ -913,7 +858,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                         handleDraft("ai.asr_model", event.target.value)
                       }
                       disabled={!isAdmin || !currentEditable["ai.asr_model"]}
-                      className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                      className={`${FIELD_CLASS} w-full md:w-48`}
                       id="ai.asr_model"
                       data-testid="settings-ai-asr-select"
                     >
@@ -924,21 +869,17 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                       ))}
                     </select>
                   }
-                  saveStatus={saveStates["ai.asr_model"] ?? "idle"}
-                  saveError={saveErrors["ai.asr_model"]}
-                  onDraft={(v) => handleDraft("ai.asr_model", v)}
-                  onSave={() => void handleSave("ai.asr_model")}
-                  isAdmin={isAdmin}
-                  t={ai}
                 />
 
                 <AiFieldRow
                   variant="block"
                   fieldKey="ai.fallback_provider"
                   label={ai.fallbackProvider}
-                  value={drafts["ai.fallback_provider"]}
                   source={currentSource["ai.fallback_provider"]}
                   editable={currentEditable["ai.fallback_provider"]}
+                  isAdmin={isAdmin}
+                  t={ai}
+                  error={fieldErrors["ai.fallback_provider"]}
                   control={
                     <select
                       value={drafts["ai.fallback_provider"]}
@@ -948,7 +889,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                       disabled={
                         !isAdmin || !currentEditable["ai.fallback_provider"]
                       }
-                      className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                      className={`${FIELD_CLASS} w-full md:w-48`}
                       id="ai.fallback_provider"
                       data-testid="settings-ai-fallback-provider-select"
                     >
@@ -959,21 +900,17 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                       ))}
                     </select>
                   }
-                  saveStatus={saveStates["ai.fallback_provider"] ?? "idle"}
-                  saveError={saveErrors["ai.fallback_provider"]}
-                  onDraft={(v) => handleDraft("ai.fallback_provider", v)}
-                  onSave={() => void handleSave("ai.fallback_provider")}
-                  isAdmin={isAdmin}
-                  t={ai}
                 />
 
                 <AiFieldRow
                   variant="block"
                   fieldKey="ai.fallback_model"
                   label={ai.fallbackModel}
-                  value={drafts["ai.fallback_model"]}
                   source={currentSource["ai.fallback_model"]}
                   editable={currentEditable["ai.fallback_model"]}
+                  isAdmin={isAdmin}
+                  t={ai}
+                  error={fieldErrors["ai.fallback_model"]}
                   control={
                     <div className="flex flex-col gap-1">
                       <select
@@ -984,7 +921,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                         disabled={
                           !isAdmin || !currentEditable["ai.fallback_model"]
                         }
-                        className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input"
+                        className={`${FIELD_CLASS} w-full md:w-48`}
                         id="ai.fallback_model"
                         data-testid="settings-ai-fallback-model-select"
                       >
@@ -1011,18 +948,12 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                           disabled={
                             !isAdmin || !currentEditable["ai.fallback_model"]
                           }
-                          className="w-full md:w-48 rounded-md border border-hairline px-2 py-1 text-sm text-txt bg-input mt-1"
+                          className={`${FIELD_CLASS} w-full md:w-48 mt-1`}
                           data-testid="settings-ai-fallback-model-custom"
                         />
                       )}
                     </div>
                   }
-                  saveStatus={saveStates["ai.fallback_model"] ?? "idle"}
-                  saveError={saveErrors["ai.fallback_model"]}
-                  onDraft={(v) => handleDraft("ai.fallback_model", v)}
-                  onSave={() => void handleSave("ai.fallback_model")}
-                  isAdmin={isAdmin}
-                  t={ai}
                 />
               </div>
             </div>
@@ -1032,9 +963,11 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                 variant="block"
                 fieldKey="ai.pricing_table"
                 label={ai.pricingTable}
-                value={drafts["ai.pricing_table"]}
                 source={currentSource["ai.pricing_table"]}
                 editable={currentEditable["ai.pricing_table"]}
+                isAdmin={isAdmin}
+                t={ai}
+                error={fieldErrors["ai.pricing_table"]}
                 control={
                   // #932: prettified, not rebuilt - the raw textarea stays the
                   // editor (mono typeface, comfortable width/height) and the
@@ -1050,7 +983,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                         !isAdmin || !currentEditable["ai.pricing_table"]
                       }
                       rows={6}
-                      className="w-full max-w-md rounded-md border border-hairline px-2 py-1.5 text-sm leading-relaxed text-txt bg-input font-mono"
+                      className={`${FIELD_CLASS} w-full max-w-md px-2 py-1.5 leading-relaxed font-mono`}
                       placeholder={ai.pricingPlaceholder}
                       id="ai.pricing_table"
                       data-testid="settings-ai-pricing-table"
@@ -1088,17 +1021,54 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                     )}
                   </div>
                 }
-                saveStatus={saveStates["ai.pricing_table"] ?? "idle"}
-                saveError={saveErrors["ai.pricing_table"]}
-                onDraft={(v) => handleDraft("ai.pricing_table", v)}
-                onSave={() => void handleSave("ai.pricing_table")}
-                isAdmin={isAdmin}
-                t={ai}
               />
             </div>
+
+            {isAdmin && (
+              <div
+                className="mt-4 flex flex-col items-start gap-2"
+                data-testid="settings-ai-save-area"
+              >
+                {formStatus === "saving" && (
+                  <div
+                    role="status"
+                    data-testid="settings-ai-save-banner"
+                    className="rounded-md border border-hairline bg-surface px-3 py-2 text-sm text-txt-muted"
+                  >
+                    {ai.savingChanges}
+                  </div>
+                )}
+                {formStatus === "saved" && (
+                  <div
+                    role="status"
+                    data-testid="settings-ai-save-banner"
+                    className="rounded-md border border-success-soft bg-success-soft px-3 py-2 text-sm text-success-text"
+                  >
+                    {ai.savedChanges}
+                  </div>
+                )}
+                {formStatus === "error" && (
+                  <div
+                    role="alert"
+                    data-testid="settings-ai-save-banner"
+                    className="rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-sm text-danger"
+                  >
+                    {formError ?? ai.saveError}
+                  </div>
+                )}
+                <Button
+                  type="button"
+                  loading={formStatus === "saving"}
+                  disabled={formStatus === "saving"}
+                  onClick={() => void handleSaveChanges()}
+                  data-testid="settings-ai-save-changes"
+                >
+                  {formStatus === "saving" ? ai.savingChanges : ai.saveChanges}
+                </Button>
+              </div>
+            )}
           </>
         )}
-      // #933: the history owns its own loading, error and empty states.
       {settingsRead.status === "ready" && catalogRead.status === "ready" && (
         <AiHistory
           entries={(historyRead.data ?? []).filter((e) =>
@@ -1132,8 +1102,6 @@ function AiHistory({
   onRetry: () => void;
 }) {
   return (
-    // #933: the history reads inside the same card frame as the section's
-    // other blocks; mono key cells and the horizontal-scroll wrapper stay.
     <div
       className="mt-5 rounded-lg border border-hairline bg-surface p-4"
       data-testid="settings-ai-history"

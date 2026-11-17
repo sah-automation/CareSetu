@@ -1,7 +1,7 @@
 // #924: catalog-driven AI & LLM section tests.
 // Covers dependent provider/model/ASR filtering, custom-model escape hatch,
-// pricing-table USD preview, admin writes vs operator read-only, and catalog
-// load states.
+// pricing-table USD preview, the single "Save changes" flow (#939), admin
+// writes vs operator read-only, and catalog load states.
 
 import {
   cleanup,
@@ -174,7 +174,8 @@ describe("AiSettingsSection (#924)", () => {
       screen.getByTestId("settings-ai-fallback-model-select"),
     ).toBeInTheDocument();
     expect(screen.getByTestId("settings-ai-pricing-table")).toBeInTheDocument();
-    expect(screen.getByTestId("settings-ai-base-url")).toBeInTheDocument();
+    // #939: the auto-derived base URL pill is gone from the section.
+    expect(screen.queryByTestId("settings-ai-base-url")).toBeNull();
   });
 
   it("filters model options by the chosen provider", async () => {
@@ -219,11 +220,12 @@ describe("AiSettingsSection (#924)", () => {
     const providerSelect = screen.getByTestId(
       "settings-ai-provider-select",
     ) as HTMLSelectElement;
-    // Pre-change: the mock provider has no ASR models at all.
+    // Pre-change: the mock provider has no ASR models; only the carried-over
+    // effective value shows as an option (#939: drafts track current).
     expect(
       (screen.getByTestId("settings-ai-asr-select") as HTMLSelectElement)
         .options.length,
-    ).toBe(0);
+    ).toBe(1);
     fireEvent.change(providerSelect, {
       target: { value: "openai_compatible" },
     });
@@ -232,7 +234,16 @@ describe("AiSettingsSection (#924)", () => {
       const modelSelect = screen.getByTestId(
         "settings-ai-model-select",
       ) as HTMLSelectElement;
-      expect(modelSelect).toHaveValue("gpt-oss-120b");
+      // #939: drafts track current, so the selection carries over when the
+      // new provider still offers the same model.
+      expect(modelSelect).toHaveValue("mock-model");
+      const modelValues = Array.from(modelSelect.options).map((o) => o.value);
+      expect(modelValues).toEqual([
+        "gpt-oss-120b",
+        "gemini-3.6-flash",
+        "mock-model",
+        "__custom__",
+      ]);
     });
 
     // #931: the ASR list follows the same provider switch.
@@ -253,24 +264,25 @@ describe("AiSettingsSection (#924)", () => {
     });
 
     const block = screen.getByTestId("settings-ai-models-block");
-    for (const fieldKey of [
-      "ai.model",
-      "ai.asr_model",
-      "ai.fallback_provider",
-      "ai.fallback_model",
-    ]) {
+    for (const [fieldKey, editable] of [
+      ["ai.model", true],
+      ["ai.asr_model", true],
+      ["ai.fallback_provider", false],
+      ["ai.fallback_model", false],
+    ] as Array<[string, boolean]>) {
       const row = within(block).getByTestId(`settings-ai-row-${fieldKey}`);
       expect(row).toBeInTheDocument();
-      // Every row keeps its source badge and its inline save/status slot
-      // (a save button when editable, a read-only marker otherwise).
+      // Every row keeps its source badge; there is no per-row save control.
       expect(
         within(row).getByTestId(`settings-ai-source-${fieldKey}`),
       ).toBeInTheDocument();
-      const save = within(row).queryByTestId(`settings-ai-save-${fieldKey}`);
-      const readOnly = within(row).queryByTestId(
-        `settings-ai-readonly-${fieldKey}`,
-      );
-      expect(Boolean(save) !== Boolean(readOnly)).toBe(true);
+      expect(
+        within(row).queryByTestId(`settings-ai-save-${fieldKey}`),
+      ).toBeNull();
+      // The read-only marker appears exactly when the row is not editable.
+      expect(
+        Boolean(within(row).queryByTestId(`settings-ai-readonly-${fieldKey}`)),
+      ).toBe(!editable);
     }
     // The pricing table stays outside the models block.
     expect(within(block).queryByTestId("settings-ai-pricing-table")).toBeNull();
@@ -359,11 +371,11 @@ describe("AiSettingsSection (#924)", () => {
       target: { value: "unpriced-model" },
     });
 
-    screen.getByTestId("settings-ai-save-ai.model").click();
+    screen.getByTestId("settings-ai-save-changes").click();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.model"),
+        screen.getByTestId("settings-ai-field-error-ai.model"),
       ).toHaveTextContent(en.validationCustomPrice);
     });
     expect(mockWriteSetting).not.toHaveBeenCalled();
@@ -440,17 +452,44 @@ describe("AiSettingsSection (#924)", () => {
     ) as HTMLTextAreaElement;
     fireEvent.change(pricing, { target: { value: "" } });
 
-    screen.getByTestId("settings-ai-save-ai.pricing_table").click();
+    screen.getByTestId("settings-ai-save-changes").click();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.pricing_table"),
+        screen.getByTestId("settings-ai-field-error-ai.pricing_table"),
       ).toHaveTextContent(en.validationRequired);
     });
     expect(mockWriteSetting).not.toHaveBeenCalled();
   });
 
-  it("saves an admin edit end to end", async () => {
+  // --- Single "Save changes" flow (#939) ---
+
+  it("#939: renders one primary save button and no per-row save buttons", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-changes"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("settings-ai-save-changes")).toHaveTextContent(
+      en.saveChanges,
+    );
+    for (const key of [
+      "ai.provider",
+      "ai.model",
+      "ai.asr_model",
+      "ai.fallback_provider",
+      "ai.fallback_model",
+      "ai.pricing_table",
+    ]) {
+      expect(screen.queryByTestId(`settings-ai-save-${key}`)).toBeNull();
+      expect(screen.queryByTestId(`settings-ai-save-status-${key}`)).toBeNull();
+      expect(screen.queryByTestId(`settings-ai-save-error-${key}`)).toBeNull();
+    }
+  });
+
+  it("#939: saves only the changed fields, in DOM order, on one click", async () => {
     mockWriteSetting.mockResolvedValue({
       setting_key: "ai.model",
       value: "gpt-oss-120b",
@@ -465,13 +504,9 @@ describe("AiSettingsSection (#924)", () => {
       ).toBeInTheDocument();
     });
 
-    const providerSelect = screen.getByTestId(
-      "settings-ai-provider-select",
-    ) as HTMLSelectElement;
-    fireEvent.change(providerSelect, {
+    fireEvent.change(screen.getByTestId("settings-ai-provider-select"), {
       target: { value: "openai_compatible" },
     });
-
     await waitFor(() => {
       const modelSelect = screen.getByTestId(
         "settings-ai-model-select",
@@ -480,25 +515,138 @@ describe("AiSettingsSection (#924)", () => {
         modelSelect.querySelector('option[value="gpt-oss-120b"]'),
       ).toBeInTheDocument();
     });
+    fireEvent.change(screen.getByTestId("settings-ai-model-select"), {
+      target: { value: "gpt-oss-120b" },
+    });
 
-    const modelSelect = screen.getByTestId(
-      "settings-ai-model-select",
-    ) as HTMLSelectElement;
-    fireEvent.change(modelSelect, { target: { value: "gpt-oss-120b" } });
-
-    screen.getByTestId("settings-ai-save-ai.model").click();
+    screen.getByTestId("settings-ai-save-changes").click();
 
     await waitFor(() => {
-      expect(mockWriteSetting).toHaveBeenCalledWith("ai.model", "gpt-oss-120b");
+      expect(mockWriteSetting).toHaveBeenCalledTimes(2);
     });
-    await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-save-status-ai.model"),
-      ).toHaveTextContent(en.saved);
-    });
+    expect(mockWriteSetting.mock.calls[0]).toEqual([
+      "ai.provider",
+      "openai_compatible",
+    ]);
+    expect(mockWriteSetting.mock.calls[1]).toEqual([
+      "ai.model",
+      "gpt-oss-120b",
+    ]);
   });
 
-  it("shows read-only controls for a non-admin operator", async () => {
+  it("#939: is a no-op when nothing changed", async () => {
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-save-changes"),
+      ).toBeInTheDocument();
+    });
+
+    screen.getByTestId("settings-ai-save-changes").click();
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("settings-ai-save-banner")).toBeNull();
+    });
+    expect(mockWriteSetting).not.toHaveBeenCalled();
+  });
+
+  it("#939: stops on the first failed write and shows its field error", async () => {
+    mockWriteSetting.mockRejectedValueOnce(
+      new ApiError({
+        code: "INVALID_SETTING_WRITE",
+        message: "provider write refused",
+        trace_id: "trace-939",
+        details: {},
+      }),
+    );
+
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-model-select"),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("settings-ai-provider-select"), {
+      target: { value: "openai_compatible" },
+    });
+    await waitFor(() => {
+      const modelSelect = screen.getByTestId(
+        "settings-ai-model-select",
+      ) as HTMLSelectElement;
+      expect(
+        modelSelect.querySelector('option[value="gpt-oss-120b"]'),
+      ).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByTestId("settings-ai-model-select"), {
+      target: { value: "gpt-oss-120b" },
+    });
+
+    screen.getByTestId("settings-ai-save-changes").click();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-field-error-ai.provider"),
+      ).toHaveTextContent("provider write refused");
+    });
+    // The first write failed, so the second never fired.
+    expect(mockWriteSetting).toHaveBeenCalledTimes(1);
+    // The aggregate banner above the button carries the same refusal.
+    expect(screen.getByTestId("settings-ai-save-banner")).toHaveTextContent(
+      "provider write refused",
+    );
+    expect(screen.getByTestId("settings-ai-save-changes")).toBeEnabled();
+  });
+
+  it("#939: shows the aggregate banner's saving then saved states", async () => {
+    let resolveWrite: ((value: unknown) => void) | undefined;
+    mockWriteSetting.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveWrite = resolve;
+        }),
+    );
+
+    await renderSection();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("settings-ai-model-select"),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("settings-ai-pricing-table"), {
+      target: { value: "mock-model:100:200" },
+    });
+    fireEvent.click(screen.getByTestId("settings-ai-save-changes"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-ai-save-banner")).toHaveTextContent(
+        en.savingChanges,
+      );
+    });
+    expect(screen.getByTestId("settings-ai-save-changes")).toBeDisabled();
+
+    resolveWrite?.({
+      setting_key: "ai.pricing_table",
+      value: "mock-model:100:200",
+      version: 2,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-ai-save-banner")).toHaveTextContent(
+        en.savedChanges,
+      );
+    });
+    expect(mockWriteSetting).toHaveBeenCalledWith(
+      "ai.pricing_table",
+      "mock-model:100:200",
+    );
+  });
+
+  it("#939: shows read-only controls for a non-admin operator", async () => {
     await renderSection(operatorAuth());
 
     await waitFor(() => {
@@ -513,6 +661,9 @@ describe("AiSettingsSection (#924)", () => {
       screen.getByTestId("settings-ai-readonly-ai.model"),
     ).toHaveTextContent(en.readOnly);
     expect(screen.queryByTestId("settings-ai-save-ai.model")).toBeNull();
+    // The single save button is the one control the read-only surface
+    // does not get.
+    expect(screen.queryByTestId("settings-ai-save-changes")).toBeNull();
   });
 
   it("shows a retryable error when the catalog fails", async () => {
@@ -715,7 +866,8 @@ describe("AiSettingsSection (#924)", () => {
       ).toBeInTheDocument();
     });
 
-    // Pick a custom model so the write is attempted with a non-empty value
+    // Pick a custom model WITH a pricing entry so client-side validation
+    // passes and the write reaches the API, which then rejects it.
     const modelSelect = screen.getByTestId(
       "settings-ai-model-select",
     ) as HTMLSelectElement;
@@ -723,14 +875,20 @@ describe("AiSettingsSection (#924)", () => {
     fireEvent.change(screen.getByTestId("settings-ai-model-custom"), {
       target: { value: "some-model" },
     });
+    fireEvent.change(screen.getByTestId("settings-ai-pricing-table"), {
+      target: { value: "some-model:1:2" },
+    });
 
-    screen.getByTestId("settings-ai-save-ai.model").click();
+    screen.getByTestId("settings-ai-save-changes").click();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.model"),
-      ).toHaveTextContent(en.validationCustomPrice);
+        screen.getByTestId("settings-ai-field-error-ai.model"),
+      ).toHaveTextContent("custom model needs a pricing entry");
     });
+    expect(screen.getByTestId("settings-ai-save-banner")).toHaveTextContent(
+      "custom model needs a pricing entry",
+    );
   });
 
   // --- API key field: masked status states (#925, reskinned in #930) ---
@@ -829,7 +987,7 @@ describe("AiSettingsSection (#924)", () => {
     expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
   });
 
-  it("groups the provider select, base-URL pill, and key row in one block", async () => {
+  it("#939: places the provider select and the API key input side by side in one block", async () => {
     await renderSection(
       adminAuth(),
       providers,
@@ -837,27 +995,33 @@ describe("AiSettingsSection (#924)", () => {
     );
 
     const block = await screen.findByTestId("settings-ai-provider-block");
-    expect(
-      within(block).getByTestId("settings-ai-provider-select"),
-    ).toBeInTheDocument();
-    // The auto-derived base URL renders as a read-only mono pill beside the
-    // provider select.
-    expect(within(block).getByTestId("settings-ai-base-url")).toHaveTextContent(
-      "https://api.openai.com/v1",
+    const providerRow = within(block).getByTestId(
+      "settings-ai-row-ai.provider",
     );
+    expect(
+      within(providerRow).getByTestId("settings-ai-provider-select"),
+    ).toBeInTheDocument();
+    // The key field is the provider select's side-by-side companion, inside
+    // the same visual row; the base-URL pill is gone (#939).
+    const keyRow = within(providerRow).getByTestId(
+      "settings-ai-row-ai.api_key",
+    );
+    const keyInput = within(keyRow).getByTestId("settings-ai-api-key-input");
+    expect(keyInput).toHaveAttribute("type", "password");
+    expect(
+      keyInput.compareDocumentPosition(
+        within(providerRow).getByTestId("settings-ai-provider-select"),
+      ) & Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy();
+    expect(within(block).queryByTestId("settings-ai-base-url")).toBeNull();
     // The provider row keeps its source badge in the label position.
     expect(
       within(block).getByTestId("settings-ai-source-ai.provider"),
     ).toHaveTextContent(en.sources.environment);
-    // The key row sits beneath in the same block; the missing state shows
-    // the password input.
-    const keyRow = within(block).getByTestId("settings-ai-row-ai.api_key");
+    // The missing state shows the not-configured status beside the label.
     expect(
       within(keyRow).getByTestId("settings-ai-api-key-status"),
     ).toHaveTextContent(en.keyMissing);
-    expect(
-      within(keyRow).getByTestId("settings-ai-api-key-input"),
-    ).toHaveAttribute("type", "password");
   });
 
   it("saves an API key end to end and flips status to dashboard", async () => {
@@ -889,7 +1053,7 @@ describe("AiSettingsSection (#924)", () => {
     fireEvent.change(screen.getByTestId("settings-ai-api-key-input"), {
       target: { value: "sk-live-dashboard-key" },
     });
-    screen.getByTestId("settings-ai-save-ai.api_key").click();
+    screen.getByTestId("settings-ai-save-changes").click();
 
     await waitFor(() => {
       expect(mockWriteSetting).toHaveBeenCalledWith(
@@ -934,11 +1098,11 @@ describe("AiSettingsSection (#924)", () => {
     fireEvent.change(screen.getByTestId("settings-ai-api-key-input"), {
       target: { value: "sk-key" },
     });
-    screen.getByTestId("settings-ai-save-ai.api_key").click();
+    screen.getByTestId("settings-ai-save-changes").click();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.api_key"),
+        screen.getByTestId("settings-ai-field-error-ai.api_key"),
       ).toHaveTextContent("non-mock provider requires a resolvable API key");
     });
   });
@@ -991,9 +1155,8 @@ describe("AiSettingsSection (#924)", () => {
     expect(screen.getByTestId("settings-ai-band-asr")).toHaveTextContent(
       "whisper-large-v3-turbo",
     );
-    expect(screen.getByTestId("settings-ai-band-base-url")).toHaveTextContent(
-      "https://api.openai.com/v1",
-    );
+    // #939: the base-URL pill is gone from the band.
+    expect(screen.queryByTestId("settings-ai-band-base-url")).toBeNull();
     // Only the two well-formed pricing lines count; "bad-line" does not.
     expect(
       screen.getByTestId("settings-ai-band-pricing-count"),
@@ -1155,11 +1318,11 @@ describe("AiSettingsSection (#924)", () => {
     fireEvent.change(screen.getByTestId("settings-ai-model-custom"), {
       target: { value: "unpriced-model" },
     });
-    screen.getByTestId("settings-ai-save-ai.model").click();
+    screen.getByTestId("settings-ai-save-changes").click();
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("settings-ai-save-error-ai.model"),
+        screen.getByTestId("settings-ai-field-error-ai.model"),
       ).toHaveAttribute("role", "alert");
     });
   });
