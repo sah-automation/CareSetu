@@ -40,8 +40,13 @@ type FormStatus = "idle" | "saving" | "saved" | "error";
 
 // ~₹88.5/USD (#917): FX rate for the USD-per-1M price preview, from config.
 // USD per 1M tokens = paise-per-token * 1e6 / PAISE_PER_USD.
-const PAISE_PER_USD =
-  Number(process.env.NEXT_PUBLIC_PAISE_PER_USD ?? "8850") || 8850;
+// Env-driven: NEXT_PUBLIC_PAISE_PER_USD must be set at deploy time.
+const PAISE_PER_USD = Number(process.env.NEXT_PUBLIC_PAISE_PER_USD);
+if (!Number.isFinite(PAISE_PER_USD)) {
+  throw new Error(
+    "NEXT_PUBLIC_PAISE_PER_USD must be set and be a valid number",
+  );
+}
 
 const AI_FIELD_KEYS = [
   "ai.provider",
@@ -102,29 +107,14 @@ function dashboardDate(value: string): string {
   }
 }
 
-// #930: the one source->key-state mapping, shared by the status label and
-// the input's visibility, so a new source cannot desync the two.
+// #930: the one source->key-state mapping used for the input's visibility,
+// so a new source cannot desync the two.
 type ApiKeyState = "env" | "dashboard" | "missing";
 
 function apiKeyState(source: SettingSource | undefined): ApiKeyState {
   if (source === "environment") return "env";
   if (source === "database") return "dashboard";
   return "missing";
-}
-
-function apiKeyStatusLabel(
-  value: unknown,
-  source: SettingSource | undefined,
-  t: AiStrings,
-): string {
-  const state = apiKeyState(source);
-  if (state === "env") return t.keyFromEnv;
-  if (state === "dashboard") {
-    const v = value === null || value === undefined ? "" : String(value);
-    const date = dashboardDate(v);
-    return date ? `${t.keyFromDashboard}, set ${date}` : t.keyFromDashboard;
-  }
-  return t.keyMissing;
 }
 
 function usdPer1M(paisePerToken: number): string {
@@ -473,7 +463,11 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
     return value;
   }
 
-  function validateValue(key: AiFieldKey, value: string): string | undefined {
+  function validateValue(
+    key: AiFieldKey,
+    value: string,
+    entriesBeingSaved: Array<{ key: string; value: string }>,
+  ): string | undefined {
     if (value === "") return ai.validationRequired;
 
     // Client-side guard: a custom model requires a pricing-table entry.
@@ -489,7 +483,13 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
         ...(entry?.asr_models ?? []),
       ]);
       if (!known.has(value)) {
-        const pricing = parsePricingTable(drafts["ai.pricing_table"]);
+        // Check if pricing table is also being saved in this batch; if so,
+        // use the new value for validation instead of the stale draft.
+        const pricingEntry = entriesBeingSaved.find(
+          (e) => e.key === "ai.pricing_table",
+        );
+        const pricingText = pricingEntry?.value ?? drafts["ai.pricing_table"];
+        const pricing = parsePricingTable(pricingText);
         if (!pricing.some((row) => row.valid && row.model === value)) {
           return ai.validationCustomPrice;
         }
@@ -509,15 +509,25 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
     // model/fallback fields, then the pricing table.
     const entries: Array<{ key: AiFieldKey | "ai.api_key"; value: string }> =
       [];
-    for (const key of AI_FIELD_KEYS) {
-      if (drafts[key] === current[key]) continue;
-      entries.push({ key, value: resolveSaveValue(key) });
-      if (key === "ai.provider" && apiKeyChanged) {
+    const providerDirty = drafts["ai.provider"] !== current["ai.provider"];
+
+    if (providerDirty) {
+      entries.push({
+        key: "ai.provider",
+        value: resolveSaveValue("ai.provider"),
+      });
+      if (apiKeyChanged) {
         entries.push({ key: "ai.api_key", value: apiKeyDraft });
       }
-    }
-    if (apiKeyChanged && !entries.some((e) => e.key === "ai.api_key")) {
+    } else if (apiKeyChanged) {
+      // Provider not dirty but key is: key still writes before model fields
       entries.push({ key: "ai.api_key", value: apiKeyDraft });
+    }
+
+    for (const key of AI_FIELD_KEYS) {
+      if (key === "ai.provider") continue;
+      if (drafts[key] === current[key]) continue;
+      entries.push({ key, value: resolveSaveValue(key) });
     }
     if (entries.length === 0) return;
 
@@ -528,7 +538,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
       // The key draft cannot be empty: apiKeyChanged already requires a
       // non-empty draft, so there is nothing to validate for it.
       if (entry.key === "ai.api_key") continue;
-      const validationError = validateValue(entry.key, entry.value);
+      const validationError = validateValue(entry.key, entry.value, entries);
       if (validationError) errors[entry.key] = validationError;
     }
     if (Object.keys(errors).length > 0) {
@@ -556,10 +566,27 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
         }
         savedAny = true;
       } catch (error) {
-        const message =
-          error instanceof ApiError
-            ? error.message || ai.saveErrorExpected
-            : ai.saveError;
+        const isApiError = error instanceof ApiError;
+        const traceId = isApiError ? error.traceId : "";
+        const status = isApiError ? error.status : undefined;
+        const message = isApiError
+          ? error.message || ai.saveErrorExpected
+          : ai.saveError;
+
+        // Structured error logging with trace_id correlation (coding-standards §8.4)
+        console.error("AI settings save failed", {
+          key: entry.key,
+          traceId,
+          status,
+          code: isApiError ? error.code : "UNKNOWN",
+          message,
+        });
+
+        // For display: always show the backend refusal message when we have one.
+        // The 4xx/5xx distinction (api-standards §2) is used for retry logic:
+        // 4xx = don't retry (client error), 5xx/unknown = retryable (server error).
+        const isClientError =
+          status !== undefined && status >= 400 && status < 500;
         setFieldErrors((cur) => ({ ...cur, [entry.key]: message }));
         setFormStatus("error");
         setFormError(message);
@@ -686,7 +713,7 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
               data-testid="settings-ai-provider-block"
               className={CARD_FRAME}
             >
-              <div className="divide-y divide-hairline">
+              <div className="grid grid-cols-1 gap-x-6 p-2 md:grid-cols-2">
                 <AiFieldRow
                   variant="block"
                   fieldKey="ai.provider"
@@ -697,89 +724,65 @@ export function AiSettingsSection({ t, isAdmin }: AiSectionProps) {
                   t={ai}
                   error={fieldErrors["ai.provider"]}
                   control={
-                    // #939: the provider select and the API key field sit
-                    // side by side in one row; the key input is the wider
-                    // of the two.
-                    <div className="flex flex-wrap items-start gap-3">
-                      <select
-                        value={drafts["ai.provider"]}
-                        onChange={(event) => {
-                          handleDraft("ai.provider", event.target.value);
-                          setApiKeyDraft("");
-                        }}
-                        disabled={!isAdmin || !currentEditable["ai.provider"]}
-                        className={`${FIELD_CLASS} w-48`}
-                        id="ai.provider"
-                        data-testid="settings-ai-provider-select"
-                      >
-                        {providers.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.display_name}
-                          </option>
-                        ))}
-                      </select>
-                      {providerRequiresKey && (
-                        <div
-                          className="flex flex-col gap-1"
-                          data-testid="settings-ai-row-ai.api_key"
-                        >
-                          <div className="flex items-baseline gap-2">
-                            <label
-                              htmlFor="ai.api_key"
-                              className="text-sm font-medium text-txt"
-                            >
-                              {ai.apiKeyLabel}
-                            </label>
-                            <Badge
-                              variant="secondary"
-                              className="text-xs"
-                              data-testid="settings-ai-api-key-status"
-                            >
-                              {apiKeyStatusLabel(
-                                apiKeyRow?.value,
-                                apiKeyRow?.source,
-                                ai,
-                              )}
-                            </Badge>
-                          </div>
-                          {!apiKeyConfigured && (
-                            <>
-                              <input
-                                type="password"
-                                value={apiKeyDraft}
-                                onChange={(event) =>
-                                  handleApiKeyDraft(event.target.value)
-                                }
-                                disabled={!isAdmin || !currentEditableApiKey}
-                                placeholder={ai.apiKeyPlaceholder}
-                                className={`${FIELD_CLASS} w-64`}
-                                id="ai.api_key"
-                                data-testid="settings-ai-api-key-input"
-                              />
-                              {fieldErrors["ai.api_key"] ? (
-                                <span
-                                  role="alert"
-                                  className="text-xs text-danger"
-                                  data-testid="settings-ai-field-error-ai.api_key"
-                                >
-                                  {fieldErrors["ai.api_key"]}
-                                </span>
-                              ) : null}
-                              {!isAdmin || !currentEditableApiKey ? (
-                                <span
-                                  className="text-xs text-txt-muted"
-                                  data-testid="settings-ai-readonly-ai.api_key"
-                                >
-                                  {ai.readOnly}
-                                </span>
-                              ) : null}
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                    <select
+                      value={drafts["ai.provider"]}
+                      onChange={(event) => {
+                        handleDraft("ai.provider", event.target.value);
+                        setApiKeyDraft("");
+                      }}
+                      disabled={!isAdmin || !currentEditable["ai.provider"]}
+                      className={`${FIELD_CLASS} w-full md:w-48`}
+                      id="ai.provider"
+                      data-testid="settings-ai-provider-select"
+                    >
+                      {providers.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.display_name}
+                        </option>
+                      ))}
+                    </select>
                   }
                 />
+                {providerRequiresKey && (
+                  <AiFieldRow
+                    variant="block"
+                    fieldKey="ai.api_key"
+                    label={ai.apiKeyLabel}
+                    source={apiKeyRow?.source}
+                    editable={currentEditableApiKey}
+                    isAdmin={isAdmin}
+                    t={ai}
+                    error={fieldErrors["ai.api_key"]}
+                    control={
+                      <div className="flex flex-col gap-1">
+                        {!apiKeyConfigured && (
+                          <>
+                            <input
+                              type="password"
+                              value={apiKeyDraft}
+                              onChange={(event) =>
+                                handleApiKeyDraft(event.target.value)
+                              }
+                              disabled={!isAdmin || !currentEditableApiKey}
+                              placeholder={ai.apiKeyPlaceholder}
+                              className={`${FIELD_CLASS} w-full md:w-64`}
+                              id="ai.api_key"
+                              data-testid="settings-ai-api-key-input"
+                            />
+                            {!isAdmin || !currentEditableApiKey ? (
+                              <span
+                                className="text-xs text-txt-muted"
+                                data-testid="settings-ai-readonly-ai.api_key"
+                              >
+                                {ai.readOnly}
+                              </span>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+                    }
+                  />
+                )}
               </div>
             </div>
 

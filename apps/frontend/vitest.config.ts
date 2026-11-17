@@ -15,6 +15,7 @@ export default defineConfig({
     include: ["src/**/*.test.{ts,tsx}"],
     env: {
       NEXT_PUBLIC_API_BASE_URL: "http://localhost:8000",
+      NEXT_PUBLIC_PAISE_PER_USD: "8850",
     },
   },
 });

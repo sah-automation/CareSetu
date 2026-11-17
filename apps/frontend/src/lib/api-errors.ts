@@ -93,8 +93,13 @@ export async function parseErrorEnvelope(
 ): Promise<ErrorEnvelope> {
   try {
     const json = await response.json();
-    if (json !== null && typeof json === "object" && "detail" in json) {
-      return json.detail ?? json;
+    if (
+      json !== null &&
+      typeof json === "object" &&
+      "detail" in json &&
+      json.detail !== null
+    ) {
+      return json.detail as ErrorEnvelope;
     }
     return json as ErrorEnvelope;
   } catch {

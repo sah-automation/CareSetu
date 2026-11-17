@@ -916,25 +916,21 @@ describe("AiSettingsSection (#924)", () => {
     ];
   }
 
-  it("renders the API key field with the env status label", async () => {
+  it("renders the API key field with the env status (no status badge)", async () => {
     await renderSection(
       adminAuth(),
       providers,
       apiKeySettings("configured from environment", "environment"),
     );
 
+    // Env-configured: no password input, no status badge
     await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-api-key-status"),
-      ).toHaveTextContent(en.keyFromEnv);
+      expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+      expect(screen.queryByTestId("settings-ai-api-key-status")).toBeNull();
     });
-    // Env-configured (#930): the masked status stands alone - no password
-    // input and no save control while a key exists.
-    expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
-    expect(screen.queryByTestId("settings-ai-save-ai.api_key")).toBeNull();
   });
 
-  it("renders the API key field with the dashboard status label and date", async () => {
+  it("renders the API key field with the dashboard status (no status badge)", async () => {
     await renderSection(
       adminAuth(),
       providers,
@@ -944,16 +940,14 @@ describe("AiSettingsSection (#924)", () => {
       ),
     );
 
+    // Dashboard-configured: no password input, no status badge
     await waitFor(() => {
-      const status = screen.getByTestId("settings-ai-api-key-status");
-      expect(status).toHaveTextContent(en.keyFromDashboard);
-      expect(status).toHaveTextContent(/set/);
+      expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+      expect(screen.queryByTestId("settings-ai-api-key-status")).toBeNull();
     });
-    // Dashboard-configured (#930): masked status only, no password input.
-    expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
   });
 
-  it("renders the API key field with the missing status label", async () => {
+  it("renders the API key field with the missing state (shows input, no status badge)", async () => {
     await renderSection(
       adminAuth(),
       providers,
@@ -964,10 +958,8 @@ describe("AiSettingsSection (#924)", () => {
       expect(
         screen.getByTestId("settings-ai-api-key-input"),
       ).toBeInTheDocument();
+      expect(screen.queryByTestId("settings-ai-api-key-status")).toBeNull();
     });
-    expect(screen.getByTestId("settings-ai-api-key-status")).toHaveTextContent(
-      en.keyMissing,
-    );
   });
 
   it("hides the API key field for the mock provider (no key required)", async () => {
@@ -1001,27 +993,20 @@ describe("AiSettingsSection (#924)", () => {
     expect(
       within(providerRow).getByTestId("settings-ai-provider-select"),
     ).toBeInTheDocument();
-    // The key field is the provider select's side-by-side companion, inside
-    // the same visual row; the base-URL pill is gone (#939).
-    const keyRow = within(providerRow).getByTestId(
-      "settings-ai-row-ai.api_key",
-    );
+    // The key field is the provider select's side-by-side companion in the
+    // same grid row; the base-URL pill is gone (#939).
+    const keyRow = within(block).getByTestId("settings-ai-row-ai.api_key");
     const keyInput = within(keyRow).getByTestId("settings-ai-api-key-input");
     expect(keyInput).toHaveAttribute("type", "password");
-    expect(
-      keyInput.compareDocumentPosition(
-        within(providerRow).getByTestId("settings-ai-provider-select"),
-      ) & Node.DOCUMENT_POSITION_PRECEDING,
-    ).toBeTruthy();
     expect(within(block).queryByTestId("settings-ai-base-url")).toBeNull();
     // The provider row keeps its source badge in the label position.
     expect(
       within(block).getByTestId("settings-ai-source-ai.provider"),
     ).toHaveTextContent(en.sources.environment);
-    // The missing state shows the not-configured status beside the label.
+    // The API key status badge is removed.
     expect(
-      within(keyRow).getByTestId("settings-ai-api-key-status"),
-    ).toHaveTextContent(en.keyMissing);
+      within(block).queryByTestId("settings-ai-api-key-status"),
+    ).toBeNull();
   });
 
   it("saves an API key end to end and flips status to dashboard", async () => {
@@ -1061,14 +1046,12 @@ describe("AiSettingsSection (#924)", () => {
         "sk-live-dashboard-key",
       );
     });
-    // After the reload the key is dashboard-configured: the masked status
-    // stands alone and the password input is gone (#930).
+    // After the reload the key is dashboard-configured: no password input
+    // and no status badge (#930).
     await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-api-key-status"),
-      ).toHaveTextContent(en.keyFromDashboard);
+      expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+      expect(screen.queryByTestId("settings-ai-api-key-status")).toBeNull();
     });
-    expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
     // Plaintext never renders anywhere.
     expect(screen.queryByText("sk-live-dashboard-key")).toBeNull();
   });
@@ -1208,20 +1191,17 @@ describe("AiSettingsSection (#924)", () => {
     render(<LangFlipHost />);
 
     await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-api-key-status"),
-      ).toBeInTheDocument();
+      expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+      expect(screen.queryByTestId("settings-ai-api-key-status")).toBeNull();
     });
 
     screen.getByText("flip-lang").click();
 
     await waitFor(() => {
-      expect(
-        screen.getByTestId("settings-ai-api-key-status"),
-      ).toHaveTextContent(hi.keyFromEnv);
+      expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
+      expect(screen.queryByTestId("settings-ai-api-key-status")).toBeNull();
     });
-    // Env-configured: the masked status stands alone in Hindi too, with no
-    // password input (#930).
+    // Env-configured: no password input, no status badge in Hindi either.
     expect(screen.queryByTestId("settings-ai-api-key-input")).toBeNull();
   });
 
