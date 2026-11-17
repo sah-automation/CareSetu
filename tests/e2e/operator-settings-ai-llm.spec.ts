@@ -1,6 +1,7 @@
 // Operator settings: admin walks the AI & LLM section - switches provider,
-// picks a chat model, saves a price, and observes effective values update
-// (#926). Modeled on operator-settings-cache-redis.spec.ts.
+// picks a chat model, saves everything with the section's one "Save changes"
+// button (#939), and observes effective values update (#926). Modeled on
+// operator-settings-cache-redis.spec.ts.
 
 import {
   expect,
@@ -163,18 +164,15 @@ test("admin switches provider and model, saves, and sees effective values update
   await modelSelect.selectOption(MODEL_OPENAI);
   await expect(modelSelect).toHaveValue(MODEL_OPENAI);
 
-  const modelSave = page.getByTestId(`settings-ai-save-ai.model`);
-  await modelSave.click();
-  await expect(page.getByTestId("settings-ai-save-status-ai.model")).toHaveText(
+  // #939: one "Save changes" button writes every changed field; the aggregate
+  // banner reports the saved state.
+  const saveChanges = page.getByTestId("settings-ai-save-changes");
+  await expect(saveChanges).toBeVisible({ timeout: 30_000 });
+  await saveChanges.click();
+  await expect(page.getByTestId("settings-ai-save-banner")).toHaveText(
     /Saved/i,
     { timeout: 30_000 },
   );
-
-  const providerSave = page.getByTestId(`settings-ai-save-ai.provider`);
-  await providerSave.click();
-  await expect(
-    page.getByTestId("settings-ai-save-status-ai.provider"),
-  ).toHaveText(/Saved/i, { timeout: 30_000 });
 
   // Persistence: the saved values become the database override, so the
   // effective source badge flips to "Database override" after a reload.
@@ -249,10 +247,15 @@ test("pricing save with USD preview visible; invalid price input shows the rejec
   await expect(preview).toContainText("USD per 1M tokens");
   await expect(preview).toContainText(MODEL_OPENAI);
 
-  await page.getByTestId(`settings-ai-save-ai.pricing_table`).click();
-  await expect(
-    page.getByTestId("settings-ai-save-status-ai.pricing_table"),
-  ).toHaveText(/Saved/i, { timeout: 30_000 });
+  // #939: the pricing draft is saved by the section's one "Save changes"
+  // button (together with the provider/model drafts made above).
+  const saveChanges = page.getByTestId("settings-ai-save-changes");
+  await expect(saveChanges).toBeVisible({ timeout: 30_000 });
+  await saveChanges.click();
+  await expect(page.getByTestId("settings-ai-save-banner")).toHaveText(
+    /Saved/i,
+    { timeout: 30_000 },
+  );
 
   // Invalid price input: preview shows the rejection, no USD value.
   await pricing.fill(`${MODEL_OPENAI}:abc:200`);
