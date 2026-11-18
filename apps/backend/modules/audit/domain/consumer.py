@@ -21,6 +21,7 @@ from bus.events import (
     EVENT_CREDENTIAL_INVALIDATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
+    EVENT_PATIENT_VERIFIED,
     is_regulated_act,
 )
 from modules.audit.domain.chain import compute_audit_hash
@@ -280,6 +281,21 @@ class CredentialInvalidatedPayload(BaseModel):
     reason: str
 
 
+class PatientVerifiedPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-001's ``patient.verified`` payload."""
+
+    identity_id: int
+    phone_e164: str
+
+
+class OtpSentPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-001's ``otp.sent`` payload."""
+
+    identity_id: int
+    challenge_id: int
+    expires_at: datetime
+
+
 def build_partner_registered_row(
     payload: PartnerRegisteredPayload,
     producer: str,
@@ -499,6 +515,42 @@ def build_record_access_row(
         prev_hash=prev_hash,
         hash=digest,
     )
+
+
+def build_patient_verified_row(
+    payload: PatientVerifiedPayload,
+    producer: str,
+    occurred_at: datetime,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one ``patient.verified`` act."""
+    identity_uuid = _actor_uuid(payload.identity_id)
+    metadata: dict[str, Any] = {
+        "producer": producer,
+        "identity_id": payload.identity_id,
+    }
+    digest = compute_audit_hash(
+        EVENT_PATIENT_VERIFIED,
+        identity_uuid,
+        identity_uuid,
+        "patient_identity",
+        metadata,
+        occurred_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=EVENT_PATIENT_VERIFIED,
+        actor_id=identity_uuid,
+        target_id=identity_uuid,
+        scope="patient_identity",
+        metadata=metadata,
+        timestamp=occurred_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
+
+
+build_patient_verified_act = build_patient_verified_row
 
 
 class TamperDetectedPayload(BaseModel):

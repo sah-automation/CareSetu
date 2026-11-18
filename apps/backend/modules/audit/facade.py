@@ -26,6 +26,7 @@ from modules.audit.domain.consumer import (
     CredentialReviewedPayload,
     PartnerDecisionPayload,
     PartnerRegisteredPayload,
+    PatientVerifiedPayload,
     RecordAccessAuditPayload,
     _partner_uuid,
     build_audit_row,
@@ -33,6 +34,7 @@ from modules.audit.domain.consumer import (
     build_credential_reviewed_row,
     build_partner_decision_row,
     build_partner_registered_row,
+    build_patient_verified_row,
     build_record_access_row,
 )
 from modules.audit.schema.models import audit_events
@@ -284,6 +286,34 @@ async def append_credential_invalidated_event(
         )
     )
     return row
+
+
+async def append_patient_verified_event(
+    connection: AsyncConnection,
+    payload: PatientVerifiedPayload,
+    producer: str,
+    occurred_at: datetime,
+) -> AuditRow:
+    """Append one ``patient.verified`` act to the hash-chained ledger."""
+    prev_hash = await _latest_hash(connection)
+    row = build_patient_verified_row(payload, producer, occurred_at, prev_hash)
+    await connection.execute(
+        insert(audit_events).values(
+            event_type=row.event_type,
+            actor_id=row.actor_id,
+            target_id=row.target_id,
+            scope=row.scope,
+            metadata=row.metadata,
+            timestamp=row.timestamp,
+            prev_hash=row.prev_hash,
+            hash=row.hash,
+        )
+    )
+    return row
+
+
+append_patient_verified_act = append_patient_verified_event
+append_patient_verified = append_patient_verified_event
 
 
 class AuditEventView(BaseModel):
