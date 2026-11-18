@@ -60,6 +60,16 @@ class HandlerRegistry:
         """Return the payload model registered for ``event_type`` (None if none)."""
         return self._payload_models.get(event_type)
 
+    @property
+    def payload_models(self) -> frozenset[str]:
+        """Every ``event_type`` with a registered payload model."""
+        return frozenset(self._payload_models)
+
+    @property
+    def event_types_with_handlers(self) -> frozenset[str]:
+        """Every ``event_type`` with at least one registered handler."""
+        return frozenset(self._handlers)
+
     def handlers_for(self, event_type: str) -> tuple[Handler, ...]:
         """Return the handlers registered for ``event_type`` (empty if none)."""
         return tuple(self._handlers.get(event_type, ()))

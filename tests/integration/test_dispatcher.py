@@ -435,7 +435,7 @@ def test_dead_lettered_row_is_not_claimed_again(
     assert rows[0]["status"] == "dead_letter"
 
 
-def test_row_without_registered_payload_model_is_left_for_reclaim(
+def test_row_without_registered_payload_model_is_dead_lettered_after_cap(
     database_url: str, reachable_db: None, throwaway_schema: str
 ) -> None:
     asyncio.run(_materialize(database_url, throwaway_schema))
@@ -445,19 +445,26 @@ def test_row_without_registered_payload_model_is_left_for_reclaim(
     registry = HandlerRegistry()
     registry.register("phase1.round_trip", _idempotent_subscriber(database_url, throwaway_schema))
 
-    result = _poll(database_url, throwaway_schema, registry)
+    config = DispatcherConfig(backoff_base_seconds=0.0)
+    results = _poll_times(
+        database_url,
+        throwaway_schema,
+        registry,
+        times=POLL_TIMES_UP_TO_CAP,
+        config=config,
+    )
 
-    assert result.claimed == 1
-    assert result.fanned_out == 0
-    assert result.deleted == 0
+    assert sum(result.retried for result in results) == 4
+    assert sum(result.dead_lettered for result in results) == 1
     rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
     assert len(rows) == 1
-    assert rows[0]["status"] == "inflight"
+    assert rows[0]["status"] == "dead_letter"
+    assert rows[0]["attempts"] == 5
     assert asyncio.run(_ledger_count(database_url, throwaway_schema)) == 0
 
 
-def test_row_with_no_registered_handlers_is_left_for_reclaim_not_deleted(
-    database_url: str, reachable_db: None, throwaway_schema: str
+def test_row_with_no_registered_handlers_is_deleted_as_successful_delivery(
+    database_url: str, reachable_db: None, throwaway_schema: str, caplog: Any
 ) -> None:
     asyncio.run(_materialize(database_url, throwaway_schema))
     envelope = _envelope()
@@ -466,14 +473,16 @@ def test_row_with_no_registered_handlers_is_left_for_reclaim_not_deleted(
     registry = HandlerRegistry()
     registry.register_payload_model("phase1.round_trip", RoundTripPayload)
 
-    result = _poll(database_url, throwaway_schema, registry)
+    with caplog.at_level(logging.ERROR, logger="bus.dispatcher"):
+        result = _poll(database_url, throwaway_schema, registry)
 
     assert result.claimed == 1
     assert result.fanned_out == 1
-    assert result.deleted == 0
-    rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
-    assert len(rows) == 1
-    assert rows[0]["status"] == "inflight"
+    assert result.deleted == 1
+    # Zero subscribers is a successful no-op delivery, not an error: the row
+    # drains and no "no handler" line is logged (issue #944).
+    assert not [record for record in caplog.records if "no handler" in record.getMessage()]
+    assert asyncio.run(_outbox_rows(database_url, throwaway_schema)) == []
     assert asyncio.run(_ledger_count(database_url, throwaway_schema)) == 0
 
 

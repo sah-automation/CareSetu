@@ -18,18 +18,19 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from bus.dispatcher import DispatcherConfig, OutboxTable, process_outbox_table
-from bus.events import EVENT_DIRECTORY_SEARCH, EVENT_OTP_SENT, EVENT_PATIENT_VERIFIED
+from bus.events import EVENT_OTP_SENT
 from bus.outbox_ddl import materialize_consumed_events, materialize_outbox
 from bus.outbox_writer import write_outbox
 from bus.registry import HandlerRegistry
 from modules.iam.adapters import register_handlers as iam_register_handlers
-from modules.iam.domain.events import otp_sent_envelope, patient_verified_envelope
+from modules.iam.domain.events import OtpSentPayload, otp_sent_envelope, patient_verified_envelope
 from modules.partner.adapters import register_handlers as partner_register_handlers
 from modules.partner.domain.events import directory_search_envelope
 
@@ -118,12 +119,89 @@ def test_fixed_event_types_reconstruct_and_fan_out_without_missing_model_error(
     assert missing_model == []
     assert result.claimed == 3
     # All three rows reconstructed (payload_model_for hit) and dispatched to the
-    # zero handlers a producer-only registry holds for them.
+    # zero handlers a producer-only registry holds for them: an event type with
+    # no subscribers drains as a successful delivery to all zero subscribers.
     assert result.fanned_out == 3
-    assert result.deleted == 0
+    assert result.deleted == 3
     states = asyncio.run(_outbox_states(database_url, throwaway_schema))
-    assert states == {
-        EVENT_OTP_SENT: ["inflight"],
-        EVENT_PATIENT_VERIFIED: ["inflight"],
-        EVENT_DIRECTORY_SEARCH: ["inflight"],
-    }
+    assert states == {}
+
+
+async def _publish_unvalidatable(database_url: str, schema: str) -> UUID:
+    """Publish an ``otp.sent`` row whose stored payload cannot validate.
+
+    The envelope is written normally, then the row's JSONB payload is replaced
+    with a shape ``OtpSentPayload`` rejects - simulating a corrupt or legacy row
+    whose reconstruction must fail at fan-out (issue #944).
+    """
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            envelope = otp_sent_envelope(
+                identity_id=1,
+                challenge_id=11,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+            await write_outbox(connection, schema, OUTBOX, envelope)
+            await connection.execute(
+                text(f'UPDATE "{schema}"."{OUTBOX}" SET payload = \'{{"unexpected": true}}\'')
+            )
+            return envelope.event_id
+    finally:
+        await engine.dispose()
+
+
+async def _outbox_row_states(database_url: str, schema: str) -> list[dict[str, Any]]:
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(
+                text(f'SELECT event_type, status, attempts FROM "{schema}"."{OUTBOX}"')
+            )
+            return [dict(mapping) for mapping in result.mappings().all()]
+    finally:
+        await engine.dispose()
+
+
+def test_row_with_an_unvalidatable_payload_is_dead_lettered_after_cap(
+    database_url: str, reachable_db: None, throwaway_schema: str, caplog: Any
+) -> None:
+    """A payload that fails reconstruction is a permanent delivery failure.
+
+    The reconstruction error rides the SAME failed-attempt path as a partial
+    fan-out (issue #944): attempts increment with backoff and the row reaches
+    ``dead_letter`` at ``max_attempts`` instead of looping inflight forever.
+    """
+    asyncio.run(_materialize(database_url, throwaway_schema))
+    asyncio.run(_publish_unvalidatable(database_url, throwaway_schema))
+
+    registry = HandlerRegistry()
+    registry.register_payload_model(EVENT_OTP_SENT, OtpSentPayload)
+    config = DispatcherConfig(backoff_base_seconds=0.0)
+
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        with caplog.at_level(logging.ERROR, logger="bus.dispatcher"):
+            results = []
+            for _ in range(config.max_attempts + 1):
+                result = asyncio.run(
+                    process_outbox_table(
+                        engine,
+                        OutboxTable(throwaway_schema, OUTBOX),
+                        registry,
+                        config,
+                    )
+                )
+                results.append(result)
+                if result.dead_lettered:
+                    break
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert sum(result.retried for result in results) == config.max_attempts - 1
+    assert sum(result.dead_lettered for result in results) == 1
+    rows = asyncio.run(_outbox_row_states(database_url, throwaway_schema))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead_letter"
+    assert rows[0]["attempts"] == config.max_attempts
+    assert any("dead-lettered" in record.getMessage() for record in caplog.records)
