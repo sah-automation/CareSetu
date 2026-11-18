@@ -206,6 +206,12 @@ class OtelSettings(Protocol):
     def otel_exporter_otlp_headers(self) -> tuple[str, ...]: ...
 
     @property
+    def otel_exporter_otlp_metrics_endpoint(self) -> str: ...
+
+    @property
+    def otel_exporter_otlp_traces_endpoint(self) -> str: ...
+
+    @property
     def otel_traces_sampler_ratio(self) -> float: ...
 
     @property
@@ -237,6 +243,103 @@ def parse_otlp_headers(headers: Sequence[str]) -> dict[str, str]:
         if separator and key.strip():
             parsed[key.strip()] = value.strip()
     return parsed
+
+
+# OTLP signal paths appended to a base endpoint when no explicit signal URL is
+# configured (mirrors the SDK's own resolution rules for its env vars).
+OTLP_METRICS_SIGNAL_PATH = "v1/metrics"
+OTLP_TRACES_SIGNAL_PATH = "v1/traces"
+
+
+def _normalize_otlp_endpoint(base: str = "", explicit: str = "", signal_path: str = "") -> str:
+    """Resolve one OTLP signal URL from a base + optional explicit override.
+
+    An explicit (full) signal endpoint always wins and is used verbatim. Otherwise
+    the signal path is appended to the base URL, so a base such as
+    ``https://otlp-gateway.example/otlp`` becomes the correct signal URL instead
+    of being posted to verbatim. A base that already ends in the signal path is
+    left alone, so an explicitly configured full endpoint passed as the base keeps
+    working.
+    """
+    explicit = (explicit or "").strip()
+    if explicit:
+        return explicit
+    base = (base or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if signal_path and base.endswith("/" + signal_path):
+        return base
+    if signal_path:
+        return f"{base}/{signal_path}"
+    return base
+
+
+def resolve_otlp_metrics_endpoint(
+    settings: Any = None,
+    *,
+    base: str | None = None,
+    explicit: str | None = None,
+) -> str:
+    """Resolve the OTLP metrics export URL for ``settings`` (or the given base)."""
+    if settings is not None:
+        base = getattr(settings, "otel_exporter_otlp_endpoint", "")
+        explicit = getattr(settings, "otel_exporter_otlp_metrics_endpoint", "")
+    return _normalize_otlp_endpoint(
+        base if base is not None else "",
+        explicit if explicit is not None else "",
+        OTLP_METRICS_SIGNAL_PATH,
+    )
+
+
+def resolve_otlp_traces_endpoint(
+    settings: Any = None,
+    *,
+    base: str | None = None,
+    explicit: str | None = None,
+) -> str:
+    """Resolve the OTLP traces export URL for ``settings`` (or the given base)."""
+    if settings is not None:
+        base = getattr(settings, "otel_exporter_otlp_endpoint", "")
+        explicit = getattr(settings, "otel_exporter_otlp_traces_endpoint", "")
+    return _normalize_otlp_endpoint(
+        base if base is not None else "",
+        explicit if explicit is not None else "",
+        OTLP_TRACES_SIGNAL_PATH,
+    )
+
+
+def resolve_otlp_endpoint(
+    settings_or_base: Any = None,
+    signal: str = "metrics",
+    explicit: str | None = None,
+) -> str:
+    """Generic resolver: ``signal`` is ``"metrics"`` or ``"traces"``."""
+    if isinstance(settings_or_base, str):
+        base = settings_or_base
+        if explicit is None:
+            explicit = ""
+    elif settings_or_base is None:
+        base = ""
+        if explicit is None:
+            explicit = ""
+    else:
+        settings = settings_or_base
+        base = getattr(settings, "otel_exporter_otlp_endpoint", "")
+        if explicit is None:
+            if signal == "traces":
+                explicit = getattr(settings, "otel_exporter_otlp_traces_endpoint", "")
+            else:
+                explicit = getattr(settings, "otel_exporter_otlp_metrics_endpoint", "")
+    path = OTLP_TRACES_SIGNAL_PATH if signal == "traces" else OTLP_METRICS_SIGNAL_PATH
+    return _normalize_otlp_endpoint(base or "", explicit or "", path)
+
+
+# Backwards/alternative spellings.
+normalize_otlp_endpoint = resolve_otlp_endpoint
+otlp_metrics_endpoint = resolve_otlp_metrics_endpoint
+otlp_traces_endpoint = resolve_otlp_traces_endpoint
+metrics_endpoint = resolve_otlp_metrics_endpoint
+traces_endpoint = resolve_otlp_traces_endpoint
 
 
 def _allowed_only(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -657,7 +760,7 @@ def init_metrics(
     if prom_endpoint:
         try:
             from opentelemetry import metrics
-            from opentelemetry.exporter.prometheus_remote_write import (  # type: ignore[import-not-found]
+            from opentelemetry.exporter.prometheus_remote_write import (
                 PrometheusRemoteWriteMetricsExporter,
             )
             from opentelemetry.sdk.metrics import MeterProvider
@@ -699,7 +802,7 @@ def init_metrics(
         return True
 
     # Priority 2: OTLP metric exporter (existing behavior)
-    otlp_endpoint = settings.otel_exporter_otlp_endpoint.strip()
+    otlp_endpoint = resolve_otlp_metrics_endpoint(settings)
     if not otlp_endpoint:
         log.info(
             "metrics endpoint unset (neither PROMETHEUS_REMOTE_WRITE_ENDPOINT "
@@ -781,7 +884,7 @@ def init_otel(
         log.info("otel disabled; request-path tracing off")
         return False
 
-    endpoint = settings.otel_exporter_otlp_endpoint.strip()
+    endpoint = resolve_otlp_traces_endpoint(settings)
     if not endpoint:
         log.info("otel endpoint unset; request-path tracing off")
         return False

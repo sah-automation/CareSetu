@@ -83,6 +83,9 @@ from observability.otel import (
     record_outbox_poll,
     record_request_error,
     record_request_latency,
+    resolve_otlp_endpoint,
+    resolve_otlp_metrics_endpoint,
+    resolve_otlp_traces_endpoint,
     start_span,
 )
 from observability.sentry import (
@@ -151,6 +154,9 @@ __all__ = [
     "reset_error_capture",
     "reset_http_counter",
     "reset_trace_id",
+    "resolve_otlp_endpoint",
+    "resolve_otlp_metrics_endpoint",
+    "resolve_otlp_traces_endpoint",
     "resolve_release",
     "route_template_for",
     "scrub_event",

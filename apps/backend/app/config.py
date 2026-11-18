@@ -703,8 +703,13 @@ class Settings:
     sentry_dsn: str = ""
     sentry_traces_sample_rate: float = DEFAULT_SENTRY_TRACES_SAMPLE_RATE
     otel_enabled: bool = False
+    # Base OTLP endpoint (no signal path). Signal-specific URLs are derived by
+    # appending /v1/traces or /v1/metrics unless an explicit override below is set.
     otel_exporter_otlp_endpoint: str = ""
     otel_exporter_otlp_headers: tuple[str, ...] = ()
+    # Optional explicit full signal endpoints (override the derived URLs above).
+    otel_exporter_otlp_metrics_endpoint: str = ""
+    otel_exporter_otlp_traces_endpoint: str = ""
     otel_traces_sampler_ratio: float = DEFAULT_OTEL_TRACES_SAMPLER_RATIO
     otel_service_version: str = ""
     metrics_enabled: bool = False
@@ -1291,7 +1296,10 @@ class Settings:
             raise ValueError(
                 "otel_traces_sampler_ratio must be finite and between 0 and 1 inclusive"
             )
-        if self.otel_enabled and not self.otel_exporter_otlp_endpoint.strip():
+        if self.otel_enabled and not (
+            self.otel_exporter_otlp_endpoint.strip()
+            or self.otel_exporter_otlp_traces_endpoint.strip()
+        ):
             raise ValueError(
                 "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
                 "environment (fail-closed)."
@@ -1814,6 +1822,10 @@ def get_settings() -> Settings:
         otel_enabled=_env_bool("OTEL_ENABLED", False),
         otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         otel_exporter_otlp_headers=_env_csv("OTEL_EXPORTER_OTLP_HEADERS"),
+        otel_exporter_otlp_metrics_endpoint=os.environ.get(
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", ""
+        ),
+        otel_exporter_otlp_traces_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ""),
         otel_traces_sampler_ratio=_env_float(
             "OTEL_TRACES_SAMPLER_RATIO", DEFAULT_OTEL_TRACES_SAMPLER_RATIO
         ),

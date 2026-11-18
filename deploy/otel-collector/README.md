@@ -6,8 +6,10 @@ free-tier budget is enforced: histogram series cardinality is controlled by
 the collector before export, so the application never has to know the
 vendor's limit (spec #717 decisions 37/38).
 
-- App side: `OTEL_EXPORTER_OTLP_ENDPOINT` points at this collector
-  (`http://127.0.0.1:4318`), one endpoint for traces, logs and metrics.
+- App side: `OTEL_EXPORTER_OTLP_ENDPOINT` points at this collector's base URL
+  (`http://127.0.0.1:4318`). Endpoint normalization appends the collector's
+  actual signal routes, so traces are posted to `/v1/traces` and metrics to
+  `/v1/metrics`.
 - Collector side: signals are received on `127.0.0.1:4317` (gRPC) and
   `127.0.0.1:4318` (HTTP), transformed, and exported to Grafana Cloud.
 - The application's own instrumentation is unchanged by this ticket. Any
