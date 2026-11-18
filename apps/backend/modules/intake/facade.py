@@ -225,6 +225,9 @@ class IntakeFacade:
         *,
         media_store: IntakeMediaStore | None = None,
         ai_gateway: AiGateway | None = None,
+        ai_config_resolver: Any = None,
+        ai_config_override_source: Any = None,
+        ai_override_source: Any = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         consent_facade: ConsentFacade | None = None,
         iam_facade: IamFacade | None = None,
@@ -234,6 +237,12 @@ class IntakeFacade:
         self._engine = engine
         self._media_store = media_store
         self._ai_gateway = ai_gateway
+        self._ai_config_resolver = ai_config_resolver
+        self._ai_config_override_source = (
+            ai_config_override_source
+            if ai_config_override_source is not None
+            else ai_override_source
+        )
         self._sleep = sleep
         self._consent_facade = consent_facade
         self._iam_facade = iam_facade
@@ -1694,9 +1703,37 @@ class IntakeFacade:
         """
         gateway = self._ai_gateway
         if gateway is None:
-            gateway = build_ai_gateway(get_settings())
+            from app.config import get_settings
+            from modules.intake.ai_config import AiConfigResolver
 
-        configured_provider, configured_model = configured_plan()
+            settings = get_settings()
+            resolver = self._ai_config_resolver
+            if resolver is None and self._ai_config_override_source is not None:
+                resolver = AiConfigResolver(
+                    settings, override_source=self._ai_config_override_source
+                )
+            if resolver is not None and hasattr(resolver, "resolve"):
+                ai_config = resolver.resolve()
+                gateway = build_ai_gateway(settings, ai_config=ai_config)
+            else:
+                ai_config = AiConfigResolver(settings).resolve()
+                gateway = build_ai_gateway(settings, ai_config=ai_config)
+            configured_provider, configured_model = configured_plan(ai_config=ai_config)
+        else:
+            from app.config import get_settings
+            from modules.intake.ai_config import AiConfigResolver
+
+            settings = get_settings()
+            resolver = self._ai_config_resolver
+            if resolver is None and self._ai_config_override_source is not None:
+                resolver = AiConfigResolver(
+                    settings, override_source=self._ai_config_override_source
+                )
+            if resolver is not None and hasattr(resolver, "resolve"):
+                ai_config = resolver.resolve()
+            else:
+                ai_config = AiConfigResolver(settings).resolve()
+            configured_provider, configured_model = configured_plan(ai_config=ai_config)
 
         draft_failure: Ext002CallError | ValidationError
         async with self._engine.begin() as connection:

@@ -31,10 +31,12 @@ from bus.events import (
     EVENT_AUDIT_EVENT,
     EVENT_AUDIT_TAMPER_DETECTED,
     EVENT_CREDENTIAL_INVALIDATED,
+    EVENT_OTP_SENT,
     EVENT_PARTNER_ACTIVATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
     EVENT_PARTNER_REJECTED,
+    EVENT_PATIENT_VERIFIED,
     EVENT_RECORD_ACCESSED,
     EVENT_RECORD_DENIED,
     is_regulated_act,
@@ -45,8 +47,10 @@ from modules.audit.domain.consumer import (
     AuditEventPayload,
     CredentialInvalidatedPayload,
     CredentialReviewedPayload,
+    OtpSentPayload,
     PartnerDecisionPayload,
     PartnerRegisteredPayload,
+    PatientVerifiedPayload,
     RecordAccessAuditPayload,
     TamperDetectedPayload,
     is_appended_act,
@@ -58,6 +62,7 @@ from modules.audit.facade import (
     append_credential_reviewed_event,
     append_partner_decision_event,
     append_partner_registered_event,
+    append_patient_verified_event,
     append_record_access_event,
 )
 
@@ -277,6 +282,47 @@ def register_handlers(registry: HandlerRegistry) -> None:
         )
 
     registry.register(EVENT_CREDENTIAL_INVALIDATED, append_credential_invalidated)
+
+    # ``patient.verified`` is a regulated act: append one row to the chain.
+    async def append_patient_verified(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``patient.verified``: append one verification row."""
+
+        async def _impl(connection: AsyncConnection, payload: PatientVerifiedPayload) -> None:
+            if not is_regulated_act(envelope.event_type):
+                return
+            await append_patient_verified_event(
+                connection,
+                payload,
+                envelope.producer,
+                envelope.occurred_at,
+            )
+
+        await run_handler(
+            envelope,
+            PatientVerifiedPayload,
+            _impl,
+            "append_patient_verified",
+            AUDIT_SCHEMA,
+        )
+
+    registry.register(EVENT_PATIENT_VERIFIED, append_patient_verified)
+
+    # ``otp.sent`` is operational: ledger-only consumer, no chain append.
+    async def track_otp_sent(envelope: Envelope[BaseModel]) -> None:
+        """Consume ``otp.sent``: record delivery without chaining."""
+
+        async def _impl(connection: AsyncConnection, payload: OtpSentPayload) -> None:
+            del connection, payload
+
+        await run_handler(
+            envelope,
+            OtpSentPayload,
+            _impl,
+            "track_otp_sent",
+            AUDIT_SCHEMA,
+        )
+
+    registry.register(EVENT_OTP_SENT, track_otp_sent)
 
     # MOD-011 owns the model + a logging consumer for its own tamper telemetry
     # event (written into ``audit.audit_outbox`` by the v3.2 trigger). Without

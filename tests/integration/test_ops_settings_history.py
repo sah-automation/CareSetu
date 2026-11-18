@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
+from modules.intake.ai_config import AiConfigResolver
 from modules.ops.domain.exceptions import InvalidSettingWriteError
 from modules.ops.domain.settings import EffectiveSetting, SettingHistoryEntry
 from modules.ops.facade import OpsFacade
@@ -49,7 +50,11 @@ class TestSettingsWriteHistory:
             updated_by=7,
         )
 
-        assert result == {"setting_key": "ai.timeout_seconds", "value": 15, "version": 1}
+        assert result == {
+            "setting_key": "ai.timeout_seconds",
+            "value": 15,
+            "version": 1,
+        }
 
         history = await facade.get_setting_history("ai.timeout_seconds")
         assert len(history) == 1
@@ -138,3 +143,130 @@ class TestSettingsWriteHistory:
                 await connection.execute(text("SELECT count(*) FROM ops.ops_setting_history"))
             ).scalar_one()
         assert count == 2
+
+
+class TestAiSettingsWrite:
+    """Valid AI settings writes: version bump, history row, audit event, cache invalidated."""
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("ai.provider", "openai_compatible"),
+            ("ai.model", "gemini-3.6-flash"),
+            ("ai.fallback_provider", "openai_compatible"),
+            ("ai.fallback_model", "openai/gpt-oss-120b"),
+            ("ai.asr_model", "whisper-large-v3"),
+            ("ai.pricing_table", "custom-model:1:2"),
+        ],
+    )
+    async def test_valid_ai_write_records_history_and_audit(
+        self, facade: OpsFacade, engine: AsyncEngine, key: str, value: object
+    ) -> None:
+        result = await facade.write_setting(setting_key=key, value=value, updated_by=7)
+
+        assert result["setting_key"] == key
+        assert result["value"] == value
+        assert result["version"] == 1
+
+        history = await facade.get_setting_history(key)
+        assert len(history) == 1
+        assert history[0].version == 1
+        assert history[0].changed_by == 7
+
+        async with engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        select(ops_outbox).where(ops_outbox.c.event_type == "audit.event")
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        assert len(rows) == 1
+        assert rows[0]["payload"]["action"] == "setting.write"
+        assert rows[0]["payload"]["setting_key"] == key
+
+    async def test_valid_write_bumps_version_on_rewrite(self, facade: OpsFacade) -> None:
+        await facade.write_setting("ai.model", "mock-model", updated_by=1)
+        result = await facade.write_setting("ai.model", "gemini-3.6-flash", updated_by=2)
+        assert result["version"] == 2
+
+    async def test_write_invalidates_cache_and_refreshes(self, facade: OpsFacade) -> None:
+        await facade.write_setting("ai.model", "gemini-3.6-flash", updated_by=7)
+        after = await facade.get_effective_settings()
+        row = next(s for s in after if s.key == "ai.model")
+        assert row.value == "gemini-3.6-flash"
+        assert row.source == "database"
+        assert row.editable is True
+
+
+class TestAiSettingsInvalidWrites:
+    """Invalid writes rejected per rule with the standard error envelope."""
+
+    async def test_unknown_provider_rejected(self, facade: OpsFacade) -> None:
+        with pytest.raises(InvalidSettingWriteError):
+            await facade.write_setting(
+                setting_key="ai.provider", value="unknown_provider", updated_by=7
+            )
+        assert await facade.get_setting_history("ai.provider") == []
+
+    async def test_custom_model_without_pricing_rejected(self, facade: OpsFacade) -> None:
+        with pytest.raises(InvalidSettingWriteError):
+            await facade.write_setting(
+                setting_key="ai.model", value="totally-custom-model", updated_by=7
+            )
+        assert await facade.get_setting_history("ai.model") == []
+
+    async def test_unparseable_pricing_table_rejected(self, facade: OpsFacade) -> None:
+        with pytest.raises(InvalidSettingWriteError):
+            await facade.write_setting(
+                setting_key="ai.pricing_table", value="malformed-entry", updated_by=7
+            )
+        assert await facade.get_setting_history("ai.pricing_table") == []
+
+    async def test_negative_price_rejected(self, facade: OpsFacade) -> None:
+        with pytest.raises(InvalidSettingWriteError):
+            await facade.write_setting(
+                setting_key="ai.pricing_table",
+                value="model:-1:1",
+                updated_by=7,
+            )
+        assert await facade.get_setting_history("ai.pricing_table") == []
+
+
+class TestAiResolverOverride:
+    """Dashboard override takes precedence over env/default."""
+
+    async def test_resolver_returns_dashboard_override(self, facade: OpsFacade) -> None:
+        await facade.write_setting("ai.provider", "openai_compatible", updated_by=7)
+        await facade.write_setting("ai.model", "gemini-3.6-flash", updated_by=7)
+
+        config = await AiConfigResolver(Settings(), override_source=facade).aresolve()
+
+        assert config.provider == "openai_compatible"
+        assert config.model == "gemini-3.6-flash"
+
+    async def test_resolver_override_ahead_of_env_default(self, facade: OpsFacade) -> None:
+        # Default env provider is "mock"; dashboard override wins.
+        await facade.write_setting("ai.provider", "openai_compatible", updated_by=7)
+        config = await AiConfigResolver(Settings(), override_source=facade).aresolve()
+        assert config.provider == "openai_compatible"
+
+    async def test_pricing_computation_picks_up_dashboard_override(self, facade: OpsFacade) -> None:
+        await facade.write_setting("ai.pricing_table", "custom-model:10:20", updated_by=7)
+
+        config = await AiConfigResolver(Settings(), override_source=facade).aresolve()
+        assert config.pricing_table_raw == "custom-model:10:20"
+        price = config.pricing_table.get("custom-model")
+        assert price is not None
+
+        from modules.intake.pricing import compute_cost_paise
+
+        cost = compute_cost_paise(
+            "custom-model",
+            input_tokens=100,
+            output_tokens=50,
+            table=config.pricing_table,
+        )
+        assert cost == 10 * 100 + 20 * 50  # 2000 paise

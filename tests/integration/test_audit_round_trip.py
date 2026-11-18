@@ -63,6 +63,7 @@ from modules.consent.outbox import CONSENT_OUTBOX_TABLE
 from modules.health.domain.events import record_accessed_envelope, record_denied_envelope
 from modules.health.outbox import HEALTH_OUTBOX_TABLE
 from modules.iam.adapters import register_handlers as register_iam_handlers
+from modules.partner.adapters import register_handlers as register_partner_handlers
 from modules.partner.domain.events import (
     credential_reviewed_envelope,
     partner_activated_envelope,
@@ -125,14 +126,16 @@ def _registry() -> HandlerRegistry:
 
 
 def _full_registry() -> HandlerRegistry:
-    """The composition-root registry for the partner gate: iam + audit.
+    """The composition-root registry for the partner gate: iam + partner + audit.
 
-    MOD-001 owns the registered payload models for ``partner.activated`` /
-    ``partner.rejected``, so both must be registered for the dispatcher to
-    reconstruct the decision envelopes - mirroring the worker's build.
+    The producer owns the payload models for ``partner.activated`` /
+    ``partner.rejected`` (issue #943), so the partner module's registration must
+    be present for the dispatcher to reconstruct the decision envelopes -
+    mirroring the worker's build.
     """
     registry = HandlerRegistry()
     register_iam_handlers(registry)
+    register_partner_handlers(registry)
     register_audit_handlers(registry)
     return registry
 

@@ -137,11 +137,14 @@ def build_thresholds(monthly_budget_paise: int | None) -> RollupThresholds:
     the domain module.
     """
     settings = get_settings()
+    from app.ai_config import AiConfigResolver
+
+    ai_config = AiConfigResolver(settings).resolve()
     return RollupThresholds(
         monthly_budget_paise=(
             monthly_budget_paise
             if monthly_budget_paise is not None
-            else settings.ai_monthly_budget_paise
+            else ai_config.monthly_budget_paise
         ),
         budget_alert_threshold_pct=settings.observability_budget_alert_threshold_pct,
         breaker_open_success_rate=settings.observability_breaker_open_success_rate,

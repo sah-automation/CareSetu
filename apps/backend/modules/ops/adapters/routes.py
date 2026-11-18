@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -12,6 +13,8 @@ from app.gateway.principal import Principal
 from app.gateway.rbac import require_admin, require_operator
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError, InvalidSettingWriteError
 from modules.ops.facade import OpsFacade
+
+logger = logging.getLogger(__name__)
 
 
 class EffectiveSettingResponse(BaseModel):
@@ -126,7 +129,7 @@ def _facade(request: Request) -> OpsFacade:
 )
 async def read_effective_settings(
     request: Request,
-    principal: Annotated[Principal, Depends(require_admin)],
+    principal: Annotated[Principal, Depends(require_operator)],
 ) -> EffectiveSettingsResponse:
     del principal
     facade = _facade(request)
@@ -347,3 +350,69 @@ async def write_setting(
     namespace = f"ops:{principal.subject_id}" if principal.subject_id is not None else "ops"
     response = await run_idempotent(request, _call, namespace=namespace)
     return response
+
+
+_AI_PROVIDER_CATALOG_PATHS: tuple[str, ...] = (
+    "/v1/operator/ai/catalog",
+    "/v1/operator/ai/provider-catalog",
+    "/v1/operator/ai/providers",
+    "/v1/operator/ai/model-catalog",
+    "/v1/operator/settings/ai-catalog",
+    "/v1/operator/settings/ai/providers",
+    "/v1/operator/settings/provider-catalog",
+    "/v1/ai/catalog",
+    "/v1/ai/provider-catalog",
+)
+
+
+class AiProviderCatalogEntryResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    provider: str = ""
+    provider_id: str = ""
+    display_name: str = ""
+    base_url: str = ""
+    chat_models: list[str] = []
+    asr_models: list[str] = []
+    api_key_env: str = ""
+
+
+class AiProviderCatalogResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    providers: list[AiProviderCatalogEntryResponse]
+    catalog: list[AiProviderCatalogEntryResponse] = []
+
+
+async def read_ai_provider_catalog(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> AiProviderCatalogResponse:
+    del principal
+    facade = _facade(request)
+    try:
+        catalog = facade.get_ai_provider_catalog()
+    except Exception as exc:
+        logger.exception("failed to read AI provider catalog")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "AI_PROVIDER_CATALOG_READ_FAILED",
+                "message": "Unable to load the AI provider catalog.",
+                "trace_id": request.state.trace_id if hasattr(request.state, "trace_id") else None,
+            },
+        ) from exc
+    entries = [AiProviderCatalogEntryResponse(**dict(entry)) for entry in catalog]
+    return AiProviderCatalogResponse(providers=entries, catalog=entries)
+
+
+for _index, _path in enumerate(_AI_PROVIDER_CATALOG_PATHS):
+    router.add_api_route(
+        _path,
+        read_ai_provider_catalog,
+        methods=["GET"],
+        status_code=status.HTTP_200_OK,
+        summary="Read the AI provider/model catalog (admin only)",
+        include_in_schema=(_index == 0),
+    )

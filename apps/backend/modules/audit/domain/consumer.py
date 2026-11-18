@@ -12,15 +12,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast, get_args
 from uuid import NAMESPACE_DNS, uuid5
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from bus.events import (
     EVENT_CREDENTIAL_INVALIDATED,
     EVENT_PARTNER_CREDENTIAL_REVIEWED,
     EVENT_PARTNER_REGISTERED,
+    EVENT_PATIENT_VERIFIED,
     is_regulated_act,
 )
 from modules.audit.domain.chain import compute_audit_hash
@@ -35,6 +36,26 @@ RecordScope = Literal[
     "consultations", "prescriptions", "lab_results", "metrics", "health_background", "full_record"
 ]
 
+#: The consent variant's actions, derived from the ``ConsentAuditAction`` alias
+#: so the carrier validator and the act-type derivation stay in sync.
+CONSENT_CARRIER_ACTIONS: frozenset[str] = frozenset(get_args(ConsentAuditAction))
+
+#: The ops variant's actions (MOD-014 configuration writes, issue #945).
+OPS_AUDIT_ACTION_SETTING_WRITE = "setting.write"
+OPS_AUDIT_ACTION_FEATURE_FLAG_WRITE = "feature_flag.write"
+
+#: The closed set of carrier actions the widened ``audit.event`` model accepts
+#: (issue #945): the four consent lifecycle verbs plus the two ops
+#: configuration-write verbs.
+AuditCarrierAction = Literal[
+    "requested",
+    "granted",
+    "revoked",
+    "declined",
+    "setting.write",
+    "feature_flag.write",
+]
+
 #: Stable namespace for the deterministic int->UUID derivation. Fixed so the
 #: same consent int id always maps to the same ``audit_events`` actor/target
 #: UUID, DB-free and reproducible across runs.
@@ -46,30 +67,92 @@ class AuditEventPayload(BaseModel):
 
     The dispatcher reconstructs a claimed ``audit.event`` outbox row into this
     model - the registry's registered payload model for ``audit.event`` - so
-    its field contract is a byte-for-byte mirror of what producers publish;
-    today that is MOD-004's ``ConsentAuditPayload``. The mirror lives here so
-    MOD-011 consumes ``audit.event`` without importing another module's domain
-    (ADR-0003, module isolation rule).
+    its field contract is a byte-for-byte mirror of what producers publish:
+    MOD-004's ``ConsentAuditPayload`` and MOD-014's configuration-write facts
+    (issue #945). The mirror lives here so MOD-011 consumes ``audit.event``
+    without importing another module's domain (ADR-0003, module isolation rule).
+
+    The carrier is variant-aware: a consent action requires every consent
+    lineage field, an ops action requires its key/version facts, and an
+    unknown action is rejected - the strictness the flat ``Optional`` fields
+    give up is restored by the model validator, so a consent carrier missing
+    a lineage fact stays a construction error.
     """
 
-    action: ConsentAuditAction
-    actor_patient_id: int
-    consent_id: int
-    lineage_ref: str
-    record_scope: RecordScope
-    version: int
+    action: str
+
+    # Consent variant (MOD-004 producer), required for consent actions.
+    actor_patient_id: int | None = None
+    consent_id: int | None = None
+    lineage_ref: str | None = None
+    record_scope: RecordScope | None = None
+    version: int | None = None
+
+    # Ops setting.write variant (MOD-014 producer). The values are the
+    # setting's JSON values, redacted upstream for encrypted keys.
+    setting_key: str | None = None
+    old_value: object | None = None
+    new_value: object | None = None
+
+    # Ops feature_flag.write variant (MOD-014 producer).
+    flag_key: str | None = None
+    old_enabled: bool | None = None
+    new_enabled: bool | None = None
+    flag_kind: str | None = None
+
+    # The ops variant's actor: the operator identity id (consent names
+    # ``actor_patient_id`` instead).
+    updated_by: int | None = None
+
+    @model_validator(mode="after")
+    def _require_variant_fields(self) -> AuditEventPayload:
+        """Pin the required fields per carrier variant (issue #945)."""
+        if self.action in CONSENT_CARRIER_ACTIONS:
+            missing = [
+                field
+                for field in (
+                    "actor_patient_id",
+                    "consent_id",
+                    "lineage_ref",
+                    "record_scope",
+                    "version",
+                )
+                if getattr(self, field) is None
+            ]
+            if missing:
+                raise ValueError(f"consent audit carrier requires fields {missing}")
+        elif self.action == OPS_AUDIT_ACTION_SETTING_WRITE:
+            if self.setting_key is None or self.version is None:
+                raise ValueError("ops setting.write carrier requires setting_key and version")
+        elif self.action == OPS_AUDIT_ACTION_FEATURE_FLAG_WRITE:
+            missing = [
+                field
+                for field in ("flag_key", "new_enabled", "flag_kind", "version")
+                if getattr(self, field) is None
+            ]
+            if missing:
+                raise ValueError(f"ops feature_flag.write carrier requires fields {missing}")
+        else:
+            raise ValueError(f"unknown audit.event carrier action {self.action!r}")
+        return self
 
 
-def audit_act_type(action: ConsentAuditAction) -> str:
+def audit_act_type(action: str) -> str:
     """Derive the regulated-act event type for one ``audit.event`` payload action.
 
-    Today every producer is MOD-004 (consent), so the act type is its registry
-    ``consent.<action>`` name. ``declined`` deliberately resolves to
-    ``consent.declined``, which ``is_regulated_act`` rejects (a decline is a
-    null grant with no ``consent.*`` bus event), so the consumer skips it
-    exactly like any other operational act.
+    Consent carriers map to ``consent.<action>``; ops carriers map to
+    ``ops.<action>`` (which ``is_regulated_act`` rejects, so they never enter
+    the hash chain). Unknown actions pass through unchanged and are likewise
+    not regulated. ``audit_act_type`` and ``is_appended_act`` jointly decide
+    whether a variant enters the hash chain (issue #945).
     """
-    return f"consent.{action}"
+    if action in CONSENT_CARRIER_ACTIONS:
+        return f"consent.{action}"
+    if action == OPS_AUDIT_ACTION_SETTING_WRITE:
+        return "ops.setting.write"
+    if action == OPS_AUDIT_ACTION_FEATURE_FLAG_WRITE:
+        return "ops.feature_flag.write"
+    return action
 
 
 def is_appended_act(payload: AuditEventPayload) -> bool:
@@ -78,7 +161,9 @@ def is_appended_act(payload: AuditEventPayload) -> bool:
     Exact check via T3's predicate on the derived act type: only an explicitly
     whitelisted act is appended; operational and unknown acts are silently
     skipped. ``audit.event`` itself is never whitelisted, which is why the
-    check runs on the derived act type, not the carrier event type.
+    check runs on the derived act type, not the carrier event type. Ops
+    carriers resolve to ``ops.*`` act types that are never whitelisted, so
+    they are consumed and drained but never chained (issue #945).
     """
     return is_regulated_act(audit_act_type(payload.action))
 
@@ -194,6 +279,21 @@ class CredentialInvalidatedPayload(BaseModel):
     identity_id: int
     credential_id: int | None = None
     reason: str
+
+
+class PatientVerifiedPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-001's ``patient.verified`` payload."""
+
+    identity_id: int
+    phone_e164: str
+
+
+class OtpSentPayload(BaseModel):
+    """MOD-011's typed mirror of MOD-001's ``otp.sent`` payload."""
+
+    identity_id: int
+    challenge_id: int
+    expires_at: datetime
 
 
 def build_partner_registered_row(
@@ -417,6 +517,39 @@ def build_record_access_row(
     )
 
 
+def build_patient_verified_row(
+    payload: PatientVerifiedPayload,
+    producer: str,
+    occurred_at: datetime,
+    prev_hash: str,
+) -> AuditRow:
+    """Compute the ``audit_events`` columns for one ``patient.verified`` act."""
+    identity_uuid = _actor_uuid(payload.identity_id)
+    metadata: dict[str, Any] = {
+        "producer": producer,
+        "identity_id": payload.identity_id,
+    }
+    digest = compute_audit_hash(
+        EVENT_PATIENT_VERIFIED,
+        identity_uuid,
+        identity_uuid,
+        "patient_identity",
+        metadata,
+        occurred_at,
+        prev_hash,
+    )
+    return AuditRow(
+        event_type=EVENT_PATIENT_VERIFIED,
+        actor_id=identity_uuid,
+        target_id=identity_uuid,
+        scope="patient_identity",
+        metadata=metadata,
+        timestamp=occurred_at,
+        prev_hash=prev_hash,
+        hash=digest,
+    )
+
+
 class TamperDetectedPayload(BaseModel):
     """MOD-011's payload model for the ``audit.tamper_detected`` outbox event.
 
@@ -463,7 +596,18 @@ def build_audit_row(
     from ``prev_hash`` - the most recent row's hash, or ``GENESIS_HASH`` for
     the first row.
     """
-    event_type = audit_act_type(payload.action)
+    # is_appended_act returned True, so this is the consent variant and every
+    # consent field is present (the carrier's variant validator enforces it);
+    # the guard keeps that contract explicit at runtime (issue #945).
+    if (
+        payload.actor_patient_id is None
+        or payload.consent_id is None
+        or payload.lineage_ref is None
+        or payload.record_scope is None
+        or payload.version is None
+    ):
+        raise ValueError("build_audit_row requires the consent carrier variant")
+    event_type = audit_act_type(cast(ConsentAuditAction, payload.action))
     actor_id = _actor_uuid(payload.actor_patient_id)
     target_id = _target_uuid(payload.consent_id)
     scope = payload.record_scope

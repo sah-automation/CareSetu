@@ -33,16 +33,18 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import app
+from observability.otel import resolve_otlp_metrics_endpoint, resolve_otlp_traces_endpoint
 
 
 def _gate_posture(settings: Settings) -> dict[str, object]:
     """The resolved on/off state of each gate, for the CI log."""
-    endpoint = settings.otel_exporter_otlp_endpoint.strip()
+    traces_endpoint = resolve_otlp_traces_endpoint(settings)
+    metrics_endpoint = resolve_otlp_metrics_endpoint(settings)
     return {
         "log_format": settings.log_format,
         "sentry": bool(settings.sentry_dsn.strip()),
-        "otel_traces": settings.otel_enabled and bool(endpoint),
-        "otel_metrics": settings.metrics_enabled and bool(endpoint),
+        "otel_traces": settings.otel_enabled and bool(traces_endpoint),
+        "otel_metrics": settings.metrics_enabled and bool(metrics_endpoint),
         "langfuse": bool(settings.langfuse_public_key.strip()),
         "observability": settings.observability_enabled,
         "error_capture": settings.error_capture_enabled,

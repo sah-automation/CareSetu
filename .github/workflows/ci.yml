@@ -128,6 +128,8 @@ jobs:
           npm install --legacy-peer-deps --force
       - name: vitest
         run: npm run test:unit:frontend
+        env:
+          NEXT_PUBLIC_PAISE_PER_USD: "8850"
 
   page-budget:
     name: page-budget (NFR-003, <= 1.5 MB per channel)
@@ -147,6 +149,8 @@ jobs:
           npm install --legacy-peer-deps --force
       - name: build, serve, and measure channel payloads
         run: npm run check:pages
+        env:
+          NEXT_PUBLIC_PAISE_PER_USD: "8850"
 
   lighthouse:
     name: lighthouse gate (NFR-PERF-001, mobile + throttled 4G)
@@ -176,6 +180,7 @@ jobs:
         run: npm run check:lighthouse
         env:
           CHROME_PATH: ${{ steps.chromium.outputs.chrome_path }}
+          NEXT_PUBLIC_PAISE_PER_USD: "8850"
       - name: upload lighthouse report
         if: always()
         uses: actions/upload-artifact@v4
@@ -258,7 +263,7 @@ jobs:
           SENTRY_DSN: ${{ matrix.gates == 'on' && 'http://publickey@127.0.0.1:9/1' || '' }}
           SENTRY_TRACES_SAMPLE_RATE: "0.0"
           OTEL_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
-          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ matrix.gates == 'on' && 'http://127.0.0.1:9/v1/traces' || '' }}
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ matrix.gates == 'on' && 'http://127.0.0.1:9' || '' }}
           OTEL_TRACES_SAMPLER_RATIO: "1.0"
           METRICS_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
           LANGFUSE_PUBLIC_KEY: ${{ matrix.gates == 'on' && 'pk-lf-ci-smoke' || '' }}
@@ -491,6 +496,7 @@ jobs:
           # process.env into the backend command's env (scripts/e2e-backend.cjs
           # then applies migrations against this database and serves :8000).
           DATABASE_URL: postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu
+          NEXT_PUBLIC_PAISE_PER_USD: "8850"
       - name: upload playwright artifacts
         # The github reporter prints only at the end of a run, so a job that is
         # cancelled (timeout) otherwise leaves no per-test record. Traces are

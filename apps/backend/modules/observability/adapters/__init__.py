@@ -109,14 +109,12 @@ from modules.observability.domain.consumer import (
     ConsentLifecycleTelemetryPayload,
     IntakeDoctorAssignedTelemetryPayload,
     OperatorMfaFailedTelemetryPayload,
-    OtpFailedEventPayload,
     OtpFailedTelemetryPayload,
     PartnerCredentialReviewedTelemetryPayload,
     PartnerDecisionTelemetryPayload,
     PartnerRegisteredTelemetryPayload,
     PartnerSelectedTelemetryPayload,
     PartnerVerificationStartedTelemetryPayload,
-    PatientAuthFailedEventPayload,
     PatientAuthFailedTelemetryPayload,
     PromptInjectionDetectedTelemetryPayload,
     RecordAccessTelemetryPayload,
@@ -166,23 +164,12 @@ _BUSINESS_EVENT_MIRRORS: dict[str, type[BaseModel]] = {
     EVENT_AUDIT_EVENT: AuditEventTelemetryPayload,
 }
 
-#: The consumed event types no module has claimed a payload model for, so
-#: MOD-013 registers its mirror (the dispatcher reconstructs the outbox row with
-#: the registered model before fan-out). Every other consumed event's model is
-#: owned by its producer module and must NOT be re-registered - the registry's
-#: one-model-per-type guard would raise (registry.py).
-_UNCLAIMED_EVENT_MIRRORS: dict[str, type[BaseModel]] = {
-    EVENT_PARTNER_VERIFICATION_STARTED: PartnerVerificationStartedTelemetryPayload,
-    EVENT_PARTNER_SELECTED: PartnerSelectedTelemetryPayload,
-    # #777: the two IAM-failure events had no consumer before security signals,
-    # so no module had claimed their payload model. These mirrors are the
-    # producer's full field contract (the dispatcher rebuilds the row before
-    # fan-out); the security handlers re-validate them into the narrower
-    # ``*TelemetryPayload`` views, which is where the phone number, attempt
-    # budget and lockout time are shed before anything is written.
-    EVENT_PATIENT_AUTH_FAILED: PatientAuthFailedEventPayload,
-    EVENT_OTP_FAILED: OtpFailedEventPayload,
-}
+#: MOD-013 used to register mirrors here for consumed event types no module had
+#: claimed a payload model for. Every consumed event's model is now owned by its
+#: producer module (IAM owns otp.failed/patient.auth_failed, Partner owns the
+#: partner.* analytics events), so this list is empty and was removed (issue
+#: #943): the producer-owns-the-model convention leaves MOD-013 no registry
+#: slots to claim, only handler seats (the loops above and below).
 
 
 def _patient_actor(payload: BaseModel) -> str:
@@ -477,14 +464,6 @@ def register_handlers(registry: HandlerRegistry) -> None:
         )
 
     registry.register(EVENT_AI_JOB_FAILED, accumulate_ai_job_failed)
-
-    # The event types no module has claimed a payload model for, so MOD-013 registers
-    # its mirror. Declared SEPARATELY from the seats above because claiming a registry
-    # model is a different act from taking a handler seat: it changes what the
-    # dispatcher reconstructs a claimed outbox row with, not what this module does on
-    # delivery. Both are registry-driven, so neither is a hand-maintained list.
-    for event_type, mirror in _UNCLAIMED_EVENT_MIRRORS.items():
-        registry.register_payload_model(event_type, mirror)
 
     # B4b (#703) + B4e (#739): the registry-driven seats for the events this module
     # merely CONSUMES - the business counts and the product event ledger's funnel

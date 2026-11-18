@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy import select
 
-from app.config import Settings
+from app.config import Settings, parse_ai_pricing_table
 from app.db import AsyncEngineLike
-from bus.events import EVENT_AUDIT_EVENT, EVENT_OPS_RUNTIME_SETTING_CHANGED
-from modules.ops.domain.events import OpsRuntimeSettingChangedPayload
+from bus.outbox_writer import write_outbox
+from modules.ops.domain.events import (
+    ops_feature_flag_audit_envelope,
+    ops_runtime_setting_changed_envelope,
+    ops_setting_audit_envelope,
+)
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
+from modules.ops.domain.setting_encryption_service import SettingEncryptionService
 from modules.ops.domain.settings import (
     ALL_EDITABLE_KEYS,
     EDITABLE_AI_KEYS,
@@ -32,13 +36,25 @@ from modules.ops.domain.settings import (
     validate_feature_flag_write,
     validate_notification_setting,
 )
+from modules.ops.outbox import OPS_OUTBOX_TABLE
 from modules.ops.schema.models import (
     ops_feature_flag_history,
     ops_feature_flags,
-    ops_outbox,
     ops_setting_history,
     ops_settings,
 )
+
+#: The ops schema the module's outbox rows are written into (ADR-0003: a module
+#: publishes only into its own schema's outbox).
+OPS_SCHEMA = "ops"
+
+# AI knobs validated by ``validate_ai_setting``. Provider API key secrets
+# (``ai.api_key``, ``ai.fallback_api_key``) are editable but are not config knobs;
+# they are handled by the key-presence validation in ``write_setting`` instead.
+_EDITABLE_AI_CONFIG_KEYS: frozenset[str] = EDITABLE_AI_KEYS - {
+    "ai.api_key",
+    "ai.fallback_api_key",
+}
 
 
 class OpsFacade:
@@ -59,6 +75,10 @@ class OpsFacade:
         )
         self._cache = OpsSettingsCache(ttl_seconds=ttl)
         self._resolver = EffectiveSettingsResolver(settings)
+        # Encryption service for dashboard-entered secrets (issue #921)
+        self._encryption_service = SettingEncryptionService(
+            getattr(settings, "ops_settings_encryption_key", "")
+        )
 
     async def get_effective_settings(self) -> list[EffectiveSetting]:
         cached = self._cache.get()
@@ -66,6 +86,7 @@ class OpsFacade:
             return cached
 
         db_overrides: dict[str, Any] = {}
+        history_timestamps: dict[str, str] = {}
         async with self._engine.begin() as connection:
             result = await connection.execute(select(ops_settings))
             for row in result.mappings():
@@ -75,9 +96,59 @@ class OpsFacade:
                     # value is JSONB; store raw for resolution logic
                     db_overrides[key] = value
 
+            # Query latest history timestamps for encrypted keys
+            for key in db_overrides:
+                if self._encryption_service.is_encrypted_key(key):
+                    ts_result = await connection.execute(
+                        select(ops_setting_history.c.changed_at)
+                        .where(ops_setting_history.c.setting_key == key)
+                        .order_by(
+                            ops_setting_history.c.changed_at.desc(),
+                            ops_setting_history.c.id.desc(),
+                        )
+                        .limit(1)
+                    )
+                    ts_row = ts_result.mappings().first()
+                    if ts_row is not None:
+                        history_timestamps[key] = ts_row["changed_at"].isoformat()
+
         resolved = self._resolver.resolve_all(db_overrides)
-        self._cache.set(resolved)
-        return resolved
+
+        def _history_reader(setting_key: str) -> str | None:
+            return history_timestamps.get(setting_key)
+
+        # Replace encrypted key values with masked status
+        masked_resolved = []
+        for item in resolved:
+            if self._encryption_service.is_encrypted_key(item.key):
+                # Get the DB value for this key to determine masked status
+                db_value = db_overrides.get(item.key)
+                masked_status = self._encryption_service.get_masked_status_with_resolver(
+                    item.key,
+                    item.source,
+                    self._resolver,
+                    db_value,
+                    _history_reader,
+                )
+                masked_resolved.append(
+                    EffectiveSetting(
+                        key=item.key,
+                        value=masked_status,
+                        source=item.source,
+                        editable=item.editable,
+                        restart_required=item.restart_required,
+                    )
+                )
+            else:
+                masked_resolved.append(item)
+
+        self._cache.set(masked_resolved)
+        return masked_resolved
+
+    def get_ai_provider_catalog(self) -> list[Any]:
+        from app.ai_provider_catalog import get_ai_provider_catalog
+
+        return get_ai_provider_catalog(settings=self._settings)
 
     async def get_setting_history(
         self,
@@ -88,6 +159,8 @@ class OpsFacade:
 
         ``setting_key`` narrows the read to one key; the Settings AI section asks
         for the whole list once and filters the AI keys itself.
+
+        For encrypted setting keys, values are redacted.
         """
         statement = (
             select(ops_setting_history)
@@ -105,7 +178,7 @@ class OpsFacade:
             return [
                 SettingHistoryEntry(
                     setting_key=row["setting_key"],
-                    value=row["value"],
+                    value=self._encryption_service.redact_value(row["setting_key"], row["value"]),
                     version=row["version"],
                     changed_by=row["changed_by"],
                     changed_at=row["changed_at"].isoformat(),
@@ -270,25 +343,22 @@ class OpsFacade:
                 )
             )
 
-            # Emit audit event with old and new values
-            audit_payload = {
-                "action": "feature_flag.write",
-                "flag_key": flag_key,
-                "old_enabled": old_enabled,
-                "new_enabled": enabled,
-                "flag_kind": flag_kind.value,
-                "version": new_version,
-                "updated_by": updated_by,
-            }
-            await connection.execute(
-                ops_outbox.insert().values(
-                    event_id=uuid4(),
-                    event_type=EVENT_AUDIT_EVENT,
-                    payload=audit_payload,
-                    occurred_at=datetime.now(UTC),
-                    status="pending",
-                    attempts=0,
-                )
+            # Emit audit event with old and new values through the shared
+            # transactional outbox writer, so the row carries the typed
+            # envelope and the request's trace context like every other
+            # module's publishes (issue #945).
+            await write_outbox(
+                connection,
+                OPS_SCHEMA,
+                OPS_OUTBOX_TABLE,
+                ops_feature_flag_audit_envelope(
+                    flag_key=flag_key,
+                    old_enabled=old_enabled,
+                    new_enabled=enabled,
+                    flag_kind=flag_kind.value,
+                    version=new_version,
+                    updated_by=updated_by,
+                ),
             )
 
         return FeatureFlagWriteResponse(
@@ -326,13 +396,31 @@ class OpsFacade:
         # Validate value for the allowlisted knob family. A bad value is an
         # expected write refusal, so it becomes the same domain error the route
         # already maps to the shared 400 envelope.
+        catalog = None
+        pricing_table = None
+        if setting_key in _EDITABLE_AI_CONFIG_KEYS:
+            catalog = [dict(e) for e in self.get_ai_provider_catalog()]
+            try:
+                pricing_table = parse_ai_pricing_table(self._settings.ai_pricing_table or "")
+            except ValueError:
+                pricing_table = {}
         try:
-            if setting_key in EDITABLE_AI_KEYS:
-                validate_ai_setting(setting_key, value)
+            if setting_key in _EDITABLE_AI_CONFIG_KEYS:
+                validate_ai_setting(
+                    setting_key, value, catalog=catalog, pricing_table=pricing_table
+                )
             elif setting_key in EDITABLE_NOTIFICATION_KEYS:
                 validate_notification_setting(setting_key, value)
             elif setting_key in EDITABLE_CACHE_REDIS_KEYS:
                 validate_cache_redis_setting(setting_key, value)
+        except ValueError as exc:
+            raise InvalidSettingWriteError(setting_key, str(exc)) from exc
+
+        # Encrypt value if this is an encrypted setting key. A missing master
+        # key means the value cannot be stored - refuse the write (fail closed)
+        # through the same write-validation contract.
+        try:
+            stored_value = self._encryption_service.encrypt_if_needed(setting_key, value)
         except ValueError as exc:
             raise InvalidSettingWriteError(setting_key, str(exc)) from exc
 
@@ -349,14 +437,23 @@ class OpsFacade:
                 old_value = row["value"]
                 old_version = row["version"]
 
+            # Key-presence validation for provider API keys (issue #923).
+            # Non-mock providers require a resolvable key (the value being
+            # written, the environment, or a previously saved dashboard value)
+            # or the write is rejected. Mock providers require no key.
+            if setting_key in ("ai.api_key", "ai.fallback_api_key"):
+                await self._validate_provider_api_key_presence(
+                    connection, setting_key, value, old_value
+                )
+
             new_version = old_version + 1
 
-            # Upsert the setting
+            # Upsert the setting with encrypted value
             if row is None:
                 await connection.execute(
                     ops_settings.insert().values(
                         setting_key=setting_key,
-                        value=value,
+                        value=stored_value,
                         version=new_version,
                         updated_by=updated_by,
                     )
@@ -366,60 +463,132 @@ class OpsFacade:
                     ops_settings.update()
                     .where(ops_settings.c.setting_key == setting_key)
                     .values(
-                        value=value,
+                        value=stored_value,
                         updated_by=updated_by,
                         updated_at=datetime.now(UTC),
                         version=new_version,
                     )
                 )
 
-            # Record history
+            # Record history with redacted value
+            redacted_value = self._encryption_service.redact_value(setting_key, stored_value)
             await connection.execute(
                 ops_setting_history.insert().values(
                     setting_key=setting_key,
-                    value=value,
+                    value=redacted_value,
                     version=new_version,
                     changed_by=updated_by,
                 )
             )
 
-            # Emit audit event
-            audit_payload = {
-                "action": "setting.write",
-                "setting_key": setting_key,
-                "old_value": old_value,
-                "new_value": value,
-                "version": new_version,
-                "updated_by": updated_by,
-            }
-            await connection.execute(
-                ops_outbox.insert().values(
-                    event_id=uuid4(),
-                    event_type=EVENT_AUDIT_EVENT,
-                    payload=audit_payload,
-                    occurred_at=datetime.now(UTC),
-                    status="pending",
-                    attempts=0,
-                )
+            # Emit audit event with redacted values through the shared
+            # transactional outbox writer, so the row carries the typed
+            # envelope and the request's trace context like every other
+            # module's publishes (issue #945).
+            await write_outbox(
+                connection,
+                OPS_SCHEMA,
+                OPS_OUTBOX_TABLE,
+                ops_setting_audit_envelope(
+                    setting_key=setting_key,
+                    old_value=self._encryption_service.redact_value(setting_key, old_value),
+                    new_value=redacted_value,
+                    version=new_version,
+                    updated_by=updated_by,
+                ),
             )
 
             # Emit runtime setting changed event for cache/redis switches
             if setting_key in ("cache.enabled", "redis.enabled"):
-                runtime_event = OpsRuntimeSettingChangedPayload(
-                    key=setting_key, value=value, version=new_version
-                )
-                await connection.execute(
-                    ops_outbox.insert().values(
-                        event_id=uuid4(),
-                        event_type=EVENT_OPS_RUNTIME_SETTING_CHANGED,
-                        payload=runtime_event.model_dump(mode="json"),
-                        occurred_at=datetime.now(UTC),
-                        status="pending",
-                        attempts=0,
-                    )
+                await write_outbox(
+                    connection,
+                    OPS_SCHEMA,
+                    OPS_OUTBOX_TABLE,
+                    ops_runtime_setting_changed_envelope(
+                        key=setting_key,
+                        value=value,
+                        version=new_version,
+                    ),
                 )
 
         # Invalidate cache so the next effective read resolves the new value
         self._cache.invalidate()
 
-        return {"setting_key": setting_key, "value": value, "version": new_version}
+        # Never echo plaintext key material in the write response. Encrypted
+        # settings are confirmed with a masked value only; the readable masked
+        # status comes from get_effective_settings (issue #927 #22).
+        if self._encryption_service.is_encrypted_key(setting_key):
+            response_value: Any = "[REDACTED]"
+        else:
+            response_value = value
+        return {"setting_key": setting_key, "value": response_value, "version": new_version}
+
+    def _provider_requires_api_key(self, provider_id: str) -> bool:
+        """Return True if a non-mock provider needs a resolvable API key.
+
+        A mock provider (empty ``api_key_env``) requires no key. Unknown or
+        unlisted providers fail closed and require a key.
+        """
+        provider_id = (provider_id or "").strip().lower()
+        if provider_id == "mock":
+            return False
+        try:
+            catalog = [dict(e) for e in self.get_ai_provider_catalog()]
+        except Exception:
+            # Fail closed: a malformed catalog still requires a key.
+            return True
+        for entry in catalog:
+            if str(entry.get("id", "")).strip().lower() == provider_id:
+                api_key_env = str(entry.get("api_key_env", "") or "").strip()
+                return bool(api_key_env)
+        return True
+
+    async def _validate_provider_api_key_presence(
+        self,
+        connection: Any,
+        setting_key: str,
+        value: Any,
+        old_value: Any | None,
+    ) -> None:
+        """Reject writes of a provider API key when no key is resolvable.
+
+        A resolvable key is the value being written, an environment value for
+        the provider's key, or a previously saved dashboard value. Mock
+        providers require no key.
+        """
+        from modules.ops.domain.exceptions import InvalidSettingWriteError
+
+        # Determine the provider this key belongs to and its current value.
+        provider_setting = "ai.provider" if setting_key == "ai.api_key" else "ai.fallback_provider"
+
+        provider_id: str | None = None
+        provider_result = await connection.execute(
+            select(ops_settings).where(ops_settings.c.setting_key == provider_setting)
+        )
+        provider_row = provider_result.mappings().first()
+        if provider_row is not None and provider_row["value"] not in (None, ""):
+            provider_id = str(provider_row["value"]).strip()
+        if not provider_id:
+            provider_id = str(getattr(self._settings, "ai_provider", "mock") or "mock").strip()
+
+        if not self._provider_requires_api_key(provider_id):
+            return  # mock provider: no key required
+
+        # The value being written counts as a resolvable (new) dashboard key.
+        if value is not None and str(value).strip() != "":
+            return
+
+        # Environment value for this key.
+        env_val, _ = self._resolver._get_from_env_or_default(setting_key)
+        if env_val is not None and str(env_val).strip() != "":
+            return
+
+        # Previously saved dashboard value.
+        if old_value is not None and str(old_value).strip() != "":
+            return
+
+        raise InvalidSettingWriteError(
+            setting_key,
+            f"No resolvable API key for provider {provider_id!r}; enter a key, "
+            "configure it in the environment, or save a dashboard value first.",
+        )

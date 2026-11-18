@@ -129,4 +129,59 @@ describe("parseErrorEnvelope", () => {
     expect(parsed.code).toBe("UNEXPECTED_ERROR");
     expect(new ApiError(parsed).fieldErrors).toEqual([]);
   });
+
+  it("carries the backend's refusal message from a `detail` envelope", async () => {
+    // #937: FastAPI wraps a refusal in `detail`; unwrap it so ApiError.message
+    // surfaces the real reason instead of the generic envelope.
+    const response = new Response(
+      JSON.stringify({
+        detail: {
+          code: "INVALID_SETTING_WRITE",
+          message: "custom model needs a pricing entry",
+          trace_id: "trace-937",
+          details: {},
+        },
+      }),
+      { status: 422 },
+    );
+
+    const parsed = await parseErrorEnvelope(response);
+
+    expect(new ApiError(parsed).message).toBe(
+      "custom model needs a pricing entry",
+    );
+    expect(new ApiError(parsed).code).toBe("INVALID_SETTING_WRITE");
+    expect(new ApiError(parsed).traceId).toBe("trace-937");
+  });
+
+  it("returns the whole body when there is no `detail` field", async () => {
+    const body = envelope({ message: "straight-through message" });
+    const response = new Response(JSON.stringify(body), { status: 422 });
+
+    const parsed = await parseErrorEnvelope(response);
+
+    expect(parsed).toEqual(body);
+    expect(new ApiError(parsed).message).toBe("straight-through message");
+  });
+
+  it("falls back to the whole body when `detail` is absent but JSON parses", async () => {
+    const response = new Response(
+      JSON.stringify({
+        code: "X",
+        message: "no detail here",
+        trace_id: "t",
+        details: {},
+      }),
+      { status: 422 },
+    );
+
+    const parsed = await parseErrorEnvelope(response);
+
+    expect(parsed).toEqual({
+      code: "X",
+      message: "no detail here",
+      trace_id: "t",
+      details: {},
+    });
+  });
 });

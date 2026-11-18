@@ -32,11 +32,11 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from langfuse import observe
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from modules.intake.adapters.ai_gateway import (
     AiGateway,
     DraftRxRequest,
@@ -180,7 +180,18 @@ class CircuitBreakerAiGateway:
         return await self._run_with_breaker("evaluate", self._adapter.evaluate(request))
 
 
-def build_ai_gateway(settings: Settings) -> AiGateway:
+def build_ai_gateway(
+    settings: Any = None,
+    override_source: Any = None,
+    *,
+    resolver: Any = None,
+    ai_config: Any = None,
+    overrides: Any = None,
+    override: Any = None,
+    source: Any = None,
+    db_overrides: Any = None,
+    **kwargs: Any,
+) -> AiGateway:
     """Resolve the EXT-002 gateway from config; mock is the fail-closed default.
 
     ``Settings.__post_init__`` has already refused a real provider in dev/test
@@ -196,49 +207,129 @@ def build_ai_gateway(settings: Settings) -> AiGateway:
       breaker-wrapped primary and secondary are composed into a
       ``FallbackAiGateway`` that engages the secondary only on genuine outages.
     """
-    provider = settings.ai_provider.strip().lower()
-    if settings.degraded_mode:
+    from modules.intake.ai_config import AiConfigResolver
+
+    if settings is not None and not isinstance(settings, Settings) and override_source is None:
+        override_source = settings
+        settings = None
+    if settings is None:
+        settings = get_settings()
+    if ai_config is None:
+        if resolver is not None and hasattr(resolver, "resolve"):
+            ai_config = resolver.resolve()
+        else:
+            src = (
+                override_source
+                if override_source is not None
+                else (
+                    overrides
+                    if overrides is not None
+                    else (
+                        override
+                        if override is not None
+                        else (source if source is not None else db_overrides)
+                    )
+                )
+            )
+            ai_config = AiConfigResolver(settings, override_source=src, **kwargs).resolve()
+
+    provider = (
+        str(
+            getattr(ai_config, "provider", None)
+            or getattr(ai_config, "ai_provider", settings.ai_provider)
+        )
+        .strip()
+        .lower()
+    )
+    degraded_mode = bool(getattr(ai_config, "degraded_mode", settings.degraded_mode))
+    api_key = getattr(ai_config, "api_key", None)
+    if api_key is None:
+        api_key = getattr(ai_config, "ai_api_key", settings.ai_api_key)
+    base_url = getattr(ai_config, "base_url", None)
+    if base_url is None:
+        base_url = getattr(ai_config, "ai_base_url", settings.ai_base_url)
+    model = getattr(ai_config, "model", None)
+    if not model:
+        model = getattr(ai_config, "ai_model", settings.ai_model)
+    asr_model = getattr(ai_config, "asr_model", None)
+    if not asr_model:
+        asr_model = getattr(ai_config, "ai_asr_model", settings.ai_asr_model)
+    timeout_seconds = getattr(ai_config, "timeout_seconds", None)
+    if timeout_seconds is None:
+        timeout_seconds = getattr(ai_config, "ai_timeout_seconds", settings.ai_timeout_seconds)
+    max_retries = getattr(ai_config, "max_retries", None)
+    if max_retries is None:
+        max_retries = getattr(ai_config, "ai_max_retries", settings.ai_max_retries)
+    fallback_provider = (
+        str(
+            getattr(ai_config, "fallback_provider", None)
+            or getattr(ai_config, "ai_fallback_provider", settings.ai_fallback_provider)
+        )
+        .strip()
+        .lower()
+    )
+    fallback_model = getattr(ai_config, "fallback_model", None)
+    if not fallback_model:
+        fallback_model = getattr(ai_config, "ai_fallback_model", settings.ai_fallback_model)
+    fallback_api_key = getattr(ai_config, "fallback_api_key", None)
+    if fallback_api_key is None:
+        fallback_api_key = getattr(ai_config, "ai_fallback_api_key", settings.ai_fallback_api_key)
+    fallback_base_url = getattr(ai_config, "fallback_base_url", None)
+    if fallback_base_url is None:
+        fallback_base_url = getattr(
+            ai_config, "ai_fallback_base_url", settings.ai_fallback_base_url
+        )
+    cb_threshold = getattr(
+        ai_config, "circuit_breaker_threshold", settings.ai_circuit_breaker_threshold
+    )
+    cb_cooldown = getattr(
+        ai_config, "circuit_breaker_cooldown_seconds", settings.ai_circuit_breaker_cooldown_seconds
+    )
+    cb_enabled = getattr(ai_config, "circuit_breaker_enabled", settings.circuit_breaker_enabled)
+
+    if degraded_mode:
         logger.warning("degraded mode enabled; forcing AI gateway to mock provider")
         return build_mock_ai_gateway()
     if provider == "mock":
         return build_mock_ai_gateway()
     primary = CircuitBreakerAiGateway(
         OpenAiCompatibleAdapter(
-            api_key=settings.ai_api_key,
-            base_url=settings.ai_base_url,
-            model=settings.ai_model,
-            asr_model=settings.ai_asr_model,
-            timeout_seconds=settings.ai_timeout_seconds,
-            max_retries=settings.ai_max_retries,
+            api_key=str(api_key),
+            base_url=str(base_url),
+            model=str(model),
+            asr_model=str(asr_model),
+            timeout_seconds=float(timeout_seconds or 30.0),
+            max_retries=int(max_retries or 1),
         ),
-        threshold=settings.ai_circuit_breaker_threshold,
-        cooldown_seconds=settings.ai_circuit_breaker_cooldown_seconds,
-        enabled=settings.circuit_breaker_enabled,
+        threshold=cb_threshold,
+        cooldown_seconds=cb_cooldown,
+        enabled=cb_enabled,
     )
-    if settings.ai_fallback_provider.strip():
+    if fallback_provider.strip():
+        # Only build secondary if fallback configured.
         secondary = CircuitBreakerAiGateway(
             OpenAiCompatibleAdapter(
-                api_key=settings.ai_fallback_api_key,
-                base_url=settings.ai_fallback_base_url,
-                model=settings.ai_fallback_model,
-                asr_model=settings.ai_asr_model,
-                timeout_seconds=settings.ai_timeout_seconds,
-                max_retries=settings.ai_max_retries,
+                api_key=str(fallback_api_key),
+                base_url=str(fallback_base_url),
+                model=str(fallback_model),
+                asr_model=str(asr_model),
+                timeout_seconds=float(timeout_seconds or 30.0),
+                max_retries=int(max_retries or 1),
             ),
-            threshold=settings.ai_circuit_breaker_threshold,
-            cooldown_seconds=settings.ai_circuit_breaker_cooldown_seconds,
-            enabled=settings.circuit_breaker_enabled,
+            threshold=cb_threshold,
+            cooldown_seconds=cb_cooldown,
+            enabled=cb_enabled,
         )
         return FallbackAiGateway(
             primary=primary,
             primary_meta=AiGatewayMeta(
                 provider=provider,
-                model=settings.ai_model,
+                model=str(model),
             ),
             secondary=secondary,
             secondary_meta=AiGatewayMeta(
-                provider=settings.ai_fallback_provider.strip().lower(),
-                model=settings.ai_fallback_model,
+                provider=fallback_provider,
+                model=str(fallback_model),
             ),
         )
     return primary

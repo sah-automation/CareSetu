@@ -224,7 +224,10 @@ DEFAULT_AI_MONTHLY_BUDGET_PAISE = 200_000
 # provider and tier. The default prices the free mock at an explicit 0 so it is
 # a KNOWN free model (never flagged); a model absent from the table is UNKNOWN,
 # so its 0 cost is logged (visible, not hidden) until its rate is configured.
-DEFAULT_AI_PRICING_TABLE = "mock-model:0:0"
+DEFAULT_AI_PRICING_TABLE = (
+    "mock-model:0:0,openai/gpt-oss-120b:0.0013275:0.00531,gemini-3.6-flash:0.013275:0.066375"
+)
+DEFAULT_AI_PROVIDER_CATALOG_ENV = ""
 DEFAULT_AI_FALLBACK_PROVIDER = ""
 DEFAULT_AI_FALLBACK_BASE_URL = ""
 DEFAULT_AI_FALLBACK_API_KEY = ""
@@ -347,6 +350,10 @@ DEFAULT_PROMPT_INJECTION_HEURISTICS_ENABLED = False
 # for encrypting/decrypting the TOTP secret stored in ``iam_operator_mfa.secret``
 # comes from the ``IAM_MFA_SECRET_KEY`` environment variable (never committed).
 # Fail-closed: ``issue_operator_session`` refuses to verify without it.
+# Ops settings encryption (issue #921): the AES-256-GCM key for encrypting/decrypting
+# dashboard-entered provider API keys stored in ``ops.ops_settings``. Comes from the
+# ``OPS_SETTINGS_ENCRYPTION_KEY`` environment variable (never committed). A dedicated
+# key separate from IAM/Media keys per security-phii-standards §4.
 
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -602,6 +609,10 @@ class Settings:
     # from the ``IAM_MFA_SECRET_KEY`` environment; ``issue_operator_session``
     # refuses to verify without it.
     iam_mfa_secret_key: str = ""
+    # Ops settings encryption (issue #921): AES-256-GCM key for encrypting
+    # dashboard-entered provider API keys in ops settings. From
+    # ``OPS_SETTINGS_ENCRYPTION_KEY`` environment variable.
+    ops_settings_encryption_key: str = ""
     # Consecutive wrong operator TOTP codes before login locks, and how long
     # the lock lasts (PHASE-14B T17, #778). The defaults live in
     # ``modules.iam.domain.mfa_lockout`` so the policy and the environment share
@@ -656,6 +667,7 @@ class Settings:
     # default prices the free mock at 0; a paid deployment sets its serving
     # model's rate here or in the environment.
     ai_pricing_table: str = DEFAULT_AI_PRICING_TABLE
+    ai_provider_catalog: str = DEFAULT_AI_PROVIDER_CATALOG_ENV
     ai_fallback_provider: str = DEFAULT_AI_FALLBACK_PROVIDER
     ai_fallback_base_url: str = DEFAULT_AI_FALLBACK_BASE_URL
     ai_fallback_api_key: str = DEFAULT_AI_FALLBACK_API_KEY
@@ -691,11 +703,24 @@ class Settings:
     sentry_dsn: str = ""
     sentry_traces_sample_rate: float = DEFAULT_SENTRY_TRACES_SAMPLE_RATE
     otel_enabled: bool = False
+    # Base OTLP endpoint (no signal path). Signal-specific URLs are derived by
+    # appending /v1/traces or /v1/metrics unless an explicit override below is set.
     otel_exporter_otlp_endpoint: str = ""
     otel_exporter_otlp_headers: tuple[str, ...] = ()
+    # Optional explicit full signal endpoints (override the derived URLs above).
+    otel_exporter_otlp_metrics_endpoint: str = ""
+    otel_exporter_otlp_traces_endpoint: str = ""
     otel_traces_sampler_ratio: float = DEFAULT_OTEL_TRACES_SAMPLER_RATIO
     otel_service_version: str = ""
     metrics_enabled: bool = False
+    # Prometheus remote-write metrics export (METRICS #916): when set, the
+    # Prometheus remote-write exporter takes priority over the OTLP metric
+    # exporter. The endpoint is the full Grafana Cloud Prometheus remote-write
+    # URL (e.g. https://prometheus-prod-XX-prod-region.grafana.net/api/prom/push).
+    # Headers use the same CSV key=value format as OTEL_EXPORTER_OTLP_HEADERS
+    # (typically Authorization=Basic <base64(user:api-key)>).
+    prometheus_remote_write_endpoint: str = ""
+    prometheus_remote_write_headers: tuple[str, ...] = ()
     observability_enabled: bool = False
     # Browsable Grafana base URL (C1b #707): the Grafana Cloud stack the OTLP
     # endpoint above exports into. NOT derived from
@@ -966,6 +991,10 @@ class Settings:
                 raise ValueError(
                     "ai_provider='openai_compatible' requires AI_ASR_MODEL from the environment"
                 )
+        if self.ai_provider_catalog.strip():
+            from app.ai_provider_catalog import get_ai_provider_catalog
+
+            get_ai_provider_catalog(self.ai_provider_catalog)
         fallback_vars = {
             "AI_FALLBACK_PROVIDER": self.ai_fallback_provider,
             "AI_FALLBACK_BASE_URL": self.ai_fallback_base_url,
@@ -1201,6 +1230,22 @@ class Settings:
                 "profile_media_jitter_fraction must be finite and between "
                 "0 inclusive and 1 exclusive"
             )
+        # Ops settings encryption key validation (issue #921): if provided,
+        # must be a valid base64-encoded 32-byte AES-256 key.
+        if self.ops_settings_encryption_key.strip():
+            try:
+                import base64
+
+                key_bytes = base64.b64decode(self.ops_settings_encryption_key.strip())
+                if len(key_bytes) != 32:
+                    raise ValueError(
+                        "OPS_SETTINGS_ENCRYPTION_KEY must be a base64-encoded 32-byte "
+                        f"(256-bit) key; got {len(key_bytes)} bytes"
+                    )
+            except Exception as exc:
+                raise ValueError(
+                    f"OPS_SETTINGS_ENCRYPTION_KEY must be valid base64; {exc}"
+                ) from exc
         if self.profile_media_circuit_breaker_threshold <= 0:
             raise ValueError("profile_media_circuit_breaker_threshold must be positive")
         if (
@@ -1251,10 +1296,14 @@ class Settings:
             raise ValueError(
                 "otel_traces_sampler_ratio must be finite and between 0 and 1 inclusive"
             )
-        if self.otel_enabled and not self.otel_exporter_otlp_endpoint.strip():
+        if self.otel_enabled and not (
+            self.otel_exporter_otlp_endpoint.strip()
+            or self.otel_exporter_otlp_traces_endpoint.strip()
+        ):
             raise ValueError(
-                "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
-                "environment (fail-closed)."
+                "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT or "
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT from the environment "
+                "(fail-closed)."
             )
         # Backward-compatible alias: DISPATCHER_IN_PROCESS_ENABLED forces inprocess;
         # an explicit conflicting mode is rejected at construction. An empty
@@ -1375,6 +1424,16 @@ def _env_int(name: str, default: int) -> int:
     if raw is None or not raw.strip():
         return default
     return int(raw.strip())
+
+
+def _ai_provider_catalog_env() -> str:
+    from app.ai_provider_catalog import ENV_VAR_NAMES
+
+    for name in ENV_VAR_NAMES:
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip() != "":
+            return raw
+    return DEFAULT_AI_PROVIDER_CATALOG_ENV
 
 
 def _env_decimal(name: str, default: Decimal) -> Decimal:
@@ -1692,6 +1751,7 @@ def get_settings() -> Settings:
             "PARTNER_CREDENTIAL_SWEEP_CRON", DEFAULT_PARTNER_CREDENTIAL_SWEEP_CRON
         ),
         iam_mfa_secret_key=os.environ.get("IAM_MFA_SECRET_KEY", ""),
+        ops_settings_encryption_key=os.environ.get("OPS_SETTINGS_ENCRYPTION_KEY", ""),
         iam_operator_mfa_lockout_threshold=_env_int(
             "IAM_OPERATOR_MFA_LOCKOUT_THRESHOLD", DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD
         ),
@@ -1724,6 +1784,7 @@ def get_settings() -> Settings:
             "AI_MONTHLY_BUDGET_PAISE", DEFAULT_AI_MONTHLY_BUDGET_PAISE
         ),
         ai_pricing_table=os.environ.get("AI_PRICING_TABLE", DEFAULT_AI_PRICING_TABLE),
+        ai_provider_catalog=_ai_provider_catalog_env(),
         ai_fallback_provider=os.environ.get("AI_FALLBACK_PROVIDER", DEFAULT_AI_FALLBACK_PROVIDER),
         ai_fallback_base_url=os.environ.get("AI_FALLBACK_BASE_URL", DEFAULT_AI_FALLBACK_BASE_URL),
         ai_fallback_api_key=os.environ.get("AI_FALLBACK_API_KEY", DEFAULT_AI_FALLBACK_API_KEY),
@@ -1762,12 +1823,19 @@ def get_settings() -> Settings:
         otel_enabled=_env_bool("OTEL_ENABLED", False),
         otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         otel_exporter_otlp_headers=_env_csv("OTEL_EXPORTER_OTLP_HEADERS"),
+        otel_exporter_otlp_metrics_endpoint=os.environ.get(
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", ""
+        ),
+        otel_exporter_otlp_traces_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ""),
         otel_traces_sampler_ratio=_env_float(
             "OTEL_TRACES_SAMPLER_RATIO", DEFAULT_OTEL_TRACES_SAMPLER_RATIO
         ),
         otel_service_version=os.environ.get("OTEL_SERVICE_VERSION", ""),
         grafana_url=os.environ.get("GRAFANA_URL", ""),
         metrics_enabled=_env_bool("METRICS_ENABLED", False),
+        # Prometheus remote-write metrics export (METRICS #916)
+        prometheus_remote_write_endpoint=os.environ.get("PROMETHEUS_REMOTE_WRITE_ENDPOINT", ""),
+        prometheus_remote_write_headers=_env_csv("PROMETHEUS_REMOTE_WRITE_HEADERS"),
         observability_enabled=_env_bool("OBSERVABILITY_ENABLED", False),
         observability_rollup_max_dates=_env_int(
             "OBSERVABILITY_ROLLUP_MAX_DATES", DEFAULT_OBSERVABILITY_ROLLUP_MAX_DATES

@@ -49,14 +49,12 @@ def register_handlers(registry: HandlerRegistry) -> None:
     # The dispatcher reconstructs a typed envelope from a claimed outbox row
     # with this model before fan-out. Health registers the model for events it
     # alone consumes today and whose producer is not yet composed into the
-    # registry (report.filed, prescription.delivered, settlement.recorded) -
-    # and for patient.registered, whose producer (iam) keeps no registry model
-    # of its own. prescription.issued is deliberately absent: its producer
-    # (care, PHASE-8) owns the registry contract and registers it, so health
-    # consuming it must not re-register (register_payload_model raises on
-    # duplicates); the consumer mirror in domain/events.py still types the
-    # handler's view.
-    registry.register_payload_model(EVENT_PATIENT_REGISTERED, PatientRegisteredPayload)
+    # registry (report.filed, prescription.delivered, settlement.recorded).
+    # patient.registered payload model is now owned by its producer (iam module).
+    # prescription.issued is deliberately absent: its producer (care, PHASE-8)
+    # owns the registry contract and registers it, so health consuming it must
+    # not re-register (register_payload_model raises on duplicates); the
+    # consumer mirror in domain/events.py still types the handler's view.
     registry.register_payload_model(EVENT_REPORT_FILED, ReportFiledPayload)
     registry.register_payload_model(EVENT_PRESCRIPTION_DELIVERED, PrescriptionDeliveredPayload)
     registry.register_payload_model(EVENT_SETTLEMENT_RECORDED, SettlementRecordedPayload)

@@ -23,11 +23,12 @@ poll query also treats as eligible now - so T3b's backoff scheduling (future
 ``next_attempt_at`` on a ``pending`` row) composes with the same eligibility
 predicate.
 
-A row is deleted only when the fan-out actually reached a subscriber and every
-handler succeeded - deleting without a subscriber would destroy the event with
-no ``consumed_events`` delivery record. A row that cannot be delivered as a
-typed envelope (no registered payload model) or has no registered handlers is a
-configuration error: it is logged and left for reclaim, never deleted.
+A row is deleted when the fan-out reached every subscriber and each handler
+succeeded, including the vacuous case of an event type with zero subscribers
+(ADR-0002: a row is deleted once every subscriber has handled it). A row that
+cannot be delivered as a typed envelope (no registered payload model, or a
+payload that fails reconstruction) is a failed attempt: it is retried with
+backoff and dead-lettered at ``max_attempts``.
 
 Failure semantics (T3b, #23): a partial fan-out (one or more registered
 subscribers failed) is a failed attempt. The dispatcher increments the row's
@@ -564,6 +565,49 @@ async def record_failed_attempt(
     return None if mapping is None else str(mapping["status"])
 
 
+async def record_attempt_failure(
+    engine: AsyncEngine,
+    target: Table,
+    row: OutboxRow,
+    config: DispatcherConfig,
+    retry_message: str,
+) -> tuple[int, int]:
+    """Record one failed delivery attempt and log its outcome.
+
+    The one failure path for every class of failed delivery - a partial fan-out,
+    a missing payload model, a payload that fails reconstruction - so attempts
+    increment and backoff applies identically to each (issue #944). Wraps
+    :func:`record_failed_attempt` on its own connection, logs the resulting
+    retry or dead-letter (dead-letter lines name the event type and row id),
+    and returns ``(retried, dead_lettered)`` deltas for the poll result.
+    ``retry_message`` is the log format for the retry branch, letting each
+    failure class name its own cause.
+    """
+    async with engine.begin() as connection:
+        outcome = await record_failed_attempt(connection, target, row, config)
+    if outcome == OUTBOX_STATUS_DEAD_LETTER:
+        logger.error(
+            "outbox row %s (%s) dead-lettered after %d attempts",
+            row.event_id,
+            row.event_type,
+            row.attempts + 1,
+        )
+        return 0, 1
+    if outcome == OUTBOX_STATUS_PENDING:
+        logger.warning(
+            retry_message,
+            row.event_id,
+            row.event_type,
+            backoff_delay(row.attempts + 1, config).total_seconds(),
+        )
+        return 1, 0
+    logger.info(
+        "outbox row %s was re-claimed by another worker; not recording failure",
+        row.event_id,
+    )
+    return 0, 0
+
+
 def outbox_row_span(row: OutboxRow, table: OutboxTable) -> AbstractContextManager[Any]:
     """The span context manager for delivering one claimed outbox row (A3b).
 
@@ -597,11 +641,14 @@ async def process_outbox_table(
     Reclaim and claim share one transaction (the reclaim's re-pended rows are
     immediately claimable). Each claimed row is reconstructed into a typed
     envelope and fanned out via ``dispatch``; a row whose every registered
-    subscriber handler succeeded is deleted, and a partial fan-out is recorded
-    as a failed attempt - scheduled for an exponential-backoff retry or
-    dead-lettered once ``max_attempts`` is reached (T3b, #23). The dispatcher
-    touches ``table`` (and each subscriber's own ledger, which handlers write
-    themselves) - never domain tables.
+    subscriber handler succeeded is deleted - including the vacuous case of an
+    event type with zero subscribers, which drains as a successful delivery to
+    all zero of them (issue #944) - and a failed delivery is recorded as one
+    failed attempt via :func:`record_attempt_failure`: a missing payload model,
+    a payload that fails reconstruction, or a partial fan-out all share the
+    same path - exponential-backoff retry, dead-letter at ``max_attempts``
+    (T3b, #23). The dispatcher touches ``table`` (and each subscriber's own
+    ledger, which handlers write themselves) - never domain tables.
     """
     target = outbox_table(table.table_name, table.schema)
     async with engine.begin() as connection:
@@ -628,29 +675,41 @@ async def process_outbox_table(
                 if payload_model is None:
                     logger.error(
                         "no payload model registered for event_type %r; "
-                        "leaving outbox row %s for reclaim",
+                        "recording failed attempt for outbox row %s",
                         row.event_type,
                         row.event_id,
                     )
+                    retried_delta, dead_lettered_delta = await record_attempt_failure(
+                        engine,
+                        target,
+                        row,
+                        config,
+                        "payload model missing for outbox row %s (%s); retrying in %.1fs",
+                    )
+                    retried += retried_delta
+                    dead_lettered += dead_lettered_delta
                     continue
                 try:
                     envelope = envelope_from_row(row, table.schema, payload_model)
                     result = await dispatch(registry, envelope)
                 except Exception:
                     logger.exception(
-                        "fan-out raised for outbox row %s (%s); leaving it for reclaim",
+                        "fan-out raised for outbox row %s (%s); recording failed attempt",
                         row.event_id,
                         row.event_type,
                     )
+                    retried_delta, dead_lettered_delta = await record_attempt_failure(
+                        engine,
+                        target,
+                        row,
+                        config,
+                        "delivery failed for outbox row %s (%s); retrying in %.1fs",
+                    )
+                    retried += retried_delta
+                    dead_lettered += dead_lettered_delta
                     continue
                 fanned_out += 1
-                if not result.outcomes:
-                    logger.error(
-                        "no handler for event_type %r; leaving outbox row %s for reclaim",
-                        row.event_type,
-                        row.event_id,
-                    )
-                elif result.all_succeeded:
+                if not result.outcomes or result.all_succeeded:
                     async with engine.begin() as connection:
                         if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
                             deleted += 1
@@ -660,29 +719,15 @@ async def process_outbox_table(
                                 row.event_id,
                             )
                 else:
-                    async with engine.begin() as connection:
-                        outcome = await record_failed_attempt(connection, target, row, config)
-                    if outcome == OUTBOX_STATUS_DEAD_LETTER:
-                        dead_lettered += 1
-                        logger.error(
-                            "outbox row %s (%s) dead-lettered after %d attempts",
-                            row.event_id,
-                            row.event_type,
-                            row.attempts + 1,
-                        )
-                    elif outcome == OUTBOX_STATUS_PENDING:
-                        retried += 1
-                        logger.warning(
-                            "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
-                            row.event_id,
-                            row.event_type,
-                            backoff_delay(row.attempts + 1, config).total_seconds(),
-                        )
-                    else:
-                        logger.info(
-                            "outbox row %s was re-claimed by another worker; not recording failure",
-                            row.event_id,
-                        )
+                    retried_delta, dead_lettered_delta = await record_attempt_failure(
+                        engine,
+                        target,
+                        row,
+                        config,
+                        "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
+                    )
+                    retried += retried_delta
+                    dead_lettered += dead_lettered_delta
         finally:
             reset_trace_id(trace_token)
 

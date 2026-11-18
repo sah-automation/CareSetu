@@ -11,12 +11,14 @@ import { IDEMPOTENCY_KEY_HEADER } from "@/lib/idempotency";
 import { request } from "@/lib/request";
 
 import {
+  fetchAiProviderCatalog,
   fetchEffectiveSettings,
   fetchFeatureFlags,
   fetchFeatureFlagHistory,
   fetchSettingHistory,
   writeFeatureFlag,
   writeSetting,
+  type AiProviderCatalogEntry,
 } from "./settings";
 
 vi.mock("@/lib/request", async (importOriginal) => {
@@ -303,5 +305,56 @@ describe("fetchFeatureFlagHistory (#800)", () => {
     });
 
     await expect(fetchFeatureFlagHistory()).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("fetchAiProviderCatalog (#924)", () => {
+  const providers: AiProviderCatalogEntry[] = [
+    {
+      id: "mock",
+      provider: "mock",
+      provider_id: "mock",
+      display_name: "Mock (offline)",
+      base_url: "",
+      chat_models: ["mock-model"],
+      asr_models: [],
+      api_key_env: "",
+    },
+    {
+      id: "openai_compatible",
+      provider: "openai_compatible",
+      provider_id: "openai_compatible",
+      display_name: "OpenAI-compatible",
+      base_url: "https://api.openai.com/v1",
+      chat_models: ["gpt-oss-120b", "gemini-3.6-flash", "mock-model"],
+      asr_models: ["whisper-large-v3-turbo", "whisper-large-v3"],
+      api_key_env: "AI_API_KEY",
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("reads the catalog endpoint and returns providers", async () => {
+    mockRequest.mockResolvedValue({ providers, catalog: providers });
+
+    await expect(fetchAiProviderCatalog()).resolves.toEqual(providers);
+    expect(mockRequest).toHaveBeenCalledWith("/v1/operator/ai/catalog");
+  });
+
+  it("rejects a malformed catalog entry", async () => {
+    mockRequest.mockResolvedValue({
+      providers: [{ ...providers[0], id: 123 }],
+      catalog: providers,
+    });
+
+    await expect(fetchAiProviderCatalog()).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("rejects a payload without a providers array", async () => {
+    mockRequest.mockResolvedValue({ catalog: providers });
+
+    await expect(fetchAiProviderCatalog()).rejects.toBeInstanceOf(ApiError);
   });
 });

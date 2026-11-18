@@ -206,6 +206,12 @@ class OtelSettings(Protocol):
     def otel_exporter_otlp_headers(self) -> tuple[str, ...]: ...
 
     @property
+    def otel_exporter_otlp_metrics_endpoint(self) -> str: ...
+
+    @property
+    def otel_exporter_otlp_traces_endpoint(self) -> str: ...
+
+    @property
     def otel_traces_sampler_ratio(self) -> float: ...
 
     @property
@@ -216,6 +222,12 @@ class OtelSettings(Protocol):
 
     @property
     def metrics_enabled(self) -> bool: ...
+
+    @property
+    def prometheus_remote_write_endpoint(self) -> str: ...
+
+    @property
+    def prometheus_remote_write_headers(self) -> tuple[str, ...]: ...
 
 
 def parse_otlp_headers(headers: Sequence[str]) -> dict[str, str]:
@@ -231,6 +243,102 @@ def parse_otlp_headers(headers: Sequence[str]) -> dict[str, str]:
         if separator and key.strip():
             parsed[key.strip()] = value.strip()
     return parsed
+
+
+# OTLP signal paths appended to a base endpoint when no explicit signal URL is
+# configured (mirrors the SDK's own resolution rules for its env vars).
+OTLP_METRICS_SIGNAL_PATH = "v1/metrics"
+OTLP_TRACES_SIGNAL_PATH = "v1/traces"
+
+
+def _normalize_otlp_endpoint(base: str = "", explicit: str = "", signal_path: str = "") -> str:
+    """Resolve one OTLP signal URL from a base + optional explicit override.
+
+    An explicit (full) signal endpoint always wins and is used verbatim. Otherwise
+    the signal path is appended to the base URL, so a base such as
+    ``https://otlp-gateway.example/otlp`` becomes the correct signal URL instead
+    of being posted to verbatim. A base that already ends in the signal path is
+    left alone, so an explicitly configured full endpoint passed as the base keeps
+    working.
+    """
+    explicit = (explicit or "").strip()
+    if explicit:
+        return explicit
+    base = (base or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if signal_path and base.endswith("/" + signal_path):
+        return base
+    if signal_path:
+        return f"{base}/{signal_path}"
+    return base
+
+
+def resolve_otlp_metrics_endpoint(
+    settings: OtelSettings | None = None,
+    *,
+    base: str | None = None,
+    explicit: str | None = None,
+) -> str:
+    """Resolve the OTLP metrics export URL for ``settings`` (or the given base)."""
+    if base is None and settings is not None:
+        base = getattr(settings, "otel_exporter_otlp_endpoint", "")
+    if explicit is None and settings is not None:
+        explicit = getattr(settings, "otel_exporter_otlp_metrics_endpoint", "")
+    return _normalize_otlp_endpoint(
+        base if base is not None else "",
+        explicit if explicit is not None else "",
+        OTLP_METRICS_SIGNAL_PATH,
+    )
+
+
+def resolve_otlp_traces_endpoint(
+    settings: OtelSettings | None = None,
+    *,
+    base: str | None = None,
+    explicit: str | None = None,
+) -> str:
+    """Resolve the OTLP traces export URL for ``settings`` (or the given base)."""
+    if base is None and settings is not None:
+        base = getattr(settings, "otel_exporter_otlp_endpoint", "")
+    if explicit is None and settings is not None:
+        explicit = getattr(settings, "otel_exporter_otlp_traces_endpoint", "")
+    return _normalize_otlp_endpoint(
+        base if base is not None else "",
+        explicit if explicit is not None else "",
+        OTLP_TRACES_SIGNAL_PATH,
+    )
+
+
+def resolve_otlp_endpoint(
+    settings_or_base: OtelSettings | str | None = None,
+    signal: str = "metrics",
+    explicit: str | None = None,
+    *,
+    base: str | None = None,
+) -> str:
+    """Generic resolver: ``signal`` is ``"metrics"`` or ``"traces"``."""
+    settings = settings_or_base if not isinstance(settings_or_base, str) else None
+    if base is None:
+        if isinstance(settings_or_base, str):
+            base = settings_or_base
+        elif settings_or_base is None:
+            base = ""
+        else:
+            base = getattr(settings_or_base, "otel_exporter_otlp_endpoint", "")
+    if explicit is None and settings is not None:
+        if signal == "traces":
+            explicit = getattr(settings, "otel_exporter_otlp_traces_endpoint", "")
+        else:
+            explicit = getattr(settings, "otel_exporter_otlp_metrics_endpoint", "")
+    if explicit is None:
+        explicit = ""
+    path = OTLP_TRACES_SIGNAL_PATH if signal == "traces" else OTLP_METRICS_SIGNAL_PATH
+    return _normalize_otlp_endpoint(base or "", explicit or "", path)
+
+
+# Backwards/alternative spelling.
+normalize_otlp_endpoint = resolve_otlp_endpoint
 
 
 def _allowed_only(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -624,13 +732,16 @@ def init_metrics(
 ) -> bool:
     """Initialise OTel metrics once per process; never raises, never blocks boot.
 
-    Gated independently by ``METRICS_ENABLED``: when the gate is off (or the
-    OTLP endpoint is unset) it returns immediately - no SDK import, no reader,
-    no global meter-provider mutation - so the off path is inert. When on, it
-    wires an OTLP HTTP metric exporter over the same endpoint/headers as tracing
-    and (when an app is supplied) adds the request metrics middleware.
+    Gated independently by ``METRICS_ENABLED``: when the gate is off (or no
+    endpoint is configured) it returns immediately - no SDK import, no reader,
+    no global meter-provider mutation - so the off path is inert.
 
-    ``metric_reader`` overrides the periodic OTLP reader (a test seam) so a test
+    Exporter selection (METRICS #916):
+    1. ``PROMETHEUS_REMOTE_WRITE_ENDPOINT`` set -> Prometheus remote-write exporter
+    2. ``OTEL_EXPORTER_OTLP_ENDPOINT`` set -> OTLP metric exporter (existing behavior)
+    3. Neither set -> metrics disabled (inert)
+
+    ``metric_reader`` overrides the periodic reader (a test seam) so a test
     can export into an in-memory reader. Any SDK failure is logged and swallowed.
     """
     global _metrics_configured, _metrics_enabled, _meter_provider
@@ -640,12 +751,62 @@ def init_metrics(
     _metrics_configured = True
 
     if not settings.metrics_enabled:
-        log.info("metrics disabled; OTLP metrics export off")
+        log.info("metrics disabled; metrics export off")
         return False
 
-    endpoint = settings.otel_exporter_otlp_endpoint.strip()
-    if not endpoint:
-        log.info("metrics endpoint unset; OTLP metrics export off")
+    # Priority 1: Prometheus remote-write exporter
+    prom_endpoint = settings.prometheus_remote_write_endpoint.strip()
+    if prom_endpoint:
+        try:
+            from opentelemetry import metrics
+            from opentelemetry.exporter.prometheus_remote_write import (
+                PrometheusRemoteWriteMetricsExporter,
+            )
+            from opentelemetry.sdk.metrics import MeterProvider
+            from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+
+            reader = (
+                metric_reader
+                if metric_reader is not None
+                else PeriodicExportingMetricReader(
+                    PrometheusRemoteWriteMetricsExporter(
+                        endpoint=prom_endpoint,
+                        headers=parse_otlp_headers(settings.prometheus_remote_write_headers),
+                    )
+                )
+            )
+            provider = MeterProvider(
+                resource=_build_resource(settings, service),
+                metric_readers=[reader],
+            )
+            metrics.set_meter_provider(provider)
+            if app is not None:
+                app.add_middleware(_MetricsASGIMiddleware)
+        except Exception:
+            log.warning(
+                "metrics init failed; Prometheus remote-write metrics export disabled",
+                exc_info=True,
+            )
+            _meter_provider = None
+            _metrics_enabled = False
+            return False
+
+        _meter_provider = provider
+        _metrics_enabled = True
+        log.info(
+            "metrics initialised (service=%s, env=%s, exporter=prometheus_remote_write)",
+            service,
+            settings.app_environment,
+        )
+        return True
+
+    # Priority 2: OTLP metric exporter (existing behavior)
+    otlp_endpoint = resolve_otlp_metrics_endpoint(settings)
+    if not otlp_endpoint:
+        log.info(
+            "metrics endpoint unset (neither PROMETHEUS_REMOTE_WRITE_ENDPOINT "
+            "nor OTEL_EXPORTER_OTLP_ENDPOINT configured); metrics export off"
+        )
         return False
 
     try:
@@ -659,7 +820,7 @@ def init_metrics(
             if metric_reader is not None
             else PeriodicExportingMetricReader(
                 OTLPMetricExporter(
-                    endpoint=endpoint,
+                    endpoint=otlp_endpoint,
                     headers=parse_otlp_headers(settings.otel_exporter_otlp_headers),
                 )
             )
@@ -679,7 +840,11 @@ def init_metrics(
 
     _meter_provider = provider
     _metrics_enabled = True
-    log.info("metrics initialised (service=%s, env=%s)", service, settings.app_environment)
+    log.info(
+        "metrics initialised (service=%s, env=%s, exporter=otlp)",
+        service,
+        settings.app_environment,
+    )
     return True
 
 
@@ -718,7 +883,7 @@ def init_otel(
         log.info("otel disabled; request-path tracing off")
         return False
 
-    endpoint = settings.otel_exporter_otlp_endpoint.strip()
+    endpoint = resolve_otlp_traces_endpoint(settings)
     if not endpoint:
         log.info("otel endpoint unset; request-path tracing off")
         return False

@@ -49,6 +49,7 @@ from modules.iam.domain.consumer import (
 )
 from modules.iam.facade import IamFacade
 from modules.iam.outbox import IAM_OUTBOX_TABLE
+from modules.partner.adapters import register_handlers as register_partner_handlers
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "apps" / "backend" / "alembic.ini"
@@ -112,6 +113,7 @@ def _facade(database_url: str, sms: SmsAdapter) -> IamFacade:
 def _registry() -> HandlerRegistry:
     registry = HandlerRegistry()
     register_iam_handlers(registry)
+    register_partner_handlers(registry)
     return registry
 
 
