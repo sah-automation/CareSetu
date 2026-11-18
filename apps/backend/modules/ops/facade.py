@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy import select
 
 from app.config import Settings, parse_ai_pricing_table
 from app.db import AsyncEngineLike
-from bus.events import EVENT_AUDIT_EVENT, EVENT_OPS_RUNTIME_SETTING_CHANGED
-from modules.ops.domain.events import OpsRuntimeSettingChangedPayload
+from bus.outbox_writer import write_outbox
+from modules.ops.domain.events import (
+    ops_feature_flag_audit_envelope,
+    ops_runtime_setting_changed_envelope,
+    ops_setting_audit_envelope,
+)
 from modules.ops.domain.exceptions import InvalidFeatureFlagWriteError
 from modules.ops.domain.setting_encryption_service import SettingEncryptionService
 from modules.ops.domain.settings import (
@@ -33,13 +36,17 @@ from modules.ops.domain.settings import (
     validate_feature_flag_write,
     validate_notification_setting,
 )
+from modules.ops.outbox import OPS_OUTBOX_TABLE
 from modules.ops.schema.models import (
     ops_feature_flag_history,
     ops_feature_flags,
-    ops_outbox,
     ops_setting_history,
     ops_settings,
 )
+
+#: The ops schema the module's outbox rows are written into (ADR-0003: a module
+#: publishes only into its own schema's outbox).
+OPS_SCHEMA = "ops"
 
 # AI knobs validated by ``validate_ai_setting``. Provider API key secrets
 # (``ai.api_key``, ``ai.fallback_api_key``) are editable but are not config knobs;
@@ -336,25 +343,22 @@ class OpsFacade:
                 )
             )
 
-            # Emit audit event with old and new values
-            audit_payload = {
-                "action": "feature_flag.write",
-                "flag_key": flag_key,
-                "old_enabled": old_enabled,
-                "new_enabled": enabled,
-                "flag_kind": flag_kind.value,
-                "version": new_version,
-                "updated_by": updated_by,
-            }
-            await connection.execute(
-                ops_outbox.insert().values(
-                    event_id=uuid4(),
-                    event_type=EVENT_AUDIT_EVENT,
-                    payload=audit_payload,
-                    occurred_at=datetime.now(UTC),
-                    status="pending",
-                    attempts=0,
-                )
+            # Emit audit event with old and new values through the shared
+            # transactional outbox writer, so the row carries the typed
+            # envelope and the request's trace context like every other
+            # module's publishes (issue #945).
+            await write_outbox(
+                connection,
+                OPS_SCHEMA,
+                OPS_OUTBOX_TABLE,
+                ops_feature_flag_audit_envelope(
+                    flag_key=flag_key,
+                    old_enabled=old_enabled,
+                    new_enabled=enabled,
+                    flag_kind=flag_kind.value,
+                    version=new_version,
+                    updated_by=updated_by,
+                ),
             )
 
         return FeatureFlagWriteResponse(
@@ -477,40 +481,34 @@ class OpsFacade:
                 )
             )
 
-            # Emit audit event with redacted values
-            audit_payload = {
-                "action": "setting.write",
-                "setting_key": setting_key,
-                "old_value": self._encryption_service.redact_value(setting_key, old_value),
-                "new_value": redacted_value,
-                "version": new_version,
-                "updated_by": updated_by,
-            }
-            await connection.execute(
-                ops_outbox.insert().values(
-                    event_id=uuid4(),
-                    event_type=EVENT_AUDIT_EVENT,
-                    payload=audit_payload,
-                    occurred_at=datetime.now(UTC),
-                    status="pending",
-                    attempts=0,
-                )
+            # Emit audit event with redacted values through the shared
+            # transactional outbox writer, so the row carries the typed
+            # envelope and the request's trace context like every other
+            # module's publishes (issue #945).
+            await write_outbox(
+                connection,
+                OPS_SCHEMA,
+                OPS_OUTBOX_TABLE,
+                ops_setting_audit_envelope(
+                    setting_key=setting_key,
+                    old_value=self._encryption_service.redact_value(setting_key, old_value),
+                    new_value=redacted_value,
+                    version=new_version,
+                    updated_by=updated_by,
+                ),
             )
 
             # Emit runtime setting changed event for cache/redis switches
             if setting_key in ("cache.enabled", "redis.enabled"):
-                runtime_event = OpsRuntimeSettingChangedPayload(
-                    key=setting_key, value=value, version=new_version
-                )
-                await connection.execute(
-                    ops_outbox.insert().values(
-                        event_id=uuid4(),
-                        event_type=EVENT_OPS_RUNTIME_SETTING_CHANGED,
-                        payload=runtime_event.model_dump(mode="json"),
-                        occurred_at=datetime.now(UTC),
-                        status="pending",
-                        attempts=0,
-                    )
+                await write_outbox(
+                    connection,
+                    OPS_SCHEMA,
+                    OPS_OUTBOX_TABLE,
+                    ops_runtime_setting_changed_envelope(
+                        key=setting_key,
+                        value=value,
+                        version=new_version,
+                    ),
                 )
 
         # Invalidate cache so the next effective read resolves the new value

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import NAMESPACE_DNS, uuid4, uuid5
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from bus.envelope import Envelope
 from bus.events import (
@@ -1220,3 +1220,142 @@ def test_registered_and_invalidated_payload_models_are_registered_correctly() ->
     ), "MOD-011 must not register a duplicate model"
     assert len(registry.handlers_for(EVENT_PARTNER_REGISTERED)) == 1
     assert len(registry.handlers_for(EVENT_CREDENTIAL_INVALIDATED)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Widened carrier: ops variants (issue #945)
+# ---------------------------------------------------------------------------
+
+
+def _ops_setting_payload(**overrides: object) -> AuditEventPayload:
+    fields: dict[str, object] = {
+        "action": "setting.write",
+        "setting_key": "ai.timeout_seconds",
+        "old_value": "10",
+        "new_value": "15",
+        "version": 2,
+        "updated_by": 7,
+    }
+    fields.update(overrides)
+    return AuditEventPayload(**fields)  # type: ignore[arg-type]
+
+
+def _ops_flag_payload(**overrides: object) -> AuditEventPayload:
+    fields: dict[str, object] = {
+        "action": "feature_flag.write",
+        "flag_key": "evals.page",
+        "old_enabled": False,
+        "new_enabled": True,
+        "flag_kind": "runtime",
+        "version": 3,
+        "updated_by": 7,
+    }
+    fields.update(overrides)
+    return AuditEventPayload(**fields)  # type: ignore[arg-type]
+
+
+def test_ops_setting_write_carrier_validates() -> None:
+    payload = _ops_setting_payload()
+    assert payload.setting_key == "ai.timeout_seconds"
+    assert payload.new_value == "15"
+    assert payload.version == 2
+    assert payload.updated_by == 7
+
+
+def test_ops_feature_flag_write_carrier_validates() -> None:
+    payload = _ops_flag_payload()
+    assert payload.flag_key == "evals.page"
+    assert payload.new_enabled is True
+    assert payload.flag_kind == "runtime"
+    assert payload.version == 3
+
+
+def test_ops_carriers_reconstruct_from_a_dispatcher_row() -> None:
+    # The dispatcher reconstructs a claimed row via model_validate on the
+    # stored JSONB - both ops variants must round-trip that path (issue #945).
+    setting = AuditEventPayload.model_validate(_ops_setting_payload().model_dump())
+    assert setting == _ops_setting_payload()
+    flag = AuditEventPayload.model_validate(_ops_flag_payload().model_dump())
+    assert flag == _ops_flag_payload()
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["setting.write", "feature_flag.write"],
+)
+def test_is_appended_act_false_for_ops_carriers(action: str) -> None:
+    # Ops configuration writes are operational by default: consumed and
+    # drained, never appended to the hash chain (issue #945).
+    payload = (
+        _ops_setting_payload(action=action)
+        if action == "setting.write"
+        else _ops_flag_payload(action=action)
+    )
+    assert not is_appended_act(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["actor_patient_id", "consent_id", "lineage_ref", "record_scope", "version"],
+)
+def test_consent_carrier_missing_required_field_is_rejected(field: str) -> None:
+    fields: dict[str, object] = {
+        "action": "granted",
+        "actor_patient_id": 7,
+        "consent_id": 1,
+        "lineage_ref": "C-2026-001",
+        "record_scope": "consultations",
+        "version": 1,
+    }
+    del fields[field]
+    with pytest.raises(ValidationError, match=field):
+        AuditEventPayload(**fields)  # type: ignore[arg-type]
+
+
+def test_unknown_action_is_rejected() -> None:
+    with pytest.raises(ValidationError, match=r"unknown audit.event carrier action"):
+        AuditEventPayload.model_validate({"action": "mystery.write"})
+
+
+def test_ops_setting_carrier_missing_setting_key_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="setting_key"):
+        AuditEventPayload.model_validate({"action": "setting.write", "version": 1})
+
+
+def test_ops_flag_carrier_missing_flag_kind_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="flag_kind"):
+        AuditEventPayload.model_validate(
+            {"action": "feature_flag.write", "flag_key": "k", "new_enabled": True, "version": 1}
+        )
+
+
+def test_build_audit_row_rejects_ops_carrier() -> None:
+    # build_audit_row's contract is "only after is_appended_act returned True",
+    # so it only ever sees the consent variant; an ops carrier is a caller bug.
+    with pytest.raises(ValueError, match="consent carrier variant"):
+        build_audit_row(_ops_setting_payload(), "ops", _NOW, GENESIS_HASH)
+
+
+async def test_ops_carrier_consumed_without_append_through_handler() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_AUDIT_EVENT)[0]
+    envelope = _envelope(_ops_setting_payload(), producer="ops")
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_audit_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()

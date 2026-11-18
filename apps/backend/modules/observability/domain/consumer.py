@@ -35,9 +35,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from bus.events import (
     EVENT_AUDIT_EVENT,
@@ -388,15 +388,71 @@ class AuditEventTelemetryPayload(BaseModel):
 
     MOD-011 owns the registry model; MOD-013 re-validates into this mirror to
     count the audit carrier. Every producer publishes it, so the count is a
-    coarse "audit events recorded" signal.
+    coarse "audit events recorded" signal. Variant-aware like MOD-011's carrier
+    (issue #945): consent lifecycle and ops configuration writes both validate,
+    so ops rows are counted instead of dropped.
     """
 
+    # The consent variant's actions, declared locally so MOD-013 mirrors the
+    # carrier without importing another module's domain (ADR-0003).
+    _CONSENT_CARRIER_ACTIONS: ClassVar[frozenset[str]] = frozenset(
+        {"requested", "granted", "revoked", "declined"}
+    )
+
     action: str
-    actor_patient_id: int
-    consent_id: int
-    lineage_ref: str
-    record_scope: str
-    version: int
+
+    # Consent variant (MOD-004 producer), required for consent actions.
+    actor_patient_id: int | None = None
+    consent_id: int | None = None
+    lineage_ref: str | None = None
+    record_scope: str | None = None
+    version: int | None = None
+
+    # Ops setting.write variant (MOD-014 producer).
+    setting_key: str | None = None
+    old_value: object | None = None
+    new_value: object | None = None
+
+    # Ops feature_flag.write variant (MOD-014 producer).
+    flag_key: str | None = None
+    old_enabled: bool | None = None
+    new_enabled: bool | None = None
+    flag_kind: str | None = None
+
+    # The ops variant's actor: the operator identity id.
+    updated_by: int | None = None
+
+    @model_validator(mode="after")
+    def _require_variant_fields(self) -> AuditEventTelemetryPayload:
+        """Mirror MOD-011's per-variant required fields (issue #945)."""
+        if self.action in self._CONSENT_CARRIER_ACTIONS:
+            missing = [
+                field
+                for field in (
+                    "actor_patient_id",
+                    "consent_id",
+                    "lineage_ref",
+                    "record_scope",
+                    "version",
+                )
+                if getattr(self, field) is None
+            ]
+            if missing:
+                raise ValueError(f"consent audit carrier requires fields {missing}")
+        elif self.action == "setting.write":
+            if self.setting_key is None or self.version is None:
+                raise ValueError("ops setting.write carrier requires setting_key and version")
+        elif self.action == "feature_flag.write":
+            missing = [
+                field
+                for field in ("flag_key", "new_enabled", "flag_kind", "version")
+                if getattr(self, field) is None
+            ]
+            if missing:
+                raise ValueError(f"ops feature_flag.write carrier requires fields {missing}")
+        else:
+            raise ValueError(f"unknown audit.event carrier action {self.action!r}")
+        return self
 
 
 class TamperDetectedTelemetryPayload(BaseModel):

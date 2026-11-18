@@ -38,7 +38,6 @@ from modules.care.adapters import register_handlers as register_care_handlers
 from modules.consent.adapters import register_handlers as register_consent_handlers
 from modules.consent.domain.events import ConsentGrantedPayload
 from modules.iam.adapters import register_handlers as register_iam_handlers
-from modules.iam.domain.consumer import PartnerActivatedPayload
 from modules.intake.adapters import register_handlers as register_intake_handlers
 from modules.intake.domain.events import AiEgressRecordedPayload
 from modules.observability.adapters import (
@@ -51,14 +50,18 @@ from modules.observability.domain.consumer import (
     BUSINESS_EVENT_METRICS,
     AiEgressRecordedTelemetryPayload,
     ConsentLifecycleTelemetryPayload,
-    PartnerSelectedTelemetryPayload,
-    PartnerVerificationStartedTelemetryPayload,
     RecordAccessTelemetryPayload,
     TamperDetectedTelemetryPayload,
     build_ai_egress_alert,
     build_tamper_alert,
 )
 from modules.observability.facade import accumulate_business_count
+from modules.partner.adapters import register_handlers as register_partner_handlers
+from modules.partner.domain.events import (
+    PartnerActivatedPayload,
+    PartnerSelectedPayload,
+    VerificationStartedPayload,
+)
 
 _NOW = datetime(2026, 10, 13, 8, 15, 0, tzinfo=UTC)
 
@@ -68,6 +71,7 @@ def _composition_registry() -> HandlerRegistry:
     registry = HandlerRegistry()
     for register in (
         register_iam_handlers,
+        register_partner_handlers,
         register_consent_handlers,
         register_intake_handlers,
         register_care_handlers,
@@ -100,21 +104,21 @@ def _fake_ledger(monkeypatch: pytest.MonkeyPatch, delivered: set[str]) -> None:
 
 
 def test_business_events_register_one_handler_and_only_claim_unowned_models() -> None:
-    """Every business family has one seat; MOD-013 claims only unowned models."""
+    """Every business family has one seat; every consumed event's model is producer-owned."""
     registry = _composition_registry()
 
     for event_type in BUSINESS_EVENT_METRICS:
         assert registry.handlers_for(event_type), event_type
 
-    # MOD-013 owns the two models no other module claimed.
+    # The producer owns the payload model for every consumed event (issue #943):
+    # MOD-013 registered no duplicates (which ``register_payload_model`` would
+    # have raised on) - only its own handler seats.
     assert (
-        registry.payload_model_for(EVENT_PARTNER_VERIFICATION_STARTED)
-        is PartnerVerificationStartedTelemetryPayload
+        registry.payload_model_for(EVENT_PARTNER_VERIFICATION_STARTED) is VerificationStartedPayload
     )
-    assert registry.payload_model_for(EVENT_PARTNER_SELECTED) is PartnerSelectedTelemetryPayload
+    assert registry.payload_model_for(EVENT_PARTNER_SELECTED) is PartnerSelectedPayload
 
-    # Owned models stay owned by their producer - MOD-013 registered no duplicate
-    # (which ``register_payload_model`` would have raised on).
+    # Owned models stay owned by their producer.
     assert registry.payload_model_for(EVENT_PARTNER_ACTIVATED) is PartnerActivatedPayload
     assert registry.payload_model_for(EVENT_CONSENT_GRANTED) is ConsentGrantedPayload
     assert registry.payload_model_for(EVENT_AUDIT_EVENT) is AuditEventPayload
