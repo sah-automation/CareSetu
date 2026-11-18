@@ -1301,8 +1301,9 @@ class Settings:
             or self.otel_exporter_otlp_traces_endpoint.strip()
         ):
             raise ValueError(
-                "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT from the "
-                "environment (fail-closed)."
+                "otel_enabled=True requires OTEL_EXPORTER_OTLP_ENDPOINT or "
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT from the environment "
+                "(fail-closed)."
             )
         # Backward-compatible alias: DISPATCHER_IN_PROCESS_ENABLED forces inprocess;
         # an explicit conflicting mode is rejected at construction. An empty

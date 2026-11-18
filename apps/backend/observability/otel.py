@@ -275,14 +275,15 @@ def _normalize_otlp_endpoint(base: str = "", explicit: str = "", signal_path: st
 
 
 def resolve_otlp_metrics_endpoint(
-    settings: Any = None,
+    settings: OtelSettings | None = None,
     *,
     base: str | None = None,
     explicit: str | None = None,
 ) -> str:
     """Resolve the OTLP metrics export URL for ``settings`` (or the given base)."""
-    if settings is not None:
+    if base is None and settings is not None:
         base = getattr(settings, "otel_exporter_otlp_endpoint", "")
+    if explicit is None and settings is not None:
         explicit = getattr(settings, "otel_exporter_otlp_metrics_endpoint", "")
     return _normalize_otlp_endpoint(
         base if base is not None else "",
@@ -292,14 +293,15 @@ def resolve_otlp_metrics_endpoint(
 
 
 def resolve_otlp_traces_endpoint(
-    settings: Any = None,
+    settings: OtelSettings | None = None,
     *,
     base: str | None = None,
     explicit: str | None = None,
 ) -> str:
     """Resolve the OTLP traces export URL for ``settings`` (or the given base)."""
-    if settings is not None:
+    if base is None and settings is not None:
         base = getattr(settings, "otel_exporter_otlp_endpoint", "")
+    if explicit is None and settings is not None:
         explicit = getattr(settings, "otel_exporter_otlp_traces_endpoint", "")
     return _normalize_otlp_endpoint(
         base if base is not None else "",
@@ -309,37 +311,34 @@ def resolve_otlp_traces_endpoint(
 
 
 def resolve_otlp_endpoint(
-    settings_or_base: Any = None,
+    settings_or_base: OtelSettings | str | None = None,
     signal: str = "metrics",
     explicit: str | None = None,
+    *,
+    base: str | None = None,
 ) -> str:
     """Generic resolver: ``signal`` is ``"metrics"`` or ``"traces"``."""
-    if isinstance(settings_or_base, str):
-        base = settings_or_base
-        if explicit is None:
-            explicit = ""
-    elif settings_or_base is None:
-        base = ""
-        if explicit is None:
-            explicit = ""
-    else:
-        settings = settings_or_base
-        base = getattr(settings, "otel_exporter_otlp_endpoint", "")
-        if explicit is None:
-            if signal == "traces":
-                explicit = getattr(settings, "otel_exporter_otlp_traces_endpoint", "")
-            else:
-                explicit = getattr(settings, "otel_exporter_otlp_metrics_endpoint", "")
+    settings = settings_or_base if not isinstance(settings_or_base, str) else None
+    if base is None:
+        if isinstance(settings_or_base, str):
+            base = settings_or_base
+        elif settings_or_base is None:
+            base = ""
+        else:
+            base = getattr(settings_or_base, "otel_exporter_otlp_endpoint", "")
+    if explicit is None and settings is not None:
+        if signal == "traces":
+            explicit = getattr(settings, "otel_exporter_otlp_traces_endpoint", "")
+        else:
+            explicit = getattr(settings, "otel_exporter_otlp_metrics_endpoint", "")
+    if explicit is None:
+        explicit = ""
     path = OTLP_TRACES_SIGNAL_PATH if signal == "traces" else OTLP_METRICS_SIGNAL_PATH
     return _normalize_otlp_endpoint(base or "", explicit or "", path)
 
 
-# Backwards/alternative spellings.
+# Backwards/alternative spelling.
 normalize_otlp_endpoint = resolve_otlp_endpoint
-otlp_metrics_endpoint = resolve_otlp_metrics_endpoint
-otlp_traces_endpoint = resolve_otlp_traces_endpoint
-metrics_endpoint = resolve_otlp_metrics_endpoint
-traces_endpoint = resolve_otlp_traces_endpoint
 
 
 def _allowed_only(attributes: Mapping[str, Any] | None) -> dict[str, Any]:

@@ -258,7 +258,7 @@ jobs:
           SENTRY_DSN: ${{ matrix.gates == 'on' && 'http://publickey@127.0.0.1:9/1' || '' }}
           SENTRY_TRACES_SAMPLE_RATE: "0.0"
           OTEL_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
-          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ matrix.gates == 'on' && 'http://127.0.0.1:9/v1/traces' || '' }}
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ matrix.gates == 'on' && 'http://127.0.0.1:9' || '' }}
           OTEL_TRACES_SAMPLER_RATIO: "1.0"
           METRICS_ENABLED: ${{ matrix.gates == 'on' && 'true' || 'false' }}
           LANGFUSE_PUBLIC_KEY: ${{ matrix.gates == 'on' && 'pk-lf-ci-smoke' || '' }}
