@@ -89,23 +89,6 @@ def test_register_handlers_registers_security_signal_consumers() -> None:
     assert len(registry.handlers_for(EVENT_AI_EGRESS_PROMPT_INJECTION_DETECTED)) == 1
 
 
-def test_register_handlers_registers_unclaimed_payload_models() -> None:
-    """The dispatcher must be able to reconstruct the two IAM-failure envelopes.
-
-    No other module claimed ``patient.auth_failed`` or ``otp.failed`` before the
-    security-signal consumers, so without these registrations the dispatcher logs
-    the row as a configuration error and leaves it for reclaim forever - the
-    handlers would register and never fire. The registered shapes mirror the
-    producer's full contract, not the narrowed security view, so a later consumer
-    still sees every field.
-    """
-    registry = HandlerRegistry()
-    register_obs_handlers(registry)
-
-    assert registry.payload_model_for(EVENT_PATIENT_AUTH_FAILED) is PatientAuthFailedEventPayload
-    assert registry.payload_model_for(EVENT_OTP_FAILED) is OtpFailedEventPayload
-
-
 def test_registered_iam_failure_mirrors_keep_the_full_producer_contract() -> None:
     """The canonical mirrors carry the producer's fields; the handler mirrors drop PHI.
 

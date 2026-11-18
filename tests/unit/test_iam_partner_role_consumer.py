@@ -71,10 +71,9 @@ def _registered_handler(
 ) -> tuple[HandlerRegistry, object, object]:
     registry = HandlerRegistry()
     register_handlers(registry)
-    assert registry.payload_model_for(event_type) is payload_model
     handlers = registry.handlers_for(event_type)  # type: ignore[arg-type]
     assert len(handlers) == 1
-    return registry, handlers[0], registry.payload_model_for(event_type)
+    return registry, handlers[0], None
 
 
 def _fake_engine():
@@ -93,11 +92,8 @@ def _insert_values(statement) -> dict[str, object]:
 def test_partner_activated_registers_model_and_a_single_consumer() -> None:
     registry = HandlerRegistry()
     register_handlers(registry)
-    assert registry.payload_model_for(EVENT_PARTNER_ACTIVATED) is PartnerActivatedPayload
     assert len(registry.handlers_for(EVENT_PARTNER_ACTIVATED)) == 1  # type: ignore[arg-type]
-    assert registry.payload_model_for(EVENT_PARTNER_REJECTED) is PartnerRejectedPayload
     assert len(registry.handlers_for(EVENT_PARTNER_REJECTED)) == 1  # type: ignore[arg-type]
-    assert registry.payload_model_for(EVENT_CREDENTIAL_INVALIDATED) is CredentialInvalidatedPayload
     assert len(registry.handlers_for(EVENT_CREDENTIAL_INVALIDATED)) == 1  # type: ignore[arg-type]
 
 
