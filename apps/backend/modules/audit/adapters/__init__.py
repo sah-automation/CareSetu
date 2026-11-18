@@ -354,7 +354,3 @@ def register_handlers(registry: HandlerRegistry) -> None:
         )
 
     registry.register(EVENT_AUDIT_TAMPER_DETECTED, log_tamper_detected)
-
-
-append_patient_verified_act = append_patient_verified_event
-append_patient_verified = append_patient_verified_event

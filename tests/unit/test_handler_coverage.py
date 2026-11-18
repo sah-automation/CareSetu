@@ -19,8 +19,6 @@ from bus.events import (
     EVENT_OPERATOR_ACTIVE_CHANGED,
     EVENT_OPERATOR_INVITED,
     EVENT_OPERATOR_TIER_CHANGED,
-    EVENT_OTP_SENT,
-    EVENT_PATIENT_VERIFIED,
     EVENT_PRESCRIPTION_REJECTED,
     EVENT_PRESCRIPTION_REVIEWED,
 )
@@ -37,8 +35,6 @@ NO_SUBSCRIBER_EVENT_TYPES: frozenset[str] = frozenset(
         # Doc registry declares subscribers (MOD-011 / MOD-010) but no direct
         # handler is registered yet - a known gap, tracked for subscriber work
         # separately from the dispatcher transport fix (#944).
-        EVENT_OTP_SENT,
-        EVENT_PATIENT_VERIFIED,
         EVENT_OPERATOR_INVITED,
         EVENT_OPERATOR_TIER_CHANGED,
         EVENT_OPERATOR_ACTIVE_CHANGED,

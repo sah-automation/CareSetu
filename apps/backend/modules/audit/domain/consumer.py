@@ -550,9 +550,6 @@ def build_patient_verified_row(
     )
 
 
-build_patient_verified_act = build_patient_verified_row
-
-
 class TamperDetectedPayload(BaseModel):
     """MOD-011's payload model for the ``audit.tamper_detected`` outbox event.
 

@@ -312,10 +312,6 @@ async def append_patient_verified_event(
     return row
 
 
-append_patient_verified_act = append_patient_verified_event
-append_patient_verified = append_patient_verified_event
-
-
 class AuditEventView(BaseModel):
     """One ``audit_events`` row as the operator query API answers it (T6).
 
