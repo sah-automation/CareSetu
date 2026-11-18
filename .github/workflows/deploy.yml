@@ -89,6 +89,11 @@ jobs:
       - uses: 'google-github-actions/setup-gcloud@v2'
         with:
           project_id: '${{ vars.GCP_PROJECT_ID }}'
+      - name: Remove secret refs for URL-type vars (migrate to env vars)
+        run: |
+          gcloud run services update caresetu-backend \
+            --region=asia-south1 \
+            --remove-env-vars=CORS_ALLOWED_ORIGINS,GRAFANA_URL,SUPABASE_URL,AI_BASE_URL,AI_MODEL,AI_PRICING_TABLE,OTEL_EXPORTER_OTLP_ENDPOINT,AI_FALLBACK_BASE_URL,AI_FALLBACK_PROVIDER,AI_FALLBACK_MODEL,AI_WEBHOOK_URL,AI_WEBHOOK_SECRET,AI_WEBHOOK_SIGNING_SECRET,AI_JOB_WEBHOOK_URL,AI_JOB_WEBHOOK_SECRET,AI_JOB_WEBHOOK_SIGNING_SECRET,AI_ASR_MODEL,OTEL_SERVICE_VERSION,PROMETHEUS_REMOTE_WRITE_ENDPOINT || true
       - name: Build and deploy backend to Cloud Run
         run: |
           gcloud run deploy caresetu-backend \
