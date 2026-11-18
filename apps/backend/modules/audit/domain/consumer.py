@@ -37,7 +37,7 @@ RecordScope = Literal[
 
 #: The consent variant's actions, derived from the ``ConsentAuditAction`` alias
 #: so the carrier validator and the act-type derivation stay in sync.
-_CONSENT_CARRIER_ACTIONS: frozenset[str] = frozenset(get_args(ConsentAuditAction))
+CONSENT_CARRIER_ACTIONS: frozenset[str] = frozenset(get_args(ConsentAuditAction))
 
 #: The ops variant's actions (MOD-014 configuration writes, issue #945).
 OPS_AUDIT_ACTION_SETTING_WRITE = "setting.write"
@@ -106,7 +106,7 @@ class AuditEventPayload(BaseModel):
     @model_validator(mode="after")
     def _require_variant_fields(self) -> AuditEventPayload:
         """Pin the required fields per carrier variant (issue #945)."""
-        if self.action in _CONSENT_CARRIER_ACTIONS:
+        if self.action in CONSENT_CARRIER_ACTIONS:
             missing = [
                 field
                 for field in (
@@ -145,7 +145,7 @@ def audit_act_type(action: str) -> str:
     not regulated. ``audit_act_type`` and ``is_appended_act`` jointly decide
     whether a variant enters the hash chain (issue #945).
     """
-    if action in _CONSENT_CARRIER_ACTIONS:
+    if action in CONSENT_CARRIER_ACTIONS:
         return f"consent.{action}"
     if action == OPS_AUDIT_ACTION_SETTING_WRITE:
         return "ops.setting.write"
