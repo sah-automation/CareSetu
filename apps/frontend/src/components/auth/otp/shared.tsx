@@ -119,19 +119,29 @@ export function PhoneInput({
   value,
   onChange,
   placeholder,
+  autoFocus,
 }: {
   value: string;
   onChange: (raw: string) => void;
   placeholder: string;
+  autoFocus?: boolean;
 }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (autoFocus) {
+      inputRef.current?.focus();
+    }
+  }, [autoFocus]);
   return (
     <div className={styles.phoneWrap}>
       <span className={styles.phonePrefix}>+91</span>
       <input
+        ref={inputRef}
         className={styles.phoneInput}
         type="tel"
         inputMode="numeric"
         autoComplete="tel"
+        autoFocus={autoFocus}
         placeholder={placeholder}
         value={value.replace(/^\+91/, "")}
         onChange={(e) => onChange(e.target.value)}
