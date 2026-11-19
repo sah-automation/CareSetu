@@ -15,7 +15,7 @@
 // Refusals render exactly as on the patient surface: cooldown / locked with
 // the matching countdown, suspended, and wrong/expired/spent on the code step.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   fetchDemoOtp,
@@ -90,6 +90,7 @@ function partnerInitialState(): PartnerOtpState {
 export function usePartnerLoginFlow(): PartnerOtpFlow {
   const { lang } = useLang();
   const [state, setState] = useState<PartnerOtpState>(partnerInitialState);
+  const otpDraftRef = useRef("");
 
   // Demo-mode OTP read-back banner (DEPLOY-4, #118), gated exactly like the
   // patient wizard: inert unless NEXT_PUBLIC_DEMO_MODE is inlined as "true".
@@ -210,6 +211,7 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
               }));
               return;
             }
+            otpDraftRef.current = "";
             setState((s) => ({
               ...s,
               phone,
@@ -237,6 +239,7 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
       },
       submitOtp: () => {
         const s = state;
+        const code = otpDraftRef.current;
         if (s.lockoutRemaining > 0) {
           setState((prev) => ({
             ...prev,
@@ -248,12 +251,12 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
           setState((prev) => ({ ...prev, lastError: t.expiredOrUsed }));
           return;
         }
-        if (s.otpDraft.length !== 6) {
+        if (code.length !== 6) {
           setState((prev) => ({ ...prev, lastError: t.shortCode }));
           return;
         }
         setState((prev) => ({ ...prev, busy: true }));
-        void partnerVerify(s.phone, s.otpDraft)
+        void partnerVerify(s.phone, code)
           .then((result) => {
             if (result.outcome === "verified") {
               return issuePartnerSession(s.phone)
@@ -271,6 +274,7 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
                   // the code was verified against, which is the same number the
                   // patient flow stores.
                   saveSession(sessionResult, s.phone);
+                  otpDraftRef.current = "";
                   setState((prev) => ({
                     ...prev,
                     stage: "done",
@@ -292,6 +296,7 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
             }
             if (result.outcome === "wrong_code") {
               const attemptsLeft = result.attempts_left ?? s.attemptsLeft - 1;
+              otpDraftRef.current = "";
               setState((prev) => ({
                 ...prev,
                 attemptsLeft,
@@ -302,6 +307,7 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
               return;
             }
             if (result.outcome === "expired" || result.outcome === "spent") {
+              otpDraftRef.current = "";
               setState((prev) => ({
                 ...prev,
                 challenge: "spent",
@@ -313,6 +319,7 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
             }
             const lockoutSeconds =
               result.lockout_remaining_seconds ?? s.lockoutRemaining;
+            otpDraftRef.current = "";
             setState((prev) => ({
               ...prev,
               challenge: "locked",
@@ -351,6 +358,7 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
         void partnerLogin(s.phone)
           .then((result) => {
             if (result.outcome === "sent") {
+              otpDraftRef.current = "";
               setState((prev) => ({
                 ...prev,
                 challenge: "pending",
@@ -421,9 +429,13 @@ export function usePartnerLoginFlow(): PartnerOtpFlow {
       },
       setOtpDraft: (digits: string) => {
         const clean = digits.replace(/[^0-9]/g, "").slice(0, 6);
+        otpDraftRef.current = clean;
         setState((s) => ({ ...s, otpDraft: clean, lastError: null }));
       },
-      backToPhone: () => setState(partnerInitialState()),
+      backToPhone: () => {
+        otpDraftRef.current = "";
+        setState(partnerInitialState());
+      },
     };
 
     return flow;

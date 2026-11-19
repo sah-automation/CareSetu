@@ -147,9 +147,10 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
       <OtpInput
         value={state.otpDraft}
         onChange={flow.setOtpDraft}
-        autoFocus
+        autoFocus={true}
         disabled={blocked}
         label={t.codeLabel}
+        onComplete={flow.submitOtp}
       />
       <div className={stylesB.resendRow}>
         <GhostButton
@@ -175,6 +176,7 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
       )}
       <ErrorMessage message={state.lastError} />
       <PrimaryButton
+        type="submit"
         onClick={flow.submitOtp}
         disabled={blocked}
         pending={state.otpDraft.length !== 6}

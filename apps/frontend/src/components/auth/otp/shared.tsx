@@ -51,7 +51,7 @@
 // criteria, and each is asserted once or twice, so they need no atom - but
 // they do need a `data-testid` written onto them by hand.
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import type { AuthStrings, Lang } from "@/lib/i18n/dictionaries";
 import { IconRefresh } from "@/components/auth/icons";
@@ -194,6 +194,7 @@ export function OtpInput({
   label,
   invalid,
   describedBy,
+  onComplete,
 }: {
   value: string;
   onChange: (digits: string) => void;
@@ -218,9 +219,19 @@ export function OtpInput({
    */
   invalid?: boolean;
   describedBy?: string;
+  /**
+   * Fires when the entered value reaches 6 digits, so callers can auto-submit
+   * the surrounding form without an extra button press.
+   */
+  onComplete?: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const boxes = Array.from({ length: 6 }, (_, i) => value[i] ?? "");
+  useEffect(() => {
+    if (autoFocus) {
+      inputRef.current?.focus();
+    }
+  }, [autoFocus]);
   return (
     // #576: the wrapper used to be a `role="group"` div with an `aria-label`
     // set to the literal "OTP", a second hardcoded English name over the one
@@ -239,7 +250,13 @@ export function OtpInput({
         value={value}
         maxLength={6}
         disabled={disabled}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => {
+          const digits = e.target.value;
+          onChange(digits);
+          if (digits.length === 6) {
+            onComplete?.();
+          }
+        }}
         aria-label={label}
         aria-invalid={invalid ? true : undefined}
         aria-describedby={describedBy}
