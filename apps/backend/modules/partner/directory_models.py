@@ -32,6 +32,7 @@ class DirectoryEntry(BaseModel):
     distance_km: float
     verified: bool
     consultation_fee: int | None = None
+    photo_ref: str | None = None
 
 
 class DirectorySearchView(BaseModel):
@@ -123,6 +124,7 @@ class ProviderProfileView(BaseModel):
     verified: bool
     credentials: list[ProviderCredential]
     consultation_fee: int | None = None
+    photo_ref: str | None = None
     # --- the declared band (#613) -------------------------------------------
     # The building the practice is in, distinct from ``practice_name`` which is
     # the doctor's own name and the only patient-searchable name.

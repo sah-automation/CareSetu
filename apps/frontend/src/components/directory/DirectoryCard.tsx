@@ -11,11 +11,14 @@
 // name, partner type, specialty and area - never the dropped `consultType`,
 // never an invented area string.
 
+"use client";
+
 import Link from "next/link";
 
 import { emitPartnerSelected } from "@/lib/directory/emit";
 import { providerProfileHref } from "@/lib/directory/links";
 import type { DirectoryEntry } from "@/lib/directory/search";
+import { usePartnerPhotoSource } from "@/lib/directory/usePartnerPhotoSource";
 
 export function formatDistanceKm(
   distanceKm: number,
@@ -35,6 +38,16 @@ interface DirectoryCardProps {
   distanceLabel: string;
 }
 
+function initials(name: string): string {
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0] ?? "")
+    .join("")
+    .toUpperCase();
+}
+
 export function DirectoryCard({
   entry,
   typeLabel,
@@ -42,6 +55,12 @@ export function DirectoryCard({
   verifiedLabel,
   distanceLabel,
 }: DirectoryCardProps) {
+  const name = entry.practice_name ?? "CareSetu provider";
+  const photo = usePartnerPhotoSource(
+    entry.partner_id,
+    entry.photo_ref ?? null,
+  );
+
   // Defensive second gate on the one shared derivation: a row the backend
   // marks unverified must not surface a card ("tick gone = card gone").
   if (!entry.verified) return null;
@@ -74,9 +93,23 @@ export function DirectoryCard({
           {distanceLabel}
         </span>
       </div>
-      <strong className="text-txt">
-        {entry.practice_name ?? "CareSetu provider"}
-      </strong>
+      <div className="flex items-center gap-3">
+        {photo.src ? (
+          <img
+            src={photo.src}
+            alt={name}
+            className="h-10 w-10 rounded-full object-cover"
+          />
+        ) : (
+          <span
+            aria-hidden="true"
+            className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-strong"
+          >
+            {initials(name)}
+          </span>
+        )}
+        <strong className="text-txt">{name}</strong>
+      </div>
       <span className="text-sm text-txt-muted">{meta}</span>
     </Link>
   );

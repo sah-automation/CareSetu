@@ -123,6 +123,7 @@ def test_search_answers_typed_view_with_items() -> None:
                 "distance_km": 1.2,
                 "verified": True,
                 "consultation_fee": 50000,
+                "photo_ref": None,
             }
         ],
         "fell_back": True,

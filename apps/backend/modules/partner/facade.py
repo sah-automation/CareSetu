@@ -277,6 +277,7 @@ from modules.partner.registration_models import (
 )
 from modules.partner.schema.models import (
     partner_credentials,
+    partner_directory_index,
     partner_pin_centroids,
     partner_profiles,
     partner_service_areas,
@@ -1774,6 +1775,53 @@ class PartnerFacade:
         except OSError as exc:
             raise DoctorProfilePhotoStoreUnavailableError(
                 "doctor profile photo storage read failed"
+            ) from exc
+        return PhotoContent(
+            data=data,
+            media_type=_sniff_doctor_profile_media_type(data),
+        )
+
+    async def get_partner_photo(self, partner_id: int) -> PhotoContent:
+        media_store = self._profile_media_store
+        if media_store is None:
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "partner profile media store is not configured"
+            )
+        async with self._engine.begin() as connection:
+            row = (
+                await connection.execute(
+                    select(partner_profiles.c.photo_ref)
+                    .select_from(
+                        partner_profiles.join(
+                            partner_directory_index,
+                            partner_directory_index.c.partner_id == partner_profiles.c.id,
+                        )
+                    )
+                    .where(
+                        partner_directory_index.c.partner_id == partner_id,
+                        self._credential_validity.provider_visible(
+                            partner_directory_index.c.partner_id
+                        ),
+                    )
+                )
+            ).first()
+        if row is None:
+            raise ProviderProfileNotFoundError(partner_id)
+        photo_ref = row.photo_ref
+        if photo_ref is None:
+            raise ProviderProfileNotFoundError(partner_id)
+        try:
+            data = await media_store.read(object_key=photo_ref)
+        except FileNotFoundError as exc:
+            raise ProviderProfileNotFoundError(partner_id) from exc
+        except InvalidTag as exc:
+            logger.critical("profile media integrity failure")
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "partner profile media store returned unreadable data"
+            ) from exc
+        except OSError as exc:
+            raise DoctorProfilePhotoStoreUnavailableError(
+                "partner profile photo storage read failed"
             ) from exc
         return PhotoContent(
             data=data,

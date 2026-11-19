@@ -303,6 +303,7 @@ class DirectoryFacade:
                 # does not widen it.
                 partner_profiles.c.address_locality.label("declared_locality"),
                 partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
+                partner_profiles.c.photo_ref.label("photo_ref"),
                 distance_km.label("distance_km"),
             ).join(
                 partner_profiles,
@@ -366,6 +367,7 @@ class DirectoryFacade:
                     distance_km=float(row.distance_km),
                     verified=True,
                     consultation_fee=_row_fee_paise(row),
+                    photo_ref=getattr(row, "photo_ref", None),
                 )
                 for row in rows
             ],
@@ -455,6 +457,7 @@ class DirectoryFacade:
                         partner_directory_index.c.specialty,
                         partner_profiles.c.practice_name,
                         partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
+                        partner_profiles.c.photo_ref.label("photo_ref"),
                         # The declared band (#613), all off the PROFILE ROW. The
                         # profile row is the source of truth for every one of
                         # these - it is what the four section writes land on -
@@ -559,6 +562,7 @@ class DirectoryFacade:
             # covers the credential band, never a declared field.
             verified=True,
             consultation_fee=_row_fee_paise(row),
+            photo_ref=getattr(row, "photo_ref", None),
             specialties=specialties,
             languages=known_selection(row.languages, ConsultLanguage),
             consulting_days=known_selection(row.consulting_days, ConsultingDay),

@@ -63,6 +63,7 @@ import {
   type ProviderType,
 } from "@/lib/directory/links";
 import type { ProviderProfile } from "@/lib/directory/profile";
+import { usePartnerPhotoSource } from "@/lib/directory/usePartnerPhotoSource";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -120,6 +121,10 @@ export function ProviderProfileBody({
   };
 
   const name = profile.practice_name ?? "CareSetu provider";
+  const photo = usePartnerPhotoSource(
+    profile.partner_id,
+    profile.photo_ref ?? null,
+  );
   const variantHref =
     DIRECTORY_VARIANT_ROUTES[profile.partner_type] ?? DIRECTORY_ROUTE;
   const variantLabel = typeLabel[profile.partner_type];
@@ -156,12 +161,20 @@ export function ProviderProfileBody({
         data-testid="profile-hero"
       >
         <div className="flex items-start gap-4">
-          <span
-            aria-hidden="true"
-            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
-          >
-            {initials(name)}
-          </span>
+          {photo.src ? (
+            <img
+              src={photo.src}
+              alt={name}
+              className="h-14 w-14 shrink-0 rounded-full border-2 border-accent-border object-cover"
+            />
+          ) : (
+            <span
+              aria-hidden="true"
+              className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
+            >
+              {initials(name)}
+            </span>
+          )}
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <Heading

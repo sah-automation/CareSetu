@@ -156,6 +156,11 @@ export async function fetchPatientPhoto(): Promise<Blob> {
   return requestBlob("/v1/me/photo");
 }
 
+/** Stream a public partner's profile photo bytes. */
+export async function fetchPartnerPhoto(partnerId: number): Promise<Blob> {
+  return requestBlob(`/v1/partners/${partnerId}/photo`);
+}
+
 /**
  * Clear the caller's stored photo and resolve the updated profile. Removal is
  * idempotent on the backend: a caller with no photo answers the unchanged

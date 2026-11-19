@@ -54,6 +54,8 @@ export type Specialty = (typeof DIRECTORIES_SPECIALTIES)[number];
  * `consultation_fee` is in integer paise (null until the doctor sets one). */
 export interface DirectoryEntry {
   partner_id: number;
+  /** Opaque profile-media ref for the partner's photo, or null when none. */
+  photo_ref?: string | null;
   practice_name: string | null;
   partner_type: ProviderType;
   specialty: string | null;
@@ -83,6 +85,9 @@ function isDirectoryEntry(value: unknown): value is DirectoryEntry {
   const record = value as Record<string, unknown>;
   return (
     typeof record.partner_id === "number" &&
+    (record.photo_ref === undefined ||
+      record.photo_ref === null ||
+      typeof record.photo_ref === "string") &&
     (typeof record.practice_name === "string" ||
       record.practice_name === null) &&
     (record.partner_type === "doctor" ||
