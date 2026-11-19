@@ -261,7 +261,7 @@ describe("AuthProvider", () => {
       expect(localStorage.getItem("caresetu.session")).toBeNull();
       expect(localStorage.getItem("caresetu.access_jwt")).toBeNull();
       expect(screen.getByTestId("is-authenticated").textContent).toBe("false");
-      expect(mockReplace).toHaveBeenCalledWith("/");
+      expect(mockReplace).toHaveBeenCalledWith("/staff/login");
     });
   });
 

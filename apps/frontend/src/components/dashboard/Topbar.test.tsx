@@ -271,7 +271,7 @@ describe("Topbar account cluster", () => {
 
     await waitFor(() => {
       expect(localStorage.getItem("caresetu.session")).toBeNull();
-      expect(mockReplace).toHaveBeenCalledWith("/");
+      expect(mockReplace).toHaveBeenCalledWith("/login");
     });
   });
 

@@ -1155,7 +1155,7 @@ describe("AccountMenu desktop identity dropdown (#526)", () => {
     expect(logoutItem.className).toContain("text-danger");
 
     fireEvent.click(logoutItem);
-    expect(mockReplace).toHaveBeenCalledWith("/");
+    expect(mockReplace).toHaveBeenCalledWith("/login");
     expect(localStorage.getItem("caresetu.session")).toBeNull();
   });
 
@@ -1317,7 +1317,7 @@ describe("AccountMenu doctor dropdown parity (#570)", () => {
     expect(logoutItem.className).toContain("focus:bg-danger-soft");
 
     fireEvent.click(logoutItem);
-    expect(mockReplace).toHaveBeenCalledWith("/");
+    expect(mockReplace).toHaveBeenCalledWith("/staff/login");
     expect(localStorage.getItem("caresetu.session")).toBeNull();
   });
 
@@ -1459,7 +1459,7 @@ describe("AccountMenu stale sessions", () => {
       "Subject #42",
     );
     fireEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
-    expect(mockReplace).toHaveBeenCalledWith("/");
+    expect(mockReplace).toHaveBeenCalledWith("/login");
     expect(localStorage.getItem("caresetu.session")).toBeNull();
   });
 });
