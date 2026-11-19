@@ -225,8 +225,9 @@ export function OtpInput({
    */
   onComplete?: () => void;
 }) {
+  const OTP_LENGTH = 6;
   const inputRef = useRef<HTMLInputElement>(null);
-  const boxes = Array.from({ length: 6 }, (_, i) => value[i] ?? "");
+  const boxes = Array.from({ length: OTP_LENGTH }, (_, i) => value[i] ?? "");
   useEffect(() => {
     if (autoFocus) {
       inputRef.current?.focus();
@@ -248,12 +249,14 @@ export function OtpInput({
         autoComplete="one-time-code"
         autoFocus={autoFocus}
         value={value}
-        maxLength={6}
+        maxLength={OTP_LENGTH}
         disabled={disabled}
         onChange={(e) => {
-          const digits = e.target.value;
+          const digits = e.target.value
+            .replace(/[^0-9]/g, "")
+            .slice(0, OTP_LENGTH);
           onChange(digits);
-          if (digits.length === 6) {
+          if (digits.length === OTP_LENGTH) {
             onComplete?.();
           }
         }}

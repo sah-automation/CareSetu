@@ -131,6 +131,8 @@ function errorString(error: unknown, t: AuthStrings): string {
 export function useOtpFlow(): OtpFlow {
   const { lang } = useLang();
   const [state, setState] = useState<OtpState>(initialState);
+  // Latest OTP draft, kept in sync synchronously so submitOtp can read the
+  // just-typed code even though the React state update is batched/async.
   const otpDraftRef = useRef("");
 
   // Hydration gate: render nothing until we know whether a session is stored,

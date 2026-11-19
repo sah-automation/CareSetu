@@ -90,6 +90,8 @@ function partnerInitialState(): PartnerOtpState {
 export function usePartnerLoginFlow(): PartnerOtpFlow {
   const { lang } = useLang();
   const [state, setState] = useState<PartnerOtpState>(partnerInitialState);
+  // Latest OTP draft, kept in sync synchronously so submitOtp can read the
+  // just-typed code even though the React state update is batched/async.
   const otpDraftRef = useRef("");
 
   // Demo-mode OTP read-back banner (DEPLOY-4, #118), gated exactly like the
