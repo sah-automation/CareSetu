@@ -318,10 +318,6 @@ const en = {
       registerDoctor: "Doctor",
       registerLab: "Lab",
       registerChemist: "Chemist",
-      noRolePickerNote:
-        "No role picker here by design: at sign-in your role comes from your account, never chosen by hand. Patients use the phone OTP wizard instead.",
-      interimNote: "Interim staff entry stays until Phase 5:",
-      chooseRoleLink: "choose role",
       emailInvalid: "Enter a valid email address.",
       passwordRequired: "Enter your password.",
       summaryTitle: (n: number) =>
@@ -3119,10 +3115,6 @@ export const STRINGS: Record<Lang, Dictionary> = {
         registerDoctor: "डॉक्टर",
         registerLab: "लैब",
         registerChemist: "केमिस्ट",
-        noRolePickerNote:
-          "यहाँ जानबूझकर कोई रोल पिकर नहीं है: साइन इन पर आपका रोल आपके खाते से तय होता है, हाथ से नहीं चुना जाता। मरीज़ फ़ोन OTP विज़ार्ड से साइन इन करते हैं।",
-        interimNote: "Phase 5 तक अंतरिम स्टाफ प्रवेश उपलब्ध रहेगा:",
-        chooseRoleLink: "रोल चुनें",
         emailInvalid: "एक सही ईमेल पता दर्ज करें।",
         passwordRequired: "अपना पासवर्ड दर्ज करें।",
         summaryTitle: (n) => `आगे बढ़ने से पहले ${n} फ़ील्ड में ध्यान देना है।`,

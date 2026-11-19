@@ -162,12 +162,9 @@ describe("StaffLoginPage", () => {
     );
   });
 
-  it("keeps the interim choose-role entry reachable", () => {
+  it("does not render the interim choose-role entry", () => {
     render(<StaffLoginPage />);
-    expect(screen.getByTestId("choose-role-link")).toHaveAttribute(
-      "href",
-      "/choose-role",
-    );
+    expect(screen.queryByTestId("choose-role-link")).not.toBeInTheDocument();
   });
 
   it("routes an already-signed-in single-staff-role session to its home", async () => {
