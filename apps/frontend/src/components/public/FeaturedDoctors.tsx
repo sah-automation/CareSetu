@@ -44,6 +44,8 @@ const PAISE_PER_RUPEE = 100;
 const CARD_GAP_PX = 16;
 /** Prototype card width; the ≤560px rule narrows it (see card classes). */
 const CARD_WIDTH_PX = 330;
+/** End tolerance from the prototype's `initIllusCarousel` (2px). */
+const CAROUSEL_END_TOLERANCE_PX = 2;
 
 interface DoctorCardStrings {
   verified: string;
@@ -198,9 +200,9 @@ function FeaturedCarousel({
     const track = trackRef.current;
     if (track === null) return;
     const update = () => {
-      // Same 2px end tolerance as the prototype's initIllusCarousel.
-      const max = track.scrollWidth - track.clientWidth - 2;
-      setAtStart(track.scrollLeft <= 2);
+      // Same end tolerance as the prototype's initIllusCarousel.
+      const max = track.scrollWidth - track.clientWidth - CAROUSEL_END_TOLERANCE_PX;
+      setAtStart(track.scrollLeft <= CAROUSEL_END_TOLERANCE_PX);
       setAtEnd(track.scrollLeft >= max);
     };
     update();

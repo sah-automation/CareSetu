@@ -60,6 +60,7 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         area: "Medininagar Rd",
         distance_km: 1.2,
         consultation_fee: null,
+        photo_ref: null,
       },
       {
         id: 2,
@@ -68,6 +69,7 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         area: null,
         distance_km: 1.2,
         consultation_fee: null,
+        photo_ref: null,
       },
     ]);
 
@@ -98,6 +100,7 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         area: null,
         distance_km: 1.2,
         consultation_fee: null,
+        photo_ref: null,
       },
     ]);
   });
@@ -121,6 +124,7 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         area: "Medininagar Rd",
         distance_km: 1.2,
         consultation_fee: null,
+        photo_ref: null,
       },
     ]);
   });

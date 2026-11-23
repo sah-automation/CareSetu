@@ -35,7 +35,7 @@ export interface FeaturedDoctor {
   /** Consultation fee in integer paise; null until the doctor sets one. */
   consultation_fee: number | null;
   /** Opaque profile-media ref for the doctor's photo, or null when none. */
-  photo_ref?: string | null;
+  photo_ref: string | null;
 }
 
 export async function fetchFeaturedDoctors(): Promise<FeaturedDoctor[]> {
@@ -47,6 +47,6 @@ export async function fetchFeaturedDoctors(): Promise<FeaturedDoctor[]> {
     area: entry.area,
     distance_km: entry.distance_km,
     consultation_fee: entry.consultation_fee,
-    photo_ref: entry.photo_ref,
+    photo_ref: entry.photo_ref ?? null,
   }));
 }
