@@ -115,10 +115,12 @@ export function PublicFooter() {
             </li>
           </ul>
         </div>
+        {/* #961: prototype's "Why CareSetu" blurb in the fourth column
+            (replaces the duplicated trust statements). */}
         <div>
-          <p className="text-sm leading-relaxed text-txt-muted">{t.trust.t1}</p>
-          <p className="mt-2 text-sm leading-relaxed text-txt-muted">
-            {t.trust.t2}
+          <h3 className="text-sm font-semibold text-txt">{t.footer.why}</h3>
+          <p className="mt-3 text-sm leading-relaxed text-txt-muted">
+            {t.footer.whyNote}
           </p>
         </div>
       </div>

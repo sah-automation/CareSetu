@@ -6,6 +6,10 @@
 // EN/Hindi toggle immediately left of the session-aware auth button (§3.4).
 // The auth button reads truthfully from root AuthContext: Login -> /login
 // when signed out, Dashboard -> role dashboard when signed in.
+//
+// #961: frosted sticky treatment per prototype homepage-resolved-v2 - translucent
+// white + backdrop blur + hairline, 64px height, the bridge-cross mark inside
+// its teal gradient tile, pill nav anchors and the segmented language toggle.
 
 import Link from "next/link";
 
@@ -16,6 +20,12 @@ import { useAuth } from "@/lib/auth/AuthContext";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useRoleHomeHref } from "@/lib/auth/useRoleHomeHref";
 import { useLang } from "@/lib/i18n/LangContext";
+
+const NAV_ANCHORS = [
+  { key: "doctors", href: "#doctors" },
+  { key: "labs", href: "#labs" },
+  { key: "chemists", href: "#chemists" },
+] as const;
 
 export function PublicHeader() {
   const { lang } = useLang();
@@ -30,33 +40,42 @@ export function PublicHeader() {
   return (
     <header
       data-testid="section-header"
-      className="sticky top-0 z-40 border-b border-hairline bg-surface"
+      className="sticky top-0 z-40 border-b border-hairline-soft bg-white/85 backdrop-blur-md"
     >
-      <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-4 px-4">
+      <div className="mx-auto flex h-16 w-full max-w-6xl items-center gap-2 px-4">
         <Link
           href="/"
-          className="flex items-center gap-2 text-lg font-semibold text-accent"
+          className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-accent-strong"
         >
-          <BrandMark size={26} />
+          <span
+            aria-hidden="true"
+            className="home-brand-tile flex h-9 w-9 shrink-0 items-center justify-center rounded-[11px]"
+          >
+            <BrandMark size={20} />
+          </span>
           CareSetu
         </Link>
         <nav
           aria-label="Primary"
-          className="hidden items-center gap-5 text-sm text-txt-sub md:flex"
+          className="ml-4 hidden items-center gap-1 md:flex"
         >
-          <a className="hover:text-accent" href="#doctors">
-            {t.nav.doctors}
-          </a>
-          <a className="hover:text-accent" href="#labs">
-            {t.nav.labs}
-          </a>
-          <a className="hover:text-accent" href="#chemists">
-            {t.nav.chemists}
-          </a>
+          {NAV_ANCHORS.map((anchor) => (
+            <a
+              key={anchor.key}
+              className="rounded-full px-3.5 py-2 text-sm font-medium text-txt-sub transition-colors hover:bg-accent-soft hover:text-accent-strong focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+              href={anchor.href}
+            >
+              {t.nav[anchor.key]}
+            </a>
+          ))}
         </nav>
         <div className="ml-auto flex items-center gap-3">
           <LangToggle />
-          <Button asChild size="sm">
+          <Button
+            asChild
+            size="sm"
+            className="rounded-full px-4 text-sm font-semibold shadow-sm"
+          >
             <Link href={authHref} data-testid="header-auth-button">
               {authLabel}
             </Link>

@@ -26,12 +26,16 @@ const CARDS: FeaturedDoctor[] = [
     name: "Dr. A. Kumar",
     specialty: "General Physician",
     area: "Medininagar Rd",
+    distance_km: 1.2,
+    consultation_fee: 30000,
   },
   {
     id: 2,
     name: "Dr. S. Devi",
     specialty: "Gynecologist",
     area: null,
+    distance_km: 3.4,
+    consultation_fee: null,
   },
 ];
 
@@ -70,10 +74,16 @@ describe("FeaturedDoctors (gap G2)", () => {
     // non-null parts only - the dropped `consultType` never renders, and a
     // card without an area shows just its specialty.
     expect(screen.getAllByText("Verified")).toHaveLength(2);
-    expect(
-      screen.getByText(/General Physician \u00b7 Medininagar Rd/),
-    ).toBeInTheDocument();
+    // #961 card template: specialty sits under the name, area renders on its
+    // own line when present, distance comes from the payload, and the fee cell
+    // shows paise->rupees only when the payload carried one.
+    expect(screen.getByText("General Physician")).toBeInTheDocument();
+    expect(screen.getByText("Medininagar Rd")).toBeInTheDocument();
+    expect(screen.getByText("1.2 km")).toBeInTheDocument();
+    expect(screen.getByText("3.4 km")).toBeInTheDocument();
     expect(screen.getByText("Gynecologist")).toBeInTheDocument();
+    expect(screen.getByText(/₹300/)).toBeInTheDocument();
+    expect(screen.getByText("consult")).toBeInTheDocument();
     // No fake cards means no empty state either.
     expect(screen.queryByTestId("empty-state")).not.toBeInTheDocument();
     // Cards target provider profiles; view-all pre-seeds the directory.

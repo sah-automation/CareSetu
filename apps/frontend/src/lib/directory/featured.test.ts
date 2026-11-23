@@ -58,12 +58,16 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         name: "Dr. A. Kumar",
         specialty: "General Physician",
         area: "Medininagar Rd",
+        distance_km: 1.2,
+        consultation_fee: null,
       },
       {
         id: 2,
         name: "Dr. A. Kumar",
         specialty: null,
         area: null,
+        distance_km: 1.2,
+        consultation_fee: null,
       },
     ]);
 
@@ -92,6 +96,8 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         name: "CareSetu provider",
         specialty: "General Physician",
         area: null,
+        distance_km: 1.2,
+        consultation_fee: null,
       },
     ]);
   });
@@ -113,6 +119,8 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         name: "Dr. A. Kumar",
         specialty: "General Physician",
         area: "Medininagar Rd",
+        distance_km: 1.2,
+        consultation_fee: null,
       },
     ]);
   });
