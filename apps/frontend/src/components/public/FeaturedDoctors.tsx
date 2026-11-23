@@ -201,7 +201,8 @@ function FeaturedCarousel({
     if (track === null) return;
     const update = () => {
       // Same end tolerance as the prototype's initIllusCarousel.
-      const max = track.scrollWidth - track.clientWidth - CAROUSEL_END_TOLERANCE_PX;
+      const max =
+        track.scrollWidth - track.clientWidth - CAROUSEL_END_TOLERANCE_PX;
       setAtStart(track.scrollLeft <= CAROUSEL_END_TOLERANCE_PX);
       setAtEnd(track.scrollLeft >= max);
     };
