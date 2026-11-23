@@ -158,3 +158,57 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
     });
   });
 });
+
+describe("fetchFeaturedDoctors (#962 - photo + featured slice)", () => {
+  it("passes the search payload photo_ref straight through", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          fell_back: false,
+          items: [
+            directoryRow({ partner_id: 1, photo_ref: "doctor/1/photo.jpg" }),
+            directoryRow({ partner_id: 2, photo_ref: null }),
+          ],
+        }),
+      ),
+    );
+
+    const cards = await fetchFeaturedDoctors();
+    expect(cards[0].photo_ref).toBe("doctor/1/photo.jpg");
+    // A null ref rides through as null (never invented) so the card can
+    // fall back to its initials avatar.
+    expect(cards[1].photo_ref).toBeNull();
+  });
+
+  it("caps the featured slice at the nearest 8, preserving search order", async () => {
+    const items = Array.from({ length: 12 }, (_, index) =>
+      directoryRow({
+        partner_id: index + 1,
+        distance_km: (index + 1) * 0.5,
+      }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ fell_back: false, items })),
+    );
+
+    const cards = await fetchFeaturedDoctors();
+    // The API already answers nearest-first (`distance_km asc`), so the cap
+    // keeps the eight closest doctors and "View all doctors" covers the rest.
+    expect(cards).toHaveLength(8);
+    expect(cards.map((card) => card.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("returns every row when the directory is already within the cap", async () => {
+    const items = Array.from({ length: 8 }, (_, index) =>
+      directoryRow({ partner_id: index + 1 }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ fell_back: false, items })),
+    );
+
+    await expect(fetchFeaturedDoctors()).resolves.toHaveLength(8);
+  });
+});

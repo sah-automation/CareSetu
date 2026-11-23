@@ -8,10 +8,22 @@
 // #961: the prototype card template needs distance and consult fee when the
 // search payload carries them, so both ride the mapping through as raw fields
 // (fee stays in integer paise until display). Fields the payload does not
-// have (rating, reviews, photo) are simply absent from this shape - the card
-// omits them rather than inventing values.
+// have (rating, reviews) are simply absent from this shape - the card omits
+// them rather than inventing values.
+//
+// #962: `photo_ref` rides through too (the card streams it through the same
+// profile-media hook the directory card uses), and the section shows only the
+// nearest FEATURED_LIMIT doctors - the search API already answers
+// nearest-first, so the slice is the closest supply and "View all doctors"
+// is the path to the rest of the directory.
 
 import { searchDirectory } from "./search";
+
+/**
+ * Doctors shown in the homepage featured carousel. The search cap is 50; the
+ * section keeps a compact nearest-first slice and links out for the rest.
+ */
+export const FEATURED_LIMIT = 8;
 
 export interface FeaturedDoctor {
   id: number;
@@ -22,16 +34,19 @@ export interface FeaturedDoctor {
   distance_km: number;
   /** Consultation fee in integer paise; null until the doctor sets one. */
   consultation_fee: number | null;
+  /** Opaque profile-media ref for the doctor's photo, or null when none. */
+  photo_ref?: string | null;
 }
 
 export async function fetchFeaturedDoctors(): Promise<FeaturedDoctor[]> {
   const view = await searchDirectory({ partnerType: "doctor" });
-  return view.items.map((entry) => ({
+  return view.items.slice(0, FEATURED_LIMIT).map((entry) => ({
     id: entry.partner_id,
     name: entry.practice_name ?? "CareSetu provider",
     specialty: entry.specialty,
     area: entry.area,
     distance_km: entry.distance_km,
     consultation_fee: entry.consultation_fee,
+    photo_ref: entry.photo_ref,
   }));
 }

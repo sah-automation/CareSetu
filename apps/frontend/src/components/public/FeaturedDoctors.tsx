@@ -14,8 +14,17 @@
 // fields that do not exist (rating, reviews, video, tags, ribbons) are never
 // fabricated: the node is omitted. Loading and fetch-failure degradation are
 // unchanged (failure logs and degrades to empty).
+//
+// #962: the card row is the prototype's horizontal scroll-snap carousel
+// (`.illus-track` + `.illus-nav` + `.illus-hint`) - fixed-width cards, arrow
+// buttons that disable at both ends, a swipe hint underneath, and instant
+// scrolling under prefers-reduced-motion. The card streams the doctor's
+// profile photo through the same `usePartnerPhotoSource` hook the directory
+// card uses (backend-only reads, so a leaked URL discloses nothing) and
+// falls back to the initials avatar. Only the nearest FEATURED_LIMIT doctors
+// render; "View all doctors" is the path to the full directory.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
 import {
@@ -23,6 +32,7 @@ import {
   type FeaturedDoctor,
 } from "@/lib/directory/featured";
 import { directoryHref, providerProfileHref } from "@/lib/directory/links";
+import { usePartnerPhotoSource } from "@/lib/directory/usePartnerPhotoSource";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -30,6 +40,23 @@ import { useLang } from "@/lib/i18n/LangContext";
 // skipped so "Dr. A. Kumar" reads "AK". Purely presentational - the name
 // itself always renders next to it.
 const PAISE_PER_RUPEE = 100;
+/** Track gap (`gap-4`) between cards - the carousel's scroll step unit. */
+const CARD_GAP_PX = 16;
+/** Prototype card width; the ≤560px rule narrows it (see card classes). */
+const CARD_WIDTH_PX = 330;
+
+interface DoctorCardStrings {
+  verified: string;
+  viewProfile: string;
+  consultLabel: string;
+}
+
+interface CarouselStrings extends DoctorCardStrings {
+  carouselPrev: string;
+  carouselNext: string;
+  carouselLabel: string;
+  carouselHint: string;
+}
 
 function initialsOf(name: string): string {
   const words = name
@@ -42,22 +69,32 @@ function initialsOf(name: string): string {
   return letters || name.charAt(0).toUpperCase();
 }
 
+// Reduced-motion floor (blueprint §9.4): the carousel only animates its
+// scroll when the visitor has not asked for less motion. Without matchMedia
+// (or before the query resolves) the smooth path is the default.
+function prefersSmoothScroll(): boolean {
+  if (
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function"
+  ) {
+    return true;
+  }
+  return window.matchMedia("(prefers-reduced-motion: no-preference)").matches;
+}
+
 function DoctorCard({
   doctor,
   featured,
 }: {
   doctor: FeaturedDoctor;
-  featured: {
-    verified: string;
-    viewProfile: string;
-    consultLabel: string;
-  };
+  featured: DoctorCardStrings;
 }) {
   // Cards deep-link to the provider profile surface that ships with
   // PHASE-6 T06. Every card is active-and-verified by construction (the
   // featured endpoint only returns FEAT-004 Rule 1 rows), so the verified
   // indicator is truthful. Distance and fee render only when the payload
   // carried them; a card with neither simply has no fee cell text.
+  const photo = usePartnerPhotoSource(doctor.id, doctor.photo_ref ?? null);
   const distance = Number(doctor.distance_km.toFixed(1));
   const feeRupees =
     doctor.consultation_fee === null
@@ -67,15 +104,24 @@ function DoctorCard({
   return (
     <Link
       href={providerProfileHref(doctor.id)}
-      className="group flex h-full flex-col gap-2.5 rounded-2xl border border-hairline bg-surface p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-accent-border hover:shadow-[0_14px_30px_-16px_rgba(2,6,23,0.22)]"
+      role="listitem"
+      className="flex h-full w-[330px] shrink-0 snap-start flex-col gap-2.5 rounded-2xl border border-hairline bg-surface p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-accent-border hover:shadow-[0_14px_30px_-16px_rgba(2,6,23,0.22)] max-[560px]:w-[285px]"
     >
       <div className="flex items-start gap-3">
-        <span
-          aria-hidden="true"
-          className="flex h-[60px] w-[60px] shrink-0 items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
-        >
-          {initialsOf(doctor.name)}
-        </span>
+        {photo.src ? (
+          <img
+            src={photo.src}
+            alt={doctor.name}
+            className="h-[60px] w-[60px] shrink-0 rounded-full border-2 border-accent-border object-cover"
+          />
+        ) : (
+          <span
+            aria-hidden="true"
+            className="flex h-[60px] w-[60px] shrink-0 items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
+          >
+            {initialsOf(doctor.name)}
+          </span>
+        )}
         <div className="flex min-w-0 flex-col gap-0.5">
           <span className="text-base font-bold leading-snug tracking-tight text-txt">
             {doctor.name}
@@ -133,6 +179,119 @@ function DoctorCard({
   );
 }
 
+// The prototype's `.illus-carousel`: a scroll-snap track with overlay arrow
+// buttons that disable at each end, plus the hint line underneath.
+function FeaturedCarousel({
+  doctors,
+  featured,
+}: {
+  doctors: FeaturedDoctor[];
+  featured: CarouselStrings;
+}) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  // Both ends start disabled: the track's real dimensions land in the mount
+  // effect, so no arrow ever claims content that is not there.
+  const [atStart, setAtStart] = useState(true);
+  const [atEnd, setAtEnd] = useState(true);
+
+  useEffect(() => {
+    const track = trackRef.current;
+    if (track === null) return;
+    const update = () => {
+      // Same 2px end tolerance as the prototype's initIllusCarousel.
+      const max = track.scrollWidth - track.clientWidth - 2;
+      setAtStart(track.scrollLeft <= 2);
+      setAtEnd(track.scrollLeft >= max);
+    };
+    update();
+    track.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => {
+      track.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [doctors]);
+
+  const scrollByCards = (direction: -1 | 1) => {
+    const track = trackRef.current;
+    if (track === null) return;
+    const firstCard = track.firstElementChild;
+    const step =
+      (firstCard instanceof HTMLElement
+        ? firstCard.getBoundingClientRect().width
+        : CARD_WIDTH_PX) + CARD_GAP_PX;
+    const behavior: ScrollBehavior = prefersSmoothScroll() ? "smooth" : "auto";
+    if (typeof track.scrollBy === "function") {
+      track.scrollBy({ left: direction * step, behavior });
+    } else {
+      track.scrollLeft += direction * step;
+    }
+  };
+
+  return (
+    <div className="relative mt-5">
+      <div
+        data-testid="featured-cards"
+        ref={trackRef}
+        role="list"
+        aria-label={featured.carouselLabel}
+        className="flex snap-x snap-mandatory gap-4 overflow-x-auto pb-4 pt-1 [scrollbar-color:var(--hairline)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:rounded-full [&::-webkit-scrollbar-thumb]:bg-hairline"
+      >
+        {doctors.map((doctor) => (
+          <DoctorCard key={doctor.id} doctor={doctor} featured={featured} />
+        ))}
+      </div>
+      <button
+        type="button"
+        data-testid="featured-prev"
+        aria-label={featured.carouselPrev}
+        disabled={atStart}
+        onClick={() => scrollByCards(-1)}
+        className="absolute -left-2 top-[40%] z-5 flex h-10 w-10 items-center justify-center rounded-full border border-hairline bg-surface text-txt shadow-pop transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-40 max-[560px]:left-0"
+      >
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <polyline points="15 18 9 12 15 6" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        data-testid="featured-next"
+        aria-label={featured.carouselNext}
+        disabled={atEnd}
+        onClick={() => scrollByCards(1)}
+        className="absolute -right-2 top-[40%] z-5 flex h-10 w-10 items-center justify-center rounded-full border border-hairline bg-surface text-txt shadow-pop transition-colors hover:border-accent-border hover:bg-accent-soft hover:text-accent-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-40 max-[560px]:right-0"
+      >
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
+      <p className="-mt-1.5 text-center text-xs text-txt-muted">
+        {featured.carouselHint}
+      </p>
+    </div>
+  );
+}
+
 export function FeaturedDoctors() {
   const { lang } = useLang();
   const t = STRINGS[lang].home;
@@ -180,12 +339,12 @@ export function FeaturedDoctors() {
         {doctors === null ? (
           <div
             data-testid="featured-loading"
-            className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
+            className="mt-5 flex gap-4 overflow-hidden pb-4 pt-1"
           >
             {[0, 1, 2, 3].map((i) => (
               <div
                 key={i}
-                className="h-44 animate-pulse rounded-2xl bg-hairline-soft"
+                className="h-44 w-[330px] shrink-0 animate-pulse rounded-2xl bg-hairline-soft max-[560px]:w-[285px]"
               />
             ))}
           </div>
@@ -226,18 +385,7 @@ export function FeaturedDoctors() {
             </Link>
           </div>
         ) : (
-          <div
-            className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
-            data-testid="featured-cards"
-          >
-            {doctors.map((doctor) => (
-              <DoctorCard
-                key={doctor.id}
-                doctor={doctor}
-                featured={t.featured}
-              />
-            ))}
-          </div>
+          <FeaturedCarousel doctors={doctors} featured={t.featured} />
         )}
       </div>
     </section>

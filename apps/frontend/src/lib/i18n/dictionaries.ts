@@ -642,6 +642,10 @@ const en = {
       verified: "Verified",
       viewProfile: "View profile",
       consultLabel: "consult",
+      carouselPrev: "Scroll cards left",
+      carouselNext: "Scroll cards right",
+      carouselLabel: "Featured doctors",
+      carouselHint: "Swipe or use the arrows to see more",
       emptyTitle: "Directory launching soon in Daltonganj",
       emptyBody:
         "We verify every provider before listing. No doctors are shown until their credentials clear verification.",
@@ -3798,6 +3802,10 @@ export const STRINGS: Record<Lang, Dictionary> = {
         verified: "सत्यापित",
         viewProfile: "प्रोफ़ाइल देखें",
         consultLabel: "परामर्श",
+        carouselPrev: "कार्ड बाएँ स्क्रॉल करें",
+        carouselNext: "कार्ड दाएँ स्क्रॉल करें",
+        carouselLabel: "चुनिंदा डॉक्टर",
+        carouselHint: "और देखने के लिए स्वाइप करें या तीरों का उपयोग करें",
         emptyTitle: "डालटनगंज में डायरेक्टरी जल्द आ रही है",
         emptyBody:
           "लिस्ट होने से पहले हम हर प्रोवाइडर की जाँच करते हैं। जाँच पूरी होने तक कोई डॉक्टर नहीं दिखता।",
