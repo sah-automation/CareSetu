@@ -90,6 +90,15 @@
     box-shadow 0.15s ease;
 }
 
+.phoneWrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.phoneWrap:focus-within .phoneInput:focus-visible {
+  outline: none;
+}
+
 .phonePrefix {
   font-size: 0.9rem;
   font-weight: 600;
