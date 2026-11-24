@@ -19,14 +19,22 @@
 // /chemists) pins the partner type - the URL's `type` param is ignored, the
 // type-filter chip row is suppressed (the route *is* the type filter), and
 // commits stay on the variant route instead of /directory.
+//
+// #967: the sticky mobile search card (`.search-sticky` - sticky only ≤720px,
+// search input + Filters button), the dismissable active-filter chips row
+// (.filter-row for q/type/specialty/location), and the FilterSheet bottom
+// sheet. Only `specialty` is wired to the backend query today; the sheet's
+// other controls are cosmetic until their query params exist.
 
-import { type FormEvent } from "react";
+import { type FormEvent, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
+import { Filter, MapPin } from "lucide-react";
 
 import { EmptyState } from "@/components/layout/EmptyState";
 import { Button } from "@/components/ui/button";
 import { DirectoryCard, formatDistanceKm } from "./DirectoryCard";
+import { FilterSheet, type FilterSheetCommit } from "./FilterSheet";
 import {
   DIRECTORIES_SPECIALTIES,
   searchDirectory,
@@ -105,11 +113,15 @@ export function DirectoryBrowser({
   const t = STRINGS[lang].directory;
   const router = useRouter();
   const searchParams = useSearchParams();
+  const [filterSheetOpen, setFilterSheetOpen] = useState(false);
 
   const committedType =
     presetType ?? parseProviderType(searchParams.get("type"));
   const committedSpecialty = parseSpecialty(searchParams.get("specialty"));
   const committedQuery = searchParams.get("q") ?? "";
+  // #967: cosmetic location draft - carried in the URL for the dismissable
+  // chip, not yet forwarded to the API (TODO(BACKEND): geo filtering).
+  const committedLocation = searchParams.get("location");
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: [
@@ -119,6 +131,7 @@ export function DirectoryBrowser({
         q: committedQuery,
         partnerType: committedType,
         specialty: committedSpecialty,
+        location: committedLocation,
       },
     ],
     queryFn: async () => {
@@ -151,11 +164,7 @@ export function DirectoryBrowser({
    * toggling must not spam the history stack). On a type-preset variant the
    * commits stay on the variant route, dropping the pinned `type` from the
    * URL. */
-  function commitFilters(next: {
-    type?: ProviderType | null;
-    specialty?: Specialty | null;
-    q?: string | null;
-  }) {
+  function commitFilters(next: FilterSheetCommit) {
     const params = new URLSearchParams(searchParams.toString());
     const apply = (key: string, value: string | null | undefined) => {
       if (value === undefined) return;
@@ -170,6 +179,7 @@ export function DirectoryBrowser({
       next.specialty === undefined ? undefined : next.specialty,
     );
     apply("q", next.q === undefined ? undefined : next.q);
+    apply("location", next.location === undefined ? undefined : next.location);
     const qs = params.toString();
     const base = presetType
       ? DIRECTORY_VARIANT_ROUTES[presetType]
@@ -215,6 +225,51 @@ export function DirectoryBrowser({
   // public /directory surface keeps the wider full-width grid.
   const gridClass =
     cardGridClassName ?? "grid gap-4 sm:grid-cols-2 lg:grid-cols-4";
+  // FilterSheet sections follow the pinned variant, else the committed type,
+  // defaulting to the doctor sections on an all-types browse.
+  const filterSectionType: ProviderType =
+    presetType ?? committedType ?? "doctor";
+
+  // #967: dismissable active-filter chips - one per committed param, each ×
+  // removing just that param (the query key change refetches).
+  const activeChips: {
+    key: "q" | "type" | "specialty" | "location";
+    label: string;
+    ariaLabel: string;
+    onDismiss: () => void;
+  }[] = [];
+  if (committedQuery) {
+    activeChips.push({
+      key: "q",
+      label: committedQuery,
+      ariaLabel: t.clearQuery,
+      onDismiss: () => commitFilters({ q: null }),
+    });
+  }
+  if (!presetType && committedType) {
+    activeChips.push({
+      key: "type",
+      label: t[TYPE_LABEL_KEY[committedType]],
+      ariaLabel: t.clearTypeFilter,
+      onDismiss: () => commitFilters({ type: null }),
+    });
+  }
+  if (committedSpecialty) {
+    activeChips.push({
+      key: "specialty",
+      label: specialtyLabel(lang, committedSpecialty),
+      ariaLabel: t.clearSpecialty,
+      onDismiss: () => commitFilters({ specialty: null }),
+    });
+  }
+  if (committedLocation) {
+    activeChips.push({
+      key: "location",
+      label: committedLocation,
+      ariaLabel: t.clearLocation,
+      onDismiss: () => commitFilters({ location: null }),
+    });
+  }
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 pb-14 pt-6">
@@ -228,25 +283,81 @@ export function DirectoryBrowser({
         <p className="text-sm text-txt-muted">{t.subtitle}</p>
       </header>
 
-      <form
-        onSubmit={submitSearch}
-        role="search"
-        className="mt-4 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center"
+      {/* #967: sticky search card - position:sticky only ≤720px (the
+          PublicHeader sits at z-40/4rem, so the card parks beneath it). The
+          Filters button opens the FilterSheet; it is the prototype's compact
+          input + Filters row on mobile, with the Search submit restored from
+          ≥721px so the desktop affordance is unchanged. */}
+      <div
+        data-testid="search-sticky"
+        className="search-sticky mt-4 max-[720px]:sticky max-[720px]:top-16 max-[720px]:z-30 max-[720px]:-mx-4 max-[720px]:bg-page-bg max-[720px]:px-4 max-[720px]:py-2 max-[720px]:shadow-card"
       >
-        <label className="sr-only" htmlFor="directory-search-input">
-          {t.searchLabel}
-        </label>
-        <input
-          id="directory-search-input"
-          name="q"
-          type="search"
-          defaultValue={committedQuery}
-          key={`query-${committedQuery}`}
-          placeholder={t.searchPlaceholder}
-          className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2 text-sm text-txt placeholder:text-txt-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        />
-        <Button type="submit">{t.searchCta}</Button>
-      </form>
+        <form
+          onSubmit={submitSearch}
+          role="search"
+          className="flex items-center gap-2"
+        >
+          <label className="sr-only" htmlFor="directory-search-input">
+            {t.searchLabel}
+          </label>
+          <input
+            id="directory-search-input"
+            name="q"
+            type="search"
+            defaultValue={committedQuery}
+            key={`query-${committedQuery}`}
+            placeholder={t.searchPlaceholder}
+            className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2 text-sm text-txt placeholder:text-txt-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          />
+          <Button type="submit" className="max-[720px]:hidden">
+            {t.searchCta}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            data-testid="open-filters"
+            onClick={() => setFilterSheetOpen(true)}
+            className="shrink-0"
+          >
+            <Filter className="mr-1.5 h-4 w-4" aria-hidden="true" />
+            {t.filtersCta}
+          </Button>
+        </form>
+      </div>
+
+      {/* #967: dismissable active-filter chips (.filter-row) - horizontal
+          scroll row on mobile per the prototype. */}
+      {activeChips.length > 0 && (
+        <div
+          data-testid="filter-row"
+          role="group"
+          aria-label={t.activeFiltersLabel}
+          className="filter-row mt-3 flex flex-wrap items-center gap-1.5 max-[720px]:flex-nowrap max-[720px]:overflow-x-auto max-[720px]:[scrollbar-width:none]"
+        >
+          {activeChips.map((chip) => (
+            <span
+              key={chip.key}
+              data-testid="active-filter-chip"
+              data-filter={chip.key}
+              className={`${chipClass(true)} gap-1.5 pr-1.5`}
+            >
+              {chip.key === "location" && (
+                <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              )}
+              <span className="max-w-[12rem] truncate">{chip.label}</span>
+              <button
+                type="button"
+                data-testid={`dismiss-${chip.key}`}
+                aria-label={chip.ariaLabel}
+                onClick={chip.onDismiss}
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-on-accent/25 text-sm leading-none text-on-accent transition-colors hover:bg-on-accent/40"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
       <div
         className="mt-4 flex flex-wrap items-center gap-2"
@@ -421,6 +532,16 @@ export function DirectoryBrowser({
           </div>
         ) : null}
       </section>
+
+      <FilterSheet
+        open={filterSheetOpen}
+        onOpenChange={setFilterSheetOpen}
+        sectionType={filterSectionType}
+        specialty={committedSpecialty}
+        location={committedLocation}
+        items={view?.items ?? []}
+        onCommit={commitFilters}
+      />
     </main>
   );
 }
