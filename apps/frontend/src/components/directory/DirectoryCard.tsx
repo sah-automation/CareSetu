@@ -125,21 +125,21 @@ export function DirectoryCard({
           source: "search_card",
         })
       }
-      className="grid grid-cols-[40%_60%] gap-0.5 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop min-w-0 [&_@media_(max-width:720px)]:grid-cols-[1fr] [&_@media_(max-width:720px)]:gap-0.75 [&_@media_(max-width:720px)]:p-4"
+      className="grid grid-cols-[40%_60%] gap-0.5 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop min-w-0 [@media_(max-width:720px)]:grid-cols-[1fr] [@media_(max-width:720px)]:gap-0.75 [@media_(max-width:720px)]:p-4"
     >
       {/* P1 LEFT */}
       <div
         data-testid="directory-card-p1"
-        className="grid grid-rows-[auto_1fr] gap-0.75 min-w-0 pl-1 [&_@media_(max-width:720px)]:grid-rows-[auto_auto] [&_@media_(max-width:720px)]:pl-0"
+        className="grid grid-rows-[auto_1fr] gap-0.75 min-w-0 pl-1 [@media_(max-width:720px)]:grid-rows-[auto_auto] [@media_(max-width:720px)]:pl-0"
       >
         {/* P1T: Avatar | Tag+Name+Practice */}
         <div
           data-testid="directory-card-p1t"
-          className="grid grid-cols-[72px_1fr] gap-0.5 items-start min-w-0 [&_@media_(max-width:720px)]:grid-cols-[64px_1fr] [&_@media_(max-width:480px)]:grid-cols-[1fr] [&_@media_(max-width:480px)]:justify-items-center [&_@media_(max-width:480px)]:text-center"
+          className="grid grid-cols-[72px_1fr] gap-0.5 items-start min-w-0 [@media_(max-width:720px)]:grid-cols-[64px_1fr] [@media_(max-width:480px)]:grid-cols-[1fr] [@media_(max-width:480px)]:justify-items-center [@media_(max-width:480px)]:text-center"
         >
           <div
             data-testid="directory-card-avatar-wrap"
-            className="relative shrink-0 w-[72px] h-[72px] [&_@media_(max-width:720px)]:w-16 [&_@media_(max-width:720px)]:h-16 [&_@media_(max-width:720px)]:mx-auto [&_@media_(max-width:480px)]:w-16 [&_@media_(max-width:480px)]:h-16"
+            className="relative shrink-0 w-[72px] h-[72px] [@media_(max-width:720px)]:w-16 [@media_(max-width:720px)]:h-16 [@media_(max-width:720px)]:mx-auto [@media_(max-width:480px)]:w-16 [@media_(max-width:480px)]:h-16"
           >
             {photo.src ? (
               <img
@@ -309,7 +309,7 @@ export function DirectoryCard({
       {/* P2 RIGHT: Date Grid */}
       <div
         data-testid="directory-card-p2"
-        className="flex flex-col gap-0.5 pl-0.75 border-l border-hairline-soft min-h-full [&_@media_(max-width:720px)]:pl-0 [&_@media_(max-width:720px)]:border-l-0 [&_@media_(max-width:720px)]:border-t [&_@media_(max-width:720px)]:border-hairline-soft [&_@media_(max-width:720px)]:pt-0.5 [&_@media_(max-width:720px)]:mt-0.25 [&_@media_(max-width:480px)]:overflow-x-auto [&_@media_(max-width:480px)]:pb-0.25"
+        className="flex flex-col gap-0.5 pl-0.75 border-l border-hairline-soft min-h-full [@media_(max-width:720px)]:pl-0 [@media_(max-width:720px)]:border-l-0 [@media_(max-width:720px)]:border-t [@media_(max-width:720px)]:border-hairline-soft [@media_(max-width:720px)]:pt-0.5 [@media_(max-width:720px)]:mt-0.25 [@media_(max-width:480px)]:overflow-x-auto [@media_(max-width:480px)]:pb-0.25"
       >
         <AvailabilityDateGrid
           mode={entry.partner_type}
