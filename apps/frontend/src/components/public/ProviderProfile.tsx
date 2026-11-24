@@ -156,7 +156,7 @@ export function ProviderProfile({ partnerId }: ProviderProfileProps) {
   }
 
   return (
-    <main className="mx-auto w-full max-w-[760px] px-4 pb-12 pt-6">
+    <main className="mx-auto w-full max-w-[1200px] px-4 pb-12 pt-6">
       <ProviderProfileBody profile={profile} headingLevel={1} />
     </main>
   );

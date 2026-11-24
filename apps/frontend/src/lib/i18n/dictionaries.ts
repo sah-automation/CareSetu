@@ -963,12 +963,97 @@ const en = {
     practiceDetailsHeading: "Practice details",
     detailsHeading: "Details",
     typeLabel: "Type",
-    // #619: the DECLARED band - what the provider says about itself, as opposed
-    // to the verified band above, which is what the platform checked. The copy has
-    // to make that split legible in words, because the section's dashed edge only
-    // makes it legible in shape: a patient must not have to infer which half of
-    // the page we are standing behind.
-    declaredHeading: "Declared by the provider",
+    // PHASE-6 profile redesign (#968): the two-column prototype layout's copy -
+    // the hero's price line, the trust cue's per-type titles, the details card's
+    // services row, the CTA titles, and the whole right rail (month grid + map).
+    trustDoctorTitle: "Council registration verified",
+    trustPartnerTitle: "License verified",
+    servicesHeading: "Services",
+    ctaDoctorTitle: "Book a consultation",
+    ctaPartnerTitle: "Book a test",
+    availability: {
+      heading: "Availability",
+      ariaLabel: "Availability for the whole month",
+      sub: (kind: string) => `${kind} \u00b7 whole month in one view`,
+      kinds: {
+        doctor: "Consultation slots",
+        lab: "Home collection windows",
+        chemist: "Delivery windows",
+      },
+      prevMonth: "Previous month",
+      nextMonth: "Next month",
+      legendOpen: {
+        doctor: "Slots open",
+        lab: "Collection open",
+        chemist: "Delivery open",
+      },
+      legendClosed: {
+        doctor: "No slots",
+        lab: "Closed",
+        chemist: "Closed",
+      },
+      legendToday: "Today",
+      cellOpen: {
+        doctor: (n: number) => `${n} slots`,
+        lab: (n: number) => `${n} open`,
+        chemist: (n: number) => `${n} open`,
+      },
+      cellClosed: {
+        doctor: "No slots",
+        lab: "Closed",
+        chemist: "Closed",
+      },
+      cellAriaOpen: {
+        doctor: (n: number) => `${n} consultation slots`,
+        lab: (n: number) => `${n} home-collection windows`,
+        chemist: (n: number) => `${n} delivery windows`,
+      },
+      cellAriaClosed: {
+        doctor: "no slots",
+        lab: "closed",
+        chemist: "closed",
+      },
+      cellAriaPast: "past date",
+      selectedOpen: {
+        doctor: (label: string, n: number, hours: string | null) =>
+          hours
+            ? `${label} \u00b7 ${n} consultation slots \u00b7 ${hours}`
+            : `${label} \u00b7 ${n} consultation slots`,
+        lab: (label: string, n: number, hours: string | null) =>
+          hours
+            ? `${label} \u00b7 ${n} home-collection windows \u00b7 ${hours}`
+            : `${label} \u00b7 ${n} home-collection windows`,
+        chemist: (label: string, n: number, hours: string | null) =>
+          hours
+            ? `${label} \u00b7 ${n} delivery windows \u00b7 ${hours}`
+            : `${label} \u00b7 ${n} delivery windows`,
+      },
+      selectedClosed: {
+        doctor: (label: string) =>
+          `${label} \u00b7 No slots \u00b7 clinic closed`,
+        lab: (label: string) =>
+          `${label} \u00b7 Closed \u00b7 no home collection`,
+        chemist: (label: string) => `${label} \u00b7 Closed \u00b7 no delivery`,
+      },
+      selectedPast: (label: string) => `${label} \u00b7 Past date`,
+    },
+    map: {
+      heading: "Location & directions",
+      ariaLabel: "Location and directions",
+      ariaTravelMode: "Travel mode",
+      drive: "Drive",
+      walk: "Walk",
+      transit: "Transit",
+      getDirections: "Get directions",
+      openMap: "Open map",
+      addressMissing: "No address declared yet",
+    },
+    // #619: the DECLARED disclaimer - what the provider says about itself, as
+    // opposed to the verified band above, which is what the platform checked.
+    // It is now a one-line note on the details card (the #968 layout folds the
+    // declared fields into that card), and the copy still has to make the split
+    // legible in words: a patient must not have to infer which half of the page
+    // we are standing behind.
     declaredNote:
       "The provider's own details. CareSetu has not checked them - only the credentials above are verified.",
     declaredPracticeHeading: "Clinic",
@@ -4123,13 +4208,98 @@ export const STRINGS: Record<Lang, Dictionary> = {
       practiceDetailsHeading: "अभ्यास विवरण",
       detailsHeading: "विवरण",
       typeLabel: "प्रकार",
-      // #619: `specialtyLabel` and `areaLabel` are GONE from this namespace. The
+      // PHASE-6 profile redesign (#968): mirrors the en block above key for key
+      // - the bilingual parity gate fails on a reshaped or missing key, so this
+      // list is the same list in the same order.
+      trustDoctorTitle: "काउंसिल पंजीकरण सत्यापित",
+      trustPartnerTitle: "लाइसेंस सत्यापित",
+      servicesHeading: "सेवाएँ",
+      ctaDoctorTitle: "परामर्श बुक करें",
+      ctaPartnerTitle: "टेस्ट बुक करें",
+      availability: {
+        heading: "उपलब्धता",
+        ariaLabel: "पूरे महीने की उपलब्धता",
+        sub: (kind: string) => `${kind} \u00b7 पूरा महीना एक नज़र में`,
+        kinds: {
+          doctor: "परामर्श स्लॉट",
+          lab: "होम कलेक्शन विंडो",
+          chemist: "डिलीवरी विंडो",
+        },
+        prevMonth: "पिछला महीना",
+        nextMonth: "अगला महीना",
+        legendOpen: {
+          doctor: "स्लॉट खुले",
+          lab: "कलेक्शन खुला",
+          chemist: "डिलीवरी खुली",
+        },
+        legendClosed: {
+          doctor: "कोई स्लॉट नहीं",
+          lab: "बंद",
+          chemist: "बंद",
+        },
+        legendToday: "आज",
+        cellOpen: {
+          doctor: (n: number) => `${n} स्लॉट`,
+          lab: (n: number) => `${n} खुले`,
+          chemist: (n: number) => `${n} खुली`,
+        },
+        cellClosed: {
+          doctor: "कोई स्लॉट नहीं",
+          lab: "बंद",
+          chemist: "बंद",
+        },
+        cellAriaOpen: {
+          doctor: (n: number) => `${n} परामर्श स्लॉट`,
+          lab: (n: number) => `${n} होम कलेक्शन विंडो`,
+          chemist: (n: number) => `${n} डिलीवरी विंडो`,
+        },
+        cellAriaClosed: {
+          doctor: "कोई स्लॉट नहीं",
+          lab: "बंद",
+          chemist: "बंद",
+        },
+        cellAriaPast: "बीती तारीख",
+        selectedOpen: {
+          doctor: (label: string, n: number, hours: string | null) =>
+            hours
+              ? `${label} \u00b7 ${n} परामर्श स्लॉट \u00b7 ${hours}`
+              : `${label} \u00b7 ${n} परामर्श स्लॉट`,
+          lab: (label: string, n: number, hours: string | null) =>
+            hours
+              ? `${label} \u00b7 ${n} होम कलेक्शन विंडो \u00b7 ${hours}`
+              : `${label} \u00b7 ${n} होम कलेक्शन विंडो`,
+          chemist: (label: string, n: number, hours: string | null) =>
+            hours
+              ? `${label} \u00b7 ${n} डिलीवरी विंडो \u00b7 ${hours}`
+              : `${label} \u00b7 ${n} डिलीवरी विंडो`,
+        },
+        selectedClosed: {
+          doctor: (label: string) =>
+            `${label} \u00b7 कोई स्लॉट नहीं \u00b7 क्लिनिक बंद`,
+          lab: (label: string) => `${label} \u00b7 बंद \u00b7 होम कलेक्शन नहीं`,
+          chemist: (label: string) => `${label} \u00b7 बंद \u00b7 डिलीवरी नहीं`,
+        },
+        selectedPast: (label: string) => `${label} \u00b7 बीती तारीख`,
+      },
+      map: {
+        heading: "स्थान और दिशा",
+        ariaLabel: "स्थान और दिशा",
+        ariaTravelMode: "यात्रा का तरीका",
+        drive: "ड्राइव",
+        walk: "पैदल",
+        transit: "पब्लिक ट्रांसपोर्ट",
+        getDirections: "रास्ता देखें",
+        openMap: "मैप खोलें",
+        addressMissing: "अभी कोई पता घोषित नहीं",
+      },
+      // #619: `declaredHeading` and `areaLabel` are GONE from this namespace. The
       // singular specialty now reads through the hero subtitle and the whole
-      // selection through the declared band, and `area` IS the declared locality -
-      // so the band owns both. A string with no reader is a string nobody can
-      // reword, and one more of them is one more place for the two locales to
-      // drift apart.
-      declaredHeading: "प्रोवाइडर द्वारा घोषित",
+      // selection through the declared groups below, and `area` IS the declared
+      // locality - so they own both. A string with no reader is a string nobody
+      // can reword, and one more of them is one more place for the two locales
+      // to drift apart. `declaredHeading` went with the #968 fold: the disclaimer
+      // is now the one-line note on the details card, and `declaredNote` is the
+      // sentence that carries it.
       declaredNote:
         "यह प्रोवाइडर के अपने विवरण हैं। CareSetu ने इनकी जाँच नहीं की है - केवल ऊपर दिए गए प्रमाण सत्यापित हैं।",
       declaredPracticeHeading: "क्लिनिक",

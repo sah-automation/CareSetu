@@ -137,6 +137,10 @@ export function projectPublicProfile(
       status: credential.status,
       expires_at: credential.expires_at,
     })),
+    // A saved price, not a typed one: the fee lives in the private projection
+    // and the Fee card's own publish path, never in this draft, so a keystroke
+    // cannot move the price a patient reads.
+    consultation_fee: profile.consultation_fee,
     // #619: the rest of the DECLARED band, passed through from the private
     // projection the server already serves. These are saved facts rather than
     // typed ones, so they read the API answer - the two sections that publish into

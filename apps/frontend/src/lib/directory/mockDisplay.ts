@@ -210,3 +210,51 @@ export function getMockProfileDistance(partnerId: number): string {
   const km = 0.3 + (h % 45) / 10;
   return `${km.toFixed(1)} km away`;
 }
+
+/** Hero-strip package price for a lab/chemist profile (the prototype's
+ * "Full body checkup: \u20b91,200"), deterministic in `partner_id`. Doctors do
+ * not use this: their fee is the real `consultation_fee` the profile carries.
+ *
+ * TODO(BACKEND): lab package / chemist basket price - the directory payload
+ * has no price field for a non-doctor, so the hero strip shows this stand-in
+ * until one lands. */
+export function getMockPackagePrice(
+  partnerId: number,
+  type: ProviderType,
+): string {
+  const h = hashPartner(partnerId);
+  if (type === "lab") {
+    return `Full body checkup: \u20B9${(399 + (h % 40) * 25).toLocaleString(
+      "en-IN",
+    )}`;
+  }
+  return `Prescription pack: \u20B9${149 + (h % 30) * 10}`;
+}
+
+/** Static service chips for the lab/chemist details card - the prototype's
+ * fixed list. Doctors have no services row. Not hashed: these are the
+ * catalogue the prototype ships, and a backend catalogue would replace the
+ * call site rather than the shape.
+ *
+ * TODO(BACKEND): the partner's own declared services list. */
+export function getMockServices(type: ProviderType): readonly string[] {
+  if (type === "lab") {
+    return [
+      "Blood tests",
+      "X-ray",
+      "Pathology",
+      "Urine tests",
+      "Full body checkup",
+      "ECG",
+    ];
+  }
+  if (type === "chemist") {
+    return [
+      "Home delivery",
+      "E-prescription delivery",
+      "Generic medicines",
+      "OTC medicines",
+    ];
+  }
+  return [];
+}

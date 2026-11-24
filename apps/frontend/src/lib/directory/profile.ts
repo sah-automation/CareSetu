@@ -61,6 +61,10 @@ export interface ProviderProfile {
   verified: boolean;
   credentials: ProviderCredential[];
   // --- the declared band (#613) -------------------------------------------
+  /** Consultation fee in integer paise, null until the doctor sets one. The
+   * backend serves it on this route; it is a price the provider set, so it
+   * renders as a price and never carries a verified marker. */
+  consultation_fee: number | null;
   /** The building the practice is in, distinct from `practice_name`. */
   clinic_name: string | null;
   /** Every specialty the provider practises, not the one representative
@@ -185,7 +189,9 @@ function isProviderProfile(value: unknown): value is ProviderProfile {
       isDeclaredSelection(record[field]),
     ) &&
     (typeof record.experience_years === "number" ||
-      record.experience_years === null)
+      record.experience_years === null) &&
+    (typeof record.consultation_fee === "number" ||
+      record.consultation_fee === null)
   );
 }
 

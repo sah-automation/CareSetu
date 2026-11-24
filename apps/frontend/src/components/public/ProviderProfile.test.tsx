@@ -91,6 +91,7 @@ function doctorProfile(
     locality: "Daltonganj",
     city: "Daltonganj",
     pin_code: "826001",
+    consultation_fee: 50000,
     ...overrides,
   };
 }
@@ -129,6 +130,7 @@ function labProfile(): ProviderProfileShape {
     locality: null,
     city: null,
     pin_code: null,
+    consultation_fee: null,
   };
 }
 
@@ -174,9 +176,9 @@ function doctorView(
     languages: ["English", "Hindi"],
     experience_years: 12,
     about: "Twelve years in general practice.",
-    consultation_fee: null,
     consulting_days: ["Monday", "Saturday"],
     consulting_hours: "9am-5pm, Saturdays after 5 pm",
+    consultation_fee: 50000,
     credentials: [
       {
         credential_type: "medical_registration",
@@ -243,7 +245,9 @@ describe("ProviderProfile rendering a reachable profile", () => {
     expect(screen.getByTestId("profile-verified")).toHaveTextContent(
       "Verified by CareSetu",
     );
-    expect(screen.getByTestId("profile-subtitle")).toHaveTextContent("Doctor");
+    expect(screen.getByTestId("profile-subtitle")).toHaveTextContent(
+      "General Physician · 12 years of experience · Sharma Clinic",
+    );
     expect(screen.getByTestId("profile-subtitle")).toHaveTextContent(
       "General Physician",
     );
@@ -418,55 +422,44 @@ describe("the declared band renders the provider's own claims", () => {
     ).toHaveTextContent("Twelve years in general practice.");
   });
 
-  it("draws the band boundary in shape, so no legend is needed to read it", async () => {
-    // AC 2, the half that is not copy: the declared band's edge is dashed where
-    // the verified band's is solid. The words in the note are the other half, and
-    // neither one is doing the other's job - a sighted patient reads the shape,
-    // and nobody has to know what a dashed border means.
+  it("folds the declared claims into the solid-edged details card and marks them unchecked in words", async () => {
+    // #968: there is no separate dashed declared band any more. The claims live
+    // inside `profile-details`, whose edge stays solid (the platform's card), and
+    // the note on the card's title does the boundary's job in words instead.
+    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
+
+    renderProfile();
+
+    const details = await screen.findByTestId("profile-details");
+    expect(details.className).not.toContain("border-dashed");
+    expect(
+      within(details).getByTestId("profile-declared-note"),
+    ).toHaveTextContent("CareSetu has not checked them");
+    expect(within(details).getByTestId("profile-declared")).toBeInTheDocument();
+    expect(
+      within(details).getByTestId("profile-declared-specialties"),
+    ).toHaveTextContent("General Physician, Pediatrician");
+  });
+
+  it("keeps the verified tick off the declared claims", async () => {
+    // The note warns a claim is unverified; nothing inside the declared group may
+    // then be styled as though it were checked. The verified band keeps its tick.
     mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
 
     renderProfile();
 
     const declared = await screen.findByTestId("profile-declared");
-    expect(declared.className).toContain("border-dashed");
-    for (const testId of ["profile-credentials", "profile-details"]) {
-      expect(screen.getByTestId(testId).className).not.toContain(
-        "border-dashed",
-      );
-    }
-    expect(screen.getByTestId("profile-declared-note")).toHaveTextContent(
-      "CareSetu has not checked them",
-    );
-  });
-
-  it("keeps every declared value out of the solid-edged bands", async () => {
-    // AC 2 again, as a claim about VALUES rather than about the dashed edge. A
-    // dashed border is a promise about styling; this is the promise that matters -
-    // that a patient cannot read a claim the provider made out of a box the
-    // platform vouched for. `area` is the one that would slip through, because
-    // since #612/#613 it is the declared locality, and the summary band used to
-    // print it with a solid edge right beside the credentials.
-    mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
-
-    renderProfile();
-
-    await screen.findByTestId("profile-declared");
-    const declaredClaims = [
-      "Sharma Clinic",
-      "Pediatrician",
-      "English",
-      "Daltonganj",
-      "826001",
-      "12 years of experience",
-      "Twelve years in general practice.",
-      "9am-5pm",
-    ];
-    for (const testId of ["profile-credentials", "profile-details"]) {
-      const solid = screen.getByTestId(testId);
-      for (const claim of declaredClaims) {
-        expect(solid).not.toHaveTextContent(claim);
-      }
-    }
+    expect(
+      within(declared).queryByTestId("credential-verified"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(declared).queryByTestId("profile-verified"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("profile-credentials")).getAllByText(
+        "Verified",
+      ),
+    ).toHaveLength(2);
   });
 
   it("renders no verified marker anywhere inside the declared band", async () => {
@@ -565,7 +558,9 @@ describe("the declared band renders the provider's own claims", () => {
 
     const band = await screen.findByTestId("profile-declared");
     expect(
-      within(band).getByRole("heading", { name: "प्रोवाइडर द्वारा घोषित" }),
+      within(band).getByRole("heading", {
+        name: "\u0915\u094D\u0932\u093F\u0928\u093F\u0915",
+      }),
     ).toBeInTheDocument();
     // The vocabulary labels are translated; the provider's own words are not.
     expect(within(band).getByTestId("profile-declared-days")).toHaveTextContent(
