@@ -33,6 +33,7 @@ import {
 } from "@/lib/directory/featured";
 import { directoryHref, providerProfileHref } from "@/lib/directory/links";
 import { usePartnerPhotoSource } from "@/lib/directory/usePartnerPhotoSource";
+import { getMockCardData } from "@/lib/directory/mockDisplay";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -102,6 +103,7 @@ function DoctorCard({
     doctor.consultation_fee === null
       ? null
       : Math.round(doctor.consultation_fee / PAISE_PER_RUPEE);
+  const mock = getMockCardData(doctor.id, "doctor");
 
   return (
     <Link
@@ -125,9 +127,21 @@ function DoctorCard({
           </span>
         )}
         <div className="flex min-w-0 flex-col gap-0.5">
-          <span className="text-base font-bold leading-snug tracking-tight text-txt">
-            {doctor.name}
-          </span>
+          {mock.highlightRibbon && (
+            <span className="inline-block text-[0.6875rem] font-bold uppercase tracking-wide text-accent-strong bg-accent-soft border border-accent-border rounded-full px-2 py-0.5 whitespace-nowrap">
+              {mock.highlightRibbon}
+            </span>
+          )}
+          <div className="flex items-baseline gap-0.5 flex-wrap min-w-0">
+            <span className="text-base font-bold leading-snug tracking-tight text-txt">
+              {doctor.name}
+            </span>
+            {mock.credentials && (
+              <span className="text-txt-muted text-xs truncate">
+                {mock.credentials}
+              </span>
+            )}
+          </div>
           {doctor.specialty && (
             <span className="text-sm text-txt-muted">{doctor.specialty}</span>
           )}

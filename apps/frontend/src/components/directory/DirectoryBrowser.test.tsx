@@ -196,11 +196,14 @@ describe("DirectoryBrowser loading the directory", () => {
     render(<DirectoryBrowser />);
 
     await screen.findByTestId("directory-cards");
+    // Specialty + type now live on the specialty line; the area renders in the
+    // practice line (clinic_name when declared, else area).
     expect(
-      screen.getByText(
-        /General Physician \u00b7 Doctors \u00b7 Medininagar Rd/,
-      ),
+      screen.getByText(/General Physician \u00b7 Doctors/),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("directory-card-practice")).toHaveTextContent(
+      "Medininagar Rd",
+    );
   });
 
   it("drops a false-tick row entirely - card and tick disappear together", async () => {

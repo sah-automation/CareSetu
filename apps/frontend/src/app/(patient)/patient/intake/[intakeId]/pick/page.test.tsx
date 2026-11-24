@@ -317,11 +317,12 @@ describe("PickDoctorPage cards", () => {
 
     expect(screen.getByTestId("pick-doctor-card")).toBeInTheDocument();
     expect(screen.getByTestId("pick-verified")).toHaveTextContent("Verified");
-    expect(
-      screen.getByText(
-        "General Physician \u00B7 Doctors \u00B7 Medininagar Rd",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("pick-specialty")).toHaveTextContent(
+      "General Physician \u00B7 Doctors",
+    );
+    expect(screen.getByTestId("pick-practice")).toHaveTextContent(
+      "Medininagar Rd",
+    );
     expect(screen.getByText("1.0 km")).toBeInTheDocument();
     expect(screen.getByTestId("pick-fee")).toHaveTextContent("\u20B9400");
     expect(screen.getByTestId("pick-credentials")).toHaveTextContent(

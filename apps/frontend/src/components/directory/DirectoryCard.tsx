@@ -1,10 +1,13 @@
 "use client";
 
-// PHASE-6 T05a (#317): one directory result card (PROTO-PHASE-6 `.dir-card`
-// visual binding, derived from the FeaturedDoctors `DoctorCard` shape so the
-// two directory surfaces share one card language). The card deep-links to the
-// provider profile surface (`/providers/:id`) that ships with PHASE-6 T06.
-//
+// PHASE-6 T05a (#966): directory result card rewritten to the finalized
+// Phase-6 Zocdoc-style two-panel prototype (prototype/phase-6/doctors.html,
+// `.dir-card-zoc` / `.dir-p1` / `.dir-p2`). Left panel carries the provider
+// anatomy (avatar, ribbon, name, credentials, practice, specialty +
+// experience, rating, facts, verified tick, distance, tags, location, fee);
+// right panel is the 14-day `AvailabilityDateGrid`. The card deep-links to
+// `/providers/:id` and fires `partner.selected` on click (T6).
+
 // Truthfulness rules (FEAT-005 / ADR-0011): the verified tick renders only
 // when the backend-derived flag is true (search visibility and the tick share
 // one derivation, so a false-tick row can never show), and the card renders
@@ -14,18 +17,16 @@
 "use client";
 
 import Link from "next/link";
+import { BadgeCheck, Video } from "lucide-react";
 
 import { emitPartnerSelected } from "@/lib/directory/emit";
 import { providerProfileHref } from "@/lib/directory/links";
 import type { DirectoryEntry } from "@/lib/directory/search";
 import { usePartnerPhotoSource } from "@/lib/directory/usePartnerPhotoSource";
-
-export function formatDistanceKm(
-  distanceKm: number,
-  formatKm: (km: string) => string,
-): string {
-  return formatKm(distanceKm.toFixed(1));
-}
+import { getMockCardData, getMockRating } from "@/lib/directory/mockDisplay";
+import { AvailabilityDateGrid } from "./AvailabilityDateGrid";
+import { STRINGS } from "@/lib/i18n/dictionaries";
+import { useLang } from "@/lib/i18n/LangContext";
 
 interface DirectoryCardProps {
   entry: DirectoryEntry;
@@ -39,14 +40,25 @@ interface DirectoryCardProps {
 }
 
 function initials(name: string): string {
-  return name
-    .trim()
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((part) => part[0] ?? "")
-    .join("")
-    .toUpperCase();
+  return (
+    name
+      .trim()
+      .split(/\s+/)
+      .filter((word) => word.length > 0 && !/^(dr\.?|prof\.?)$/i.test(word))
+      .slice(0, 2)
+      .map((part) => part[0] ?? "")
+      .join("")
+      .toUpperCase() || name.charAt(0).toUpperCase()
+  );
 }
+
+/** Mock fact icon -> lucide element. Fields without a mapping render label
+ * only - the backend will own these icons when the card payload lands. */
+const FACT_ICON: Record<string, React.ElementType> = {
+  video: Video,
+  home: Video,
+  homeCollection: Video,
+};
 
 export function DirectoryCard({
   entry,
@@ -55,26 +67,56 @@ export function DirectoryCard({
   verifiedLabel,
   distanceLabel,
 }: DirectoryCardProps) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].directory;
   const name = entry.practice_name ?? "CareSetu provider";
   const photo = usePartnerPhotoSource(
     entry.partner_id,
     entry.photo_ref ?? null,
   );
+  const mock = getMockCardData(entry.partner_id, entry.partner_type);
+  const rating = getMockRating(entry.partner_id);
 
   // Defensive second gate on the one shared derivation: a row the backend
   // marks unverified must not surface a card ("tick gone = card gone").
   if (!entry.verified) return null;
 
-  const meta = [entry.specialty && specialtyLabel, typeLabel, entry.area]
+  const practiceLine =
+    entry.partner_type === "doctor"
+      ? entry.clinic_name ?? entry.area ?? ""
+      : entry.area ?? "";
+
+  const experienceLabel =
+    entry.experience_years != null
+      ? `${
+          t.experienceYears?.(entry.experience_years) ??
+          `${entry.experience_years} years experience`
+        }`
+      : null;
+
+  const specialtyLine = [
+    entry.specialty && specialtyLabel,
+    typeLabel,
+    experienceLabel,
+  ]
     .filter(Boolean)
     .join(" \u00b7 ");
+
+  const feeRupees =
+    entry.consultation_fee === null
+      ? null
+      : Math.round(entry.consultation_fee / 100);
+
+  const addressLine = [entry.address_line, entry.city]
+    .filter(Boolean)
+    .join(", ");
 
   return (
     <Link
       href={providerProfileHref(entry.partner_id)}
       data-testid="directory-card"
       onClick={() =>
-        // T6 (#328): a card tap is one interaction - fire the anonymous
+        // T6: a card tap is one interaction - fire the anonymous
         // `partner.selected` pick exactly once (onClick, not an effect that
         // could re-run on re-render). Fire-and-forget; never blocks nav.
         emitPartnerSelected({
@@ -83,34 +125,204 @@ export function DirectoryCard({
           source: "search_card",
         })
       }
-      className="flex flex-col items-start gap-1 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop"
+      className="grid grid-cols-[40%_60%] gap-0.5 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop min-w-0 [&_@media_(max-width:720px)]:grid-cols-[1fr] [&_@media_(max-width:720px)]:gap-0.75 [&_@media_(max-width:720px)]:p-4"
     >
-      <div className="flex w-full items-start justify-between gap-3">
-        <span className="rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text">
-          {verifiedLabel}
-        </span>
-        <span className="whitespace-nowrap text-sm text-txt-sub">
-          {distanceLabel}
-        </span>
-      </div>
-      <div className="flex items-center gap-3">
-        {photo.src ? (
-          <img
-            src={photo.src}
-            alt={name}
-            className="h-10 w-10 rounded-full object-cover"
-          />
-        ) : (
-          <span
-            aria-hidden="true"
-            className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent-strong"
+      {/* P1 LEFT */}
+      <div
+        data-testid="directory-card-p1"
+        className="grid grid-rows-[auto_1fr] gap-0.75 min-w-0 pl-1 [&_@media_(max-width:720px)]:grid-rows-[auto_auto] [&_@media_(max-width:720px)]:pl-0"
+      >
+        {/* P1T: Avatar | Tag+Name+Practice */}
+        <div
+          data-testid="directory-card-p1t"
+          className="grid grid-cols-[72px_1fr] gap-0.5 items-start min-w-0 [&_@media_(max-width:720px)]:grid-cols-[64px_1fr] [&_@media_(max-width:480px)]:grid-cols-[1fr] [&_@media_(max-width:480px)]:justify-items-center [&_@media_(max-width:480px)]:text-center"
+        >
+          <div
+            data-testid="directory-card-avatar-wrap"
+            className="relative shrink-0 w-[72px] h-[72px] [&_@media_(max-width:720px)]:w-16 [&_@media_(max-width:720px)]:h-16 [&_@media_(max-width:720px)]:mx-auto [&_@media_(max-width:480px)]:w-16 [&_@media_(max-width:480px)]:h-16"
           >
-            {initials(name)}
-          </span>
-        )}
-        <strong className="text-txt">{name}</strong>
+            {photo.src ? (
+              <img
+                src={photo.src}
+                alt={name}
+                className="w-full h-full rounded-full border-2 border-accent-border object-cover"
+              />
+            ) : (
+              <span
+                aria-hidden="true"
+                className="flex h-full w-full items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
+              >
+                {initials(name)}
+              </span>
+            )}
+            {mock.videoBadge && (
+              <span
+                data-testid="directory-card-video-badge"
+                aria-label="Video visits available"
+                className="absolute bottom-1 right-1 h-6 w-6 rounded-full bg-accent text-on-accent flex items-center justify-center shadow-pop border-2 border-surface text-xs"
+              >
+                <Video className="h-3 w-3" aria-hidden="true" />
+              </span>
+            )}
+          </div>
+          <div className="flex flex-col gap-0.25 min-w-0">
+            {mock.highlightRibbon && (
+              <span
+                data-testid="directory-card-ribbon"
+                className="inline-block text-[0.6875rem] font-bold uppercase tracking-wide text-accent-strong bg-accent-soft border border-accent-border rounded-full px-2 py-0.5 whitespace-nowrap"
+              >
+                {mock.highlightRibbon}
+              </span>
+            )}
+            <div className="flex items-baseline gap-0.5 flex-wrap min-w-0">
+              <strong className="text-txt text-sm leading-snug truncate">
+                {name}
+              </strong>
+              {mock.credentials && (
+                <span className="text-txt-muted text-xs truncate">
+                  {mock.credentials}
+                </span>
+              )}
+            </div>
+            {practiceLine && (
+              <span
+                data-testid="directory-card-practice"
+                className="text-txt-sub text-xs truncate whitespace-normal"
+              >
+                {practiceLine}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* P1B: Specialty, Rating, Facts, Meta, Tags, Location, Fee */}
+        <div
+          data-testid="directory-card-p1b"
+          className="flex flex-col gap-0.375 min-w-0"
+        >
+          {specialtyLine && (
+            <span
+              data-testid="directory-card-specialty"
+              className="text-txt-muted text-xs"
+            >
+              {specialtyLine}
+            </span>
+          )}
+          <div className="flex items-center gap-0.375">
+            <span
+              className="text-accent-strong text-[0.875rem] font-bold leading-none"
+              aria-hidden="true"
+            >
+              {Array.from({ length: Math.floor(rating.stars) })
+                .map(() => "★")
+                .join("")}
+              {rating.stars % 1 >= 0.5 ? "☆" : ""}
+            </span>
+            <span className="text-txt-muted text-[0.8125rem]">
+              {`${rating.reviewCount} reviews`}
+            </span>
+          </div>
+          <div
+            data-testid="directory-card-facts"
+            className="flex flex-wrap gap-0.75"
+          >
+            {mock.facts.map((fact, index) => {
+              const Icon = FACT_ICON[fact.icon];
+              return (
+                <span
+                  key={index}
+                  data-testid="directory-card-fact"
+                  className="inline-flex items-center gap-0.25 text-txt-sub text-[0.8125rem]"
+                >
+                  {Icon && (
+                    <Icon
+                      className="h-3.5 w-3.5 shrink-0 text-txt-muted"
+                      aria-hidden="true"
+                    />
+                  )}
+                  {fact.label}
+                </span>
+              );
+            })}
+          </div>
+          <div className="flex flex-wrap items-center gap-0.5">
+            <span
+              data-testid="directory-card-verified"
+              className="rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text border border-success border-opacity-40"
+            >
+              <BadgeCheck className="h-3 w-3 mr-1" aria-hidden="true" />
+              {verifiedLabel}
+            </span>
+            <span className="text-txt-muted text-xs whitespace-nowrap">
+              {distanceLabel}
+            </span>
+          </div>
+          <div
+            data-testid="directory-card-tags"
+            className="flex flex-wrap gap-0.375"
+          >
+            {mock.tags.map((tag, index) => (
+              <span
+                key={index}
+                data-testid="directory-card-tag"
+                className={`rounded-full px-1.5 py-0.5 text-[0.7rem] font-medium whitespace-nowrap border ${
+                  tag.variant === "accent"
+                    ? "border-accent-border bg-accent-soft text-accent-strong"
+                    : "border-hairline bg-transparent text-txt-sub"
+                }`}
+              >
+                {tag.label}
+              </span>
+            ))}
+            {(entry.languages ?? []).map((language, index) => (
+              <span
+                key={`lang-${index}`}
+                data-testid="directory-card-language"
+                className="rounded-full border border-hairline bg-transparent px-1.5 py-0.5 text-[0.7rem] font-medium text-txt-sub"
+              >
+                {language}
+              </span>
+            ))}
+          </div>
+          {addressLine && (
+            <div
+              data-testid="directory-card-location"
+              className="flex items-center gap-0.3 text-txt-sub text-xs"
+            >
+              <span aria-hidden="true" className="shrink-0 text-txt-muted">
+                📍
+              </span>
+              {addressLine}
+            </div>
+          )}
+          {feeRupees !== null && (
+            <div
+              data-testid="directory-card-fee"
+              className="text-txt-muted text-xs"
+            >
+              {`${t.fee}: ₹${feeRupees}`}
+            </div>
+          )}
+        </div>
       </div>
-      <span className="text-sm text-txt-muted">{meta}</span>
+
+      {/* P2 RIGHT: Date Grid */}
+      <div
+        data-testid="directory-card-p2"
+        className="flex flex-col gap-0.5 pl-0.75 border-l border-hairline-soft min-h-full [&_@media_(max-width:720px)]:pl-0 [&_@media_(max-width:720px)]:border-l-0 [&_@media_(max-width:720px)]:border-t [&_@media_(max-width:720px)]:border-hairline-soft [&_@media_(max-width:720px)]:pt-0.5 [&_@media_(max-width:720px)]:mt-0.25 [&_@media_(max-width:480px)]:overflow-x-auto [&_@media_(max-width:480px)]:pb-0.25"
+      >
+        <AvailabilityDateGrid
+          mode={entry.partner_type}
+          partnerId={entry.partner_id}
+        />
+      </div>
     </Link>
   );
+}
+
+export function formatDistanceKm(
+  distanceKm: number,
+  formatKm: (km: string) => string,
+): string {
+  return formatKm(distanceKm.toFixed(1));
 }
