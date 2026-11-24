@@ -22,6 +22,11 @@ class DirectoryEntry(BaseModel):
     could never drift (ADR-0011 "tick gone = card gone"). Named
     ``practice_name`` to stay on the partner schema vocabulary; patient-facing
     clients may render it as the provider's name.
+
+    Widened by #964 for the Phase-6 directory card redesign: ``clinic_name``,
+    ``experience_years``, ``languages``, ``address_line``, and ``city`` from
+    the doctor's declared profile band so the card can render real data
+    instead of placeholders.
     """
 
     partner_id: int
@@ -33,6 +38,12 @@ class DirectoryEntry(BaseModel):
     verified: bool
     consultation_fee: int | None = None
     photo_ref: str | None = None
+    # --- #964: directory card widening ---------------------------------------
+    clinic_name: str | None = None
+    experience_years: int | None = None
+    languages: list[str] = Field(default_factory=list)
+    address_line: str | None = None
+    city: str | None = None
 
 
 class DirectorySearchView(BaseModel):
