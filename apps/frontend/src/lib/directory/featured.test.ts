@@ -4,6 +4,10 @@
 // `consultType`. Every returned row is verified by construction (ADR-0011),
 // so the mapping carries `area` through without filtering on `entry.verified`
 // - no invented strings.
+//
+// #965: the widened `DirectoryEntry` fields (clinic_name, experience_years,
+// languages, address_line, city) ride the mapping through so the homepage
+// card can render the full prototype anatomy from real payload data.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -66,6 +70,11 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         distance_km: 1.2,
         consultation_fee: null,
         photo_ref: null,
+        clinic_name: null,
+        experience_years: null,
+        languages: [],
+        address_line: null,
+        city: null,
       },
       {
         id: 2,
@@ -75,6 +84,11 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         distance_km: 1.2,
         consultation_fee: null,
         photo_ref: null,
+        clinic_name: null,
+        experience_years: null,
+        languages: [],
+        address_line: null,
+        city: null,
       },
     ]);
 
@@ -106,6 +120,11 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         distance_km: 1.2,
         consultation_fee: null,
         photo_ref: null,
+        clinic_name: null,
+        experience_years: null,
+        languages: [],
+        address_line: null,
+        city: null,
       },
     ]);
   });
@@ -130,6 +149,48 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         distance_km: 1.2,
         consultation_fee: null,
         photo_ref: null,
+        clinic_name: null,
+        experience_years: null,
+        languages: [],
+        address_line: null,
+        city: null,
+      },
+    ]);
+  });
+
+  it("carries the widened #965 fields through for the full card anatomy", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          fell_back: false,
+          items: [
+            directoryRow({
+              clinic_name: "City General Clinic",
+              experience_years: 12,
+              languages: ["Hindi", "English"],
+              address_line: "Medininagar Road",
+              city: "Daltonganj",
+            }),
+          ],
+        }),
+      ),
+    );
+
+    await expect(fetchFeaturedDoctors()).resolves.toEqual([
+      {
+        id: 1,
+        name: "Dr. A. Kumar",
+        specialty: "General Physician",
+        area: null,
+        distance_km: 1.2,
+        consultation_fee: null,
+        photo_ref: null,
+        clinic_name: "City General Clinic",
+        experience_years: 12,
+        languages: ["Hindi", "English"],
+        address_line: "Medininagar Road",
+        city: "Daltonganj",
       },
     ]);
   });

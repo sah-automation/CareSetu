@@ -8,12 +8,17 @@
 // launching soon in Daltonganj" empty state. No fake/static provider cards,
 // ever.
 //
-// #961: card anatomy follows the prototype's `.illus-card` template - avatar
-// with initials, name, specialty, area, verified badge, distance and consult
-// fee when present - but rendered ONLY from real directory fields. Payload
-// fields that do not exist (rating, reviews, video, tags, ribbons) are never
-// fabricated: the node is omitted. Loading and fetch-failure degradation are
-// unchanged (failure logs and degrades to empty).
+// #961: card anatomy follows the prototype's `.illus-card` template. #965
+// completes the template with the full homepage-resolved-v2 anatomy - the
+// video badge, ribbon, credentials, practice (clinic), specialty + years of
+// experience, mock rating, fact rows, verified badge + distance, mode and
+// language tags, the declared address line and the consult fee - the same
+// content the directory and provider-profile cards already render. Real
+// directory fields (practice, experience, languages, address) ride the
+// featured payload; backend-less decorations (rating, video badge, ribbon,
+// facts, tags) resolve through lib/directory/mockDisplay. Loading and
+// fetch-failure degradation are unchanged (failure logs and degrades to
+// empty).
 //
 // #962: the card row is the prototype's horizontal scroll-snap carousel
 // (`.illus-track` + `.illus-nav` + `.illus-hint`) - fixed-width cards, arrow
@@ -26,14 +31,20 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { MapPin, ShieldCheck, Users, Video } from "lucide-react";
 
 import {
   fetchFeaturedDoctors,
   type FeaturedDoctor,
 } from "@/lib/directory/featured";
 import { directoryHref, providerProfileHref } from "@/lib/directory/links";
+import { specialtyLabel } from "@/lib/directory/specialtyLabel";
 import { usePartnerPhotoSource } from "@/lib/directory/usePartnerPhotoSource";
-import { getMockCardData } from "@/lib/directory/mockDisplay";
+import {
+  getMockCardData,
+  getMockRating,
+  type MockTag,
+} from "@/lib/directory/mockDisplay";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
 
@@ -72,6 +83,14 @@ function initialsOf(name: string): string {
   return letters || name.charAt(0).toUpperCase();
 }
 
+/** Mock fact icon -> lucide element. Fields without a mapping render label
+ * only - the backend will own these icons when the card payload lands. */
+const FACT_ICON: Record<string, React.ElementType> = {
+  video: Video,
+  insurance: ShieldCheck,
+  "new-patients": Users,
+};
+
 // Reduced-motion floor (blueprint §9.4): the carousel only animates its
 // scroll when the visitor has not asked for less motion. Without matchMedia
 // (or before the query resolves) the smooth path is the default.
@@ -97,6 +116,8 @@ function DoctorCard({
   // featured endpoint only returns FEAT-004 Rule 1 rows), so the verified
   // indicator is truthful. Distance and fee render only when the payload
   // carried them; a card with neither simply has no fee cell text.
+  const { lang } = useLang();
+  const dir = STRINGS[lang].directory;
   const photo = usePartnerPhotoSource(doctor.id, doctor.photo_ref ?? null);
   const distance = Number(doctor.distance_km.toFixed(1));
   const feeRupees =
@@ -104,76 +125,189 @@ function DoctorCard({
       ? null
       : Math.round(doctor.consultation_fee / PAISE_PER_RUPEE);
   const mock = getMockCardData(doctor.id, "doctor");
+  const rating = getMockRating(doctor.id);
+
+  // Real declared data first: practice (clinic, or the locality when no
+  // clinic is declared), specialty · years of experience, and the declared
+  // address line - the same mapping rules the directory card applies.
+  const practiceLine = doctor.clinic_name ?? doctor.area ?? "";
+  const experienceLabel =
+    doctor.experience_years != null
+      ? dir.experienceYears?.(doctor.experience_years) ??
+        `${doctor.experience_years} years experience`
+      : null;
+  const specialtyLine = [
+    doctor.specialty ? specialtyLabel(lang, doctor.specialty) : null,
+    experienceLabel,
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+  const addressLine = [doctor.address_line, doctor.city]
+    .filter(Boolean)
+    .join(", ");
+
+  // Mode tag from the mock template; real declared languages win over the
+  // mock language tag when present (the profile hero's rule).
+  const languageLabels: Record<string, string> =
+    STRINGS[lang].doctorProfile.languageLabels;
+  const languagesLabel =
+    doctor.languages
+      .map((value) => languageLabels[value] ?? null)
+      .filter((label): label is string => label !== null && label !== "")
+      .join(", ") || null;
+  const tags: MockTag[] = [];
+  if (mock.tags[0]) tags.push(mock.tags[0]);
+  if (languagesLabel) {
+    tags.push({ label: languagesLabel, variant: "muted" });
+  }
+  for (const tag of mock.tags.slice(1)) {
+    if (languagesLabel && tag.variant === "muted") continue;
+    tags.push(tag);
+  }
+  if (tags.length < 2 && mock.tags[1]) tags.push(mock.tags[1]);
 
   return (
     <Link
       href={providerProfileHref(doctor.id)}
       role="listitem"
-      className="flex h-full w-[330px] shrink-0 snap-start flex-col gap-2.5 rounded-2xl border border-hairline bg-surface p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-accent-border hover:shadow-[0_14px_30px_-16px_rgba(2,6,23,0.22)] max-[560px]:w-[285px]"
+      className="group flex w-[330px] shrink-0 snap-start flex-col gap-2.5 rounded-2xl border border-hairline bg-surface p-5 transition-all duration-200 hover:-translate-y-[3px] hover:border-accent-border hover:shadow-[0_14px_30px_-16px_rgba(2,6,23,0.22)] max-[560px]:w-[285px]"
     >
       <div className="flex items-start gap-3">
-        {photo.src ? (
-          <img
-            src={photo.src}
-            alt={doctor.name}
-            className="h-[60px] w-[60px] shrink-0 rounded-full border-2 border-accent-border object-cover"
-          />
-        ) : (
-          <span
-            aria-hidden="true"
-            className="flex h-[60px] w-[60px] shrink-0 items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
-          >
-            {initialsOf(doctor.name)}
-          </span>
-        )}
-        <div className="flex min-w-0 flex-col gap-0.5">
+        <div className="relative h-[60px] w-[60px] shrink-0">
+          {photo.src ? (
+            <img
+              src={photo.src}
+              alt={doctor.name}
+              className="h-full w-full rounded-full border-2 border-accent-border object-cover"
+            />
+          ) : (
+            <span
+              aria-hidden="true"
+              className="flex h-full w-full items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
+            >
+              {initialsOf(doctor.name)}
+            </span>
+          )}
+          {mock.videoBadge && (
+            <span
+              data-testid="featured-card-video-badge"
+              aria-label="Video visits available"
+              className="absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-full border-2 border-surface bg-accent text-on-accent"
+            >
+              <Video className="h-3 w-3" aria-hidden="true" />
+            </span>
+          )}
+        </div>
+        <div className="flex min-w-0 flex-col gap-1">
           {mock.highlightRibbon && (
-            <span className="inline-block text-[0.6875rem] font-bold uppercase tracking-wide text-accent-strong bg-accent-soft border border-accent-border rounded-full px-2 py-0.5 whitespace-nowrap">
+            <span
+              data-testid="featured-card-ribbon"
+              className="inline-block self-start text-[0.6875rem] font-semibold text-warm bg-warm-soft border border-[#fed7aa] rounded-full px-2 py-0.5 whitespace-nowrap"
+            >
               {mock.highlightRibbon}
             </span>
           )}
-          <div className="flex items-baseline gap-0.5 flex-wrap min-w-0">
-            <span className="text-base font-bold leading-snug tracking-tight text-txt">
+          <div className="flex items-baseline gap-1.5 flex-wrap min-w-0">
+            <span className="text-[1.05rem] font-bold leading-snug tracking-tight text-txt">
               {doctor.name}
             </span>
             {mock.credentials && (
-              <span className="text-txt-muted text-xs truncate">
+              <span className="text-[0.8125rem] font-normal text-txt-muted truncate">
                 {mock.credentials}
               </span>
             )}
           </div>
-          {doctor.specialty && (
-            <span className="text-sm text-txt-muted">{doctor.specialty}</span>
+          {practiceLine && (
+            <span
+              data-testid="featured-card-practice"
+              className="text-sm font-medium text-txt-sub truncate"
+            >
+              {practiceLine}
+            </span>
           )}
         </div>
+      </div>
+      {specialtyLine && (
+        <span
+          data-testid="featured-card-specialty"
+          className="text-sm text-txt-muted"
+        >
+          {specialtyLine}
+        </span>
+      )}
+      <div
+        data-testid="featured-card-rating"
+        className="flex items-center gap-1.5"
+      >
+        <span
+          className="text-warm text-sm leading-none tracking-[1px]"
+          aria-hidden="true"
+        >
+          {Array.from({ length: Math.floor(rating.stars) })
+            .map(() => "★")
+            .join("")}
+          {rating.stars % 1 >= 0.5 ? "☆" : ""}
+        </span>
+        <span className="text-txt-muted text-sm">
+          {`${rating.stars.toFixed(1)} (${dir.ratingReviews(
+            rating.reviewCount,
+          )})`}
+        </span>
+      </div>
+      <div data-testid="featured-card-facts" className="flex flex-wrap gap-3">
+        {mock.facts.map((fact, index) => {
+          const Icon = FACT_ICON[fact.icon];
+          return (
+            <span
+              key={index}
+              data-testid="featured-card-fact"
+              className="inline-flex items-center gap-1 text-txt-sub text-[0.8125rem]"
+            >
+              {Icon && (
+                <Icon
+                  className="h-3.5 w-3.5 shrink-0 text-txt-muted"
+                  aria-hidden="true"
+                />
+              )}
+              {fact.label}
+            </span>
+          );
+        })}
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <span className="rounded-full bg-success-soft px-2.5 py-0.5 text-[0.7rem] font-bold uppercase tracking-wide text-success-text">
           {featured.verified}
         </span>
-        <span className="text-xs font-medium text-txt-muted">
+        <span className="text-[0.8rem] font-medium text-txt-muted">
           {distance} km
         </span>
       </div>
-      {doctor.area && (
-        <span className="flex items-center gap-1.5 text-sm text-txt-sub">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-            className="shrink-0 text-txt-muted"
+      <div data-testid="featured-card-tags" className="flex flex-wrap gap-1.5">
+        {tags.map((tag, index) => (
+          <span
+            key={index}
+            data-testid="featured-card-tag"
+            className={`inline-flex min-h-6 items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+              tag.variant === "accent"
+                ? "border border-accent-border bg-accent-soft text-accent-strong"
+                : "bg-hairline-soft text-txt-muted"
+            }`}
           >
-            <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
-            <circle cx="12" cy="10" r="3" />
-          </svg>
-          {doctor.area}
-        </span>
+            {tag.label}
+          </span>
+        ))}
+      </div>
+      {addressLine && (
+        <div
+          data-testid="featured-card-location"
+          className="flex items-center gap-[0.3rem] text-txt-sub text-sm"
+        >
+          <MapPin
+            className="h-3.5 w-3.5 shrink-0 text-txt-muted"
+            aria-hidden="true"
+          />
+          {addressLine}
+        </div>
       )}
       <div className="mt-auto flex items-center justify-between gap-2 border-t border-hairline-soft pt-2.5">
         <span className="text-sm font-bold text-txt">
@@ -252,7 +386,7 @@ function FeaturedCarousel({
         ref={trackRef}
         role="list"
         aria-label={featured.carouselLabel}
-        className="flex snap-x snap-mandatory gap-4 overflow-x-auto pb-4 pt-1 [scrollbar-color:var(--hairline)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:rounded-full [&::-webkit-scrollbar-thumb]:bg-hairline"
+        className="flex items-stretch snap-x snap-mandatory gap-4 overflow-x-auto pb-4 pt-1 [scrollbar-color:var(--hairline)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:rounded-full [&::-webkit-scrollbar-thumb]:bg-hairline"
       >
         {doctors.map((doctor) => (
           <DoctorCard key={doctor.id} doctor={doctor} featured={featured} />

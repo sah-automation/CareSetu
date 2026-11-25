@@ -9,6 +9,11 @@
 // labels, the end-of-track disabled states (against mocked track
 // dimensions), the card photo with its initials fallback, and the
 // reduced-motion scroll behaviour.
+//
+// #965: the card renders the full prototype (homepage-resolved-v2 `.illus-card`)
+// anatomy - video badge, ribbon, credentials, practice, specialty + years of
+// experience, rating, facts, verified badge + distance, tags and the declared
+// address - so the suite pins each of those rows too.
 
 import {
   cleanup,
@@ -22,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FeaturedDoctors } from "./FeaturedDoctors";
 import type { FeaturedDoctor } from "@/lib/directory/featured";
+import { getMockCardData, getMockRating } from "@/lib/directory/mockDisplay";
 import {
   __resetLangForTests,
   LangProvider,
@@ -52,6 +58,11 @@ const CARDS: FeaturedDoctor[] = [
     distance_km: 1.2,
     consultation_fee: 30000,
     photo_ref: "doctor/1/photo.jpg",
+    clinic_name: null,
+    experience_years: 12,
+    languages: ["Hindi", "English"],
+    address_line: "Medininagar Road",
+    city: "Daltonganj",
   },
   {
     id: 2,
@@ -61,6 +72,11 @@ const CARDS: FeaturedDoctor[] = [
     distance_km: 3.4,
     consultation_fee: null,
     photo_ref: null,
+    clinic_name: "Seva Nursing Home",
+    experience_years: null,
+    languages: [],
+    address_line: null,
+    city: null,
   },
 ];
 
@@ -154,12 +170,15 @@ describe("FeaturedDoctors (gap G2)", () => {
     // Only activated providers are ever returned, so every card shows the
     // truthful verified indicator (FEAT-004 Rule 1 / FEAT-005). Meta joins
     // non-null parts only - the dropped `consultType` never renders, and a
-    // card without an area shows just its specialty.
+    // card without an experience shows just its specialty.
     expect(screen.getAllByText("Verified")).toHaveLength(2);
-    // #961 card template: specialty sits under the name, area renders on its
-    // own line when present, distance comes from the payload, and the fee cell
-    // shows paise->rupees only when the payload carried one.
-    expect(screen.getByText("General Physician")).toBeInTheDocument();
+    // #961/#965 card template: specialty joins the years of experience,
+    // practice falls back to the locality when no clinic is declared,
+    // distance comes from the payload, and the fee cell shows paise->rupees
+    // only when the payload carried one.
+    expect(
+      screen.getByText("General Physician \u00b7 12 years experience"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Medininagar Rd")).toBeInTheDocument();
     expect(screen.getByText("1.2 km")).toBeInTheDocument();
     expect(screen.getByText("3.4 km")).toBeInTheDocument();
@@ -177,6 +196,74 @@ describe("FeaturedDoctors (gap G2)", () => {
     expect(
       screen.getByRole("link", { name: "View all doctors" }),
     ).toHaveAttribute("href", "/directory?type=doctor");
+  });
+
+  it("renders the full prototype card anatomy (#965)", async () => {
+    mockFetchFeatured.mockResolvedValue(CARDS);
+    render(<FeaturedDoctors />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("featured-cards")).toBeInTheDocument(),
+    );
+
+    const cards = screen.getAllByRole("listitem");
+    expect(cards).toHaveLength(2);
+    const first = within(cards[0]);
+    const second = within(cards[1]);
+
+    // Card 1: video badge, ribbon, credentials, practice (locality when no
+    // clinic), specialty + experience, mock rating, facts, mode tag with the
+    // real declared languages, and the declared address line.
+    const mock1 = getMockCardData(1, "doctor");
+    const rating1 = getMockRating(1);
+    if (mock1.videoBadge) {
+      expect(
+        first.getByTestId("featured-card-video-badge"),
+      ).toBeInTheDocument();
+    } else {
+      expect(
+        first.queryByTestId("featured-card-video-badge"),
+      ).not.toBeInTheDocument();
+    }
+    if (mock1.highlightRibbon) {
+      expect(first.getByTestId("featured-card-ribbon")).toHaveTextContent(
+        mock1.highlightRibbon,
+      );
+    }
+    expect(first.getByTestId("featured-card-practice")).toHaveTextContent(
+      "Medininagar Rd",
+    );
+    expect(
+      first.getByText("General Physician \u00b7 12 years experience"),
+    ).toBeInTheDocument();
+    expect(first.getByTestId("featured-card-rating")).toHaveTextContent(
+      `${rating1.stars.toFixed(1)} (${rating1.reviewCount} reviews)`,
+    );
+    expect(
+      first
+        .getAllByTestId("featured-card-fact")
+        .map((fact) => fact.textContent),
+    ).toEqual(mock1.facts.map((fact) => fact.label));
+    expect(
+      first.getAllByTestId("featured-card-tag").map((tag) => tag.textContent),
+    ).toEqual([mock1.tags[0].label, "Hindi, English"]);
+    expect(first.getByTestId("featured-card-location")).toHaveTextContent(
+      "Medininagar Road, Daltonganj",
+    );
+
+    // Card 2: clinic practice, no experience suffix, no address row, and the
+    // mock language tag standing in for the undeclared languages.
+    const mock2 = getMockCardData(2, "doctor");
+    expect(second.getByTestId("featured-card-practice")).toHaveTextContent(
+      "Seva Nursing Home",
+    );
+    expect(second.getByText("Gynecologist")).toBeInTheDocument();
+    expect(
+      second.queryByTestId("featured-card-location"),
+    ).not.toBeInTheDocument();
+    expect(
+      second.getAllByTestId("featured-card-tag").map((tag) => tag.textContent),
+    ).toEqual(mock2.tags.map((tag) => tag.label));
   });
 
   it("renders the honest launching-soon empty state when supply is empty", async () => {
