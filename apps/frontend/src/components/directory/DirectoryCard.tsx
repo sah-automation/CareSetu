@@ -169,7 +169,7 @@ export function DirectoryCard({
             {mock.highlightRibbon && (
               <span
                 data-testid="directory-card-ribbon"
-                className="inline-block text-[0.6875rem] font-semibold text-warm bg-warm-soft border border-[#fed7aa] rounded-full px-2 py-0.5 whitespace-nowrap"
+                className="inline-block self-start text-[0.6875rem] font-semibold text-warm bg-warm-soft border border-[#fed7aa] rounded-full px-2 py-0.5 whitespace-nowrap"
               >
                 {mock.highlightRibbon}
               </span>
@@ -250,9 +250,9 @@ export function DirectoryCard({
           <div className="flex flex-wrap items-center gap-2 [@media_(max-width:480px)]:justify-center">
             <span
               data-testid="directory-card-verified"
-              className="rounded-full bg-success-soft px-2 py-0.5 text-xs font-semibold text-success-text"
+              className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-xs font-semibold text-success-text"
             >
-              <BadgeCheck className="h-3 w-3 mr-1" aria-hidden="true" />
+              <BadgeCheck className="h-3 w-3 shrink-0" aria-hidden="true" />
               {verifiedLabel}
             </span>
             <span className="text-txt-muted text-[0.8125rem] whitespace-nowrap">
@@ -267,7 +267,7 @@ export function DirectoryCard({
               <span
                 key={index}
                 data-testid="directory-card-tag"
-                className={`rounded-full px-2.5 py-0.5 text-xs font-semibold min-h-6 whitespace-nowrap ${
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold min-h-6 whitespace-nowrap ${
                   tag.variant === "accent"
                     ? "border border-accent-border bg-accent-soft text-accent-strong"
                     : "bg-hairline-soft text-txt-muted"

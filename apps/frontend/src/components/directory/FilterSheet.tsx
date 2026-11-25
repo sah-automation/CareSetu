@@ -298,18 +298,18 @@ export function FilterSheet({
       <SheetContent
         side="bottom"
         data-testid="filter-sheet"
-        className="mx-auto flex max-h-[85dvh] max-w-lg flex-col overflow-y-auto rounded-t-lg p-0 sm:max-w-lg"
+        className="mx-auto flex max-h-[85dvh] max-w-lg flex-col gap-0 overflow-hidden rounded-t-lg p-0 sm:max-w-lg"
       >
         <div
           aria-hidden="true"
           className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-hairline"
         />
-        <SheetHeader className="shrink-0 px-4 pb-1 pt-3 text-left">
+        <SheetHeader className="shrink-0 px-4 pb-2 pt-3 text-left">
           <SheetTitle className="text-lg">{filterSheet.title}</SheetTitle>
           <SheetDescription>{filterSheet.description}</SheetDescription>
         </SheetHeader>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-5 px-4 pb-4">
+        <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-4 pb-4">
           {/* Location - cosmetic draft committed on blur/Show (TODO(BACKEND):
               geo filtering needs lat/lng, not a free-text area). */}
           <div className="flex flex-col gap-2">
@@ -439,7 +439,7 @@ export function FilterSheet({
           )}
         </div>
 
-        <div className="sticky bottom-0 shrink-0 gap-3 border-t border-hairline bg-surface px-4 py-3 sm:flex">
+        <div className="shrink-0 gap-3 border-t border-hairline bg-surface px-4 py-3 sm:flex">
           <Button
             type="button"
             variant="secondary"

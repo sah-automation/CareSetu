@@ -669,9 +669,11 @@ describe("DirectoryBrowser sticky search, active chips, and FilterSheet (#967, F
 
     render(<DirectoryBrowser />);
 
-    expect(screen.getAllByTestId("active-filter-chip")).toHaveLength(4);
+    // #966: the type is shown by the type chip row, not duplicated as an
+    // active-filter chip below the search bar.
+    expect(screen.getAllByTestId("active-filter-chip")).toHaveLength(3);
     expect(within(chipByKey("q")).getByText("kumar")).toBeInTheDocument();
-    expect(within(chipByKey("type")).getByText("Doctors")).toBeInTheDocument();
+    expect(screen.queryByTestId("dismiss-type")).not.toBeInTheDocument();
     expect(
       within(chipByKey("specialty")).getByText("Pediatrician"),
     ).toBeInTheDocument();

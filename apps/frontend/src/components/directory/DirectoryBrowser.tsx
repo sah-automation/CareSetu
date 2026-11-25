@@ -22,9 +22,10 @@
 //
 // #967: the sticky mobile search card (`.search-sticky` - sticky only ≤720px,
 // search input + Filters button), the dismissable active-filter chips row
-// (.filter-row for q/type/specialty/location), and the FilterSheet bottom
-// sheet. Only `specialty` is wired to the backend query today; the sheet's
-// other controls are cosmetic until their query params exist.
+// (.filter-row for q/specialty/location - the type chip row already shows the
+// selected type, #966), and the FilterSheet bottom sheet. Only `specialty` is
+// wired to the backend query today; the sheet's other controls are cosmetic
+// until their query params exist.
 
 import { type FormEvent, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -248,14 +249,8 @@ export function DirectoryBrowser({
       onDismiss: () => commitFilters({ q: null }),
     });
   }
-  if (!presetType && committedType) {
-    activeChips.push({
-      key: "type",
-      label: t[TYPE_LABEL_KEY[committedType]],
-      ariaLabel: t.clearTypeFilter,
-      onDismiss: () => commitFilters({ type: null }),
-    });
-  }
+  // No type chip here (#966): the type chip row already shows the selected
+  // type, so a second "Doctors" span under the search bar is a duplicate.
   if (committedSpecialty) {
     activeChips.push({
       key: "specialty",
