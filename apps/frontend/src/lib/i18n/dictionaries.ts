@@ -997,6 +997,21 @@ const en = {
     servicesHeading: "Services",
     ctaDoctorTitle: "Book a consultation",
     ctaPartnerTitle: "Book a test",
+    // #968 left-column completeness: the prototype's practice/details grid,
+    // hero fee label, OPD strip prefix, and per-type CTA notes.
+    consultationFeeLabel: "consultation fee",
+    opdLabel: "OPD",
+    specialtyLabel: "Specialty",
+    consultationTypesLabel: "Consultation types",
+    locationLabel: "Location",
+    accreditationLabel: "Accreditation",
+    serviceAreaLabel: "Service area",
+    homeCollectionLabel: "Home collection",
+    reportTurnaroundLabel: "Report turnaround",
+    ctaDoctorBody:
+      "Availability and slot booking will be available in a future phase.",
+    ctaPartnerBody:
+      "Test booking and report filing will be available in a future phase.",
     availability: {
       heading: "Availability",
       ariaLabel: "Availability for the whole month",
@@ -4268,6 +4283,18 @@ export const STRINGS: Record<Lang, Dictionary> = {
       servicesHeading: "सेवाएँ",
       ctaDoctorTitle: "परामर्श बुक करें",
       ctaPartnerTitle: "टेस्ट बुक करें",
+      consultationFeeLabel: "परामर्श शुल्क",
+      opdLabel: "ओपीडी",
+      specialtyLabel: "विशेषज्ञता",
+      consultationTypesLabel: "परामर्श के प्रकार",
+      locationLabel: "स्थान",
+      accreditationLabel: "मान्यता",
+      serviceAreaLabel: "सेवा क्षेत्र",
+      homeCollectionLabel: "होम कलेक्शन",
+      reportTurnaroundLabel: "रिपोर्ट टर्नअराउंड",
+      ctaDoctorBody: "उपलब्धता और स्लॉट बुकिंग भविष्य के चरण में उपलब्ध होंगी।",
+      ctaPartnerBody:
+        "टेस्ट बुकिंग और रिपोर्ट फाइलिंग भविष्य के चरण में उपलब्ध होंगी।",
       availability: {
         heading: "उपलब्धता",
         ariaLabel: "पूरे महीने की उपलब्धता",

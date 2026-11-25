@@ -5,7 +5,8 @@
 // (prototype/phase-6/doctor-profile.html and partner-profile.html):
 //
 //   - breadcrumb (full width)
-//   - left column: hero, trust cue, credentials, details
+//   - left column: hero (ribbon, rating, facts, tags, fee), trust cue,
+//     credentials, practice/details grid, services (non-doctor), CTA
 //   - right column (sticky): month grid, map card
 //
 // It stays a presentational component fed a projection: no fetch, no emit, no
@@ -15,7 +16,9 @@
 //
 // Truthfulness rules (FEAT-005 / ADR-0011): the verified badge, the trust cue and
 // each credential's status render ONLY from the fields the projection carries.
-// Nothing here invents a verification.
+// Nothing here invents a verification. Mock stand-ins (rating, facts, ribbons,
+// credential numbers, consultation types) are the same single-swap-point
+// placeholders DirectoryCard uses until their backends land.
 //
 // Declared-vs-verified: after #619 the declared content is folded INTO the
 // details card instead of a separate dashed band. The card's solid edge stays
@@ -25,13 +28,35 @@
 // assertions keep reading the same rows.
 
 import Link from "next/link";
-import { MapPin } from "lucide-react";
+import {
+  BadgeCheck,
+  Clock,
+  Download,
+  FileText,
+  MapPin,
+  ShieldCheck,
+  Truck,
+  Users,
+  Video,
+} from "lucide-react";
 
 import { formatInrPaise } from "@/lib/money";
 import {
+  getMockAccreditation,
+  getMockAvatarEmoji,
+  getMockCardData,
+  getMockConsultationTypes,
+  getMockCredentialDetail,
+  getMockHomeCollection,
   getMockPackagePrice,
   getMockProfileDistance,
+  getMockRating,
+  getMockReportTurnaround,
+  getMockServiceArea,
   getMockServices,
+  getMockTrustDetail,
+  type MockFact,
+  type MockTag,
 } from "@/lib/directory/mockDisplay";
 import {
   DIRECTORY_ROUTE,
@@ -130,7 +155,8 @@ function declaredAddressParts(
     .filter((row): row is [string, string, string] => row[2] !== null);
 }
 
-function DeclaredRow({
+/** Prototype `.grid2` practice/details row: muted label left, strong value right. */
+function DetailRow({
   label,
   value,
   testId,
@@ -140,33 +166,30 @@ function DeclaredRow({
   testId?: string;
 }) {
   return (
-    <div className="flex justify-between gap-3">
-      <dt className="text-txt-muted">{label}</dt>
-      <dd className="text-right font-medium text-txt" data-testid={testId}>
+    <div className="flex justify-between gap-3 text-sm">
+      <span className="text-txt-muted">{label}</span>
+      <strong
+        className="text-right font-semibold text-txt"
+        data-testid={testId}
+      >
         {value}
-      </dd>
+      </strong>
     </div>
   );
 }
 
-function DeclaredGroup({
-  testId,
-  heading,
-  children,
-}: {
-  testId: string;
-  heading: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="mt-4" data-testid={testId}>
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-txt-muted">
-        {heading}
-      </h3>
-      <dl className="mt-1.5 space-y-2 text-sm">{children}</dl>
-    </div>
-  );
-}
+/** Mock fact icon -> lucide element. Fields without a mapping render label only. */
+const FACT_ICON: Record<string, React.ElementType> = {
+  video: Video,
+  insurance: ShieldCheck,
+  "new-patients": Users,
+  "home-collection": Download,
+  clock: Clock,
+  certified: BadgeCheck,
+  delivery: Truck,
+  erx: FileText,
+  hours: Clock,
+};
 
 /**
  * The profile, rendered from a projection.
@@ -187,6 +210,7 @@ export function ProviderProfileBody({
 }) {
   const { lang } = useLang();
   const t = STRINGS[lang].providerProfile;
+  const dir = STRINGS[lang].directory;
   const vocab = STRINGS[lang].doctorProfile;
   const Heading = `h${headingLevel}` as "h1" | "h2";
 
@@ -206,6 +230,10 @@ export function ProviderProfileBody({
     DIRECTORY_VARIANT_ROUTES[profile.partner_type] ?? DIRECTORY_ROUTE;
   const variantLabel = typeLabel[profile.partner_type];
 
+  const mock = getMockCardData(profile.partner_id, profile.partner_type);
+  const rating = getMockRating(profile.partner_id);
+  const emoji = getMockAvatarEmoji(profile.partner_type);
+
   const declared = {
     clinicName: declaredText(profile.clinic_name),
     specialties: declaredSelectionText(
@@ -219,7 +247,7 @@ export function ProviderProfileBody({
     ),
     consultingHours: declaredText(profile.consulting_hours),
     about: declaredText(profile.about),
-    // `0` is a fact a provider can declare and renders as one. A truthiness check
+    // `0` is a fact a provider can declare and renders as one. A truthfulness check
     // here would report a provider with no experience as having declared nothing,
     // which is a different claim and the wrong one.
     experience:
@@ -248,14 +276,22 @@ export function ProviderProfileBody({
     if (declared.clinicName) subtitleParts.push(declared.clinicName);
   } else {
     subtitleParts.push(variantLabel);
+    if (profile.partner_type === "lab") subtitleParts.push("NABL accredited");
   }
   const subtitle =
     subtitleParts.length > 0 ? subtitleParts.join(" \u00b7 ") : null;
 
-  // The hero's right-aligned price line: the real consultation fee for a doctor,
-  // a mock package price for a lab or chemist. `consultation_fee` is the price
-  // the provider set, so it renders as a price and never carries a verified
-  // marker; the non-doctor price is a stand-in until a backend price lands.
+  // The hero's right-aligned price line: the real consultation fee for a doctor.
+  // `consultation_fee` is the price the provider set, so it renders as a price and
+  // never carries a verified marker. Non-doctors carry no fee block (prototype
+  // puts their package price in the hero strip instead).
+  const heroFee =
+    isDoctor && profile.consultation_fee !== null
+      ? formatInrPaise(profile.consultation_fee)
+      : null;
+
+  // Hero-strip package price for a lab/chemist (prototype's
+  // "Full body checkup: ₹1,200").
   const heroPackage = !isDoctor
     ? getMockPackagePrice(profile.partner_id, profile.partner_type)
     : null;
@@ -265,11 +301,190 @@ export function ProviderProfileBody({
   const hasVerifiedCredential = profile.credentials.some(
     (credential) => credential.status === "verified",
   );
+  const trustDetail = getMockTrustDetail(
+    profile.partner_id,
+    profile.partner_type,
+  );
 
   const address = [profile.address_line, profile.locality, profile.city]
     .filter((p) => typeof p === "string" && p.length > 0)
     .join(", ");
   const distance = getMockProfileDistance(profile.partner_id);
+
+  // Hero tags: prototype's accent mode tag + languages + a secondary tag.
+  // Real declared languages win over the mock language tag when present.
+  const heroTags: MockTag[] = [];
+  if (mock.tags[0]) heroTags.push(mock.tags[0]);
+  if (declared.languages) {
+    heroTags.push({ label: declared.languages, variant: "muted" });
+  }
+  for (const tag of mock.tags.slice(1)) {
+    if (declared.languages && tag.variant === "muted") continue;
+    heroTags.push(tag);
+  }
+  if (heroTags.length < 2 && mock.tags[1]) heroTags.push(mock.tags[1]);
+
+  const facts: readonly MockFact[] = mock.facts;
+  const consultationTypes = getMockConsultationTypes(profile.partner_type);
+  const credentialDetailFor = (credentialType: string) =>
+    getMockCredentialDetail(profile.partner_id, credentialType);
+
+  // Practice / details grid rows (prototype `.grid2`).
+  const detailRows: Array<{
+    label: string;
+    value: string;
+    testId?: string;
+    key: string;
+  }> = [];
+  detailRows.push({
+    key: "type",
+    label: t.typeLabel,
+    value: variantLabel,
+  });
+  if (isDoctor) {
+    // Specialty row only when the declared SELECTION names at least one member.
+    // A selection of unknown/blank members is "declared nothing named", not a
+    // reason to fall back to the singular `specialty` (the hero subtitle already
+    // carries that label for the directory's one-representative display).
+    if (declared.specialties) {
+      detailRows.push({
+        key: "specialty",
+        label: t.specialtyLabel,
+        value: declared.specialties,
+        testId: "profile-declared-specialties",
+      });
+    }
+    if (declared.experience) {
+      detailRows.push({
+        key: "experience",
+        label: t.experienceLabel,
+        value: declared.experience,
+        testId: "profile-declared-experience",
+      });
+    }
+    if (consultationTypes) {
+      detailRows.push({
+        key: "consult-types",
+        label: t.consultationTypesLabel,
+        value: consultationTypes,
+      });
+    }
+    if (declared.languages) {
+      detailRows.push({
+        key: "languages",
+        label: t.languagesLabel,
+        value: declared.languages,
+        testId: "profile-declared-languages",
+      });
+    }
+    if (declared.consultingDays) {
+      detailRows.push({
+        key: "days",
+        label: t.consultingDaysLabel,
+        value: declared.consultingDays,
+        testId: "profile-declared-days",
+      });
+    }
+    if (declared.consultingHours) {
+      detailRows.push({
+        key: "hours",
+        label: t.consultingHoursLabel,
+        value: declared.consultingHours,
+        testId: "profile-declared-hours",
+      });
+    }
+    if (declared.clinicName) {
+      detailRows.push({
+        key: "clinic",
+        label: t.clinicNameLabel,
+        value: declared.clinicName,
+        testId: "profile-declared-clinic-name",
+      });
+    }
+    if (address) {
+      detailRows.push({
+        key: "location",
+        label: t.locationLabel,
+        value: address,
+      });
+    }
+    // Structured address parts keep their field testids for the suite and the
+    // screen reader; they sit under the joined Location row as the parts that
+    // produced it.
+    for (const [field, label, value] of declared.address) {
+      detailRows.push({
+        key: `addr-${field}`,
+        label,
+        value,
+        testId: `profile-declared-address-${field}`,
+      });
+    }
+    if (heroFee) {
+      detailRows.push({
+        key: "fee",
+        label: t.consultationFeeLabel,
+        value: heroFee,
+      });
+    }
+  } else {
+    const accreditation = getMockAccreditation(profile.partner_type);
+    if (accreditation) {
+      detailRows.push({
+        key: "accreditation",
+        label: t.accreditationLabel,
+        value: accreditation,
+      });
+    }
+    if (address) {
+      detailRows.push({
+        key: "location",
+        label: t.locationLabel,
+        value: address,
+      });
+    }
+    for (const [field, label, value] of declared.address) {
+      detailRows.push({
+        key: `addr-${field}`,
+        label,
+        value,
+        testId: `profile-declared-address-${field}`,
+      });
+    }
+    const serviceArea = getMockServiceArea(profile.locality);
+    if (serviceArea) {
+      detailRows.push({
+        key: "service-area",
+        label: t.serviceAreaLabel,
+        value: serviceArea,
+      });
+    }
+    const homeCollection = getMockHomeCollection(profile.partner_type);
+    if (homeCollection) {
+      detailRows.push({
+        key: "home-collection",
+        label: t.homeCollectionLabel,
+        value: homeCollection,
+      });
+    }
+    const turnaround = getMockReportTurnaround(profile.partner_type);
+    if (turnaround) {
+      detailRows.push({
+        key: "turnaround",
+        label: t.reportTurnaroundLabel,
+        value: turnaround,
+      });
+    }
+    if (declared.languages) {
+      detailRows.push({
+        key: "languages",
+        label: t.languagesLabel,
+        value: declared.languages,
+        testId: "profile-declared-languages",
+      });
+    }
+  }
+
+  const services = isDoctor ? [] : getMockServices(profile.partner_type);
 
   return (
     <div data-testid="public-profile-body">
@@ -289,89 +504,173 @@ export function ProviderProfileBody({
       {/* Two columns: left holds the profile, right holds the rail. */}
       <div className="grid grid-cols-[minmax(0,1fr)_440px] gap-5 max-[980px]:grid-cols-1">
         <div className="flex flex-col gap-4 min-w-0">
-          {/* Profile hero (PROTO-PHASE-6 `.profile-hero`, mobile left-aligned) */}
+          {/* Profile hero (PROTO-PHASE-6 `.profile-hero`) */}
           <section
             className="mt-4 rounded-lg border border-hairline bg-surface p-6 shadow-card"
             data-testid="profile-hero"
           >
-            <div className="flex items-start gap-4">
-              {photo.src ? (
-                <img
-                  src={photo.src}
-                  alt={name}
-                  className="h-14 w-14 shrink-0 rounded-full border-2 border-accent-border object-cover"
-                />
-              ) : (
-                <span
-                  aria-hidden="true"
-                  className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
-                >
-                  {initials(name)}
-                </span>
-              )}
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Heading
-                    data-testid="profile-name"
-                    className="text-xl font-semibold text-txt"
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-4 min-w-0">
+                {photo.src ? (
+                  <img
+                    src={photo.src}
+                    alt={name}
+                    className={`h-[72px] w-[72px] shrink-0 border-2 border-accent-border object-cover ${
+                      isDoctor ? "rounded-full" : "rounded-lg"
+                    }`}
+                  />
+                ) : (
+                  <span
+                    aria-hidden="true"
+                    className={`flex h-[72px] w-[72px] shrink-0 items-center justify-center border-2 border-accent-border bg-accent-soft text-2xl font-semibold text-accent-strong ${
+                      isDoctor ? "rounded-full" : "rounded-lg"
+                    }`}
                   >
-                    {name}
-                  </Heading>
-                  {profile.verified && (
+                    {isDoctor ? initials(name) : emoji ?? initials(name)}
+                  </span>
+                )}
+                <div className="min-w-0">
+                  {mock.highlightRibbon && (
                     <span
-                      data-testid="profile-verified"
-                      className="rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text"
+                      data-testid="profile-highlight"
+                      className="inline-block w-fit whitespace-nowrap rounded-full border border-[#fed7aa] bg-warm-soft px-2 py-0.5 text-[0.6875rem] font-semibold text-warm"
                     >
-                      {t.verifiedByCareSetu}
+                      {mock.highlightRibbon}
                     </span>
                   )}
-                  {isDoctor && profile.consultation_fee !== null && (
-                    <span
-                      data-testid="profile-hero-fee"
-                      className="ml-auto shrink-0"
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <Heading
+                      data-testid="profile-name"
+                      className="text-2xl font-semibold text-txt"
                     >
-                      {formatInrPaise(profile.consultation_fee)}
+                      {name}
+                    </Heading>
+                    {profile.verified && (
+                      <span
+                        data-testid="profile-verified"
+                        className="rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text"
+                      >
+                        {t.verifiedByCareSetu}
+                      </span>
+                    )}
+                  </div>
+                  {subtitle ? (
+                    <p
+                      data-testid="profile-subtitle"
+                      className="mt-1 text-txt-sub"
+                    >
+                      {subtitle}
+                    </p>
+                  ) : null}
+                  <div
+                    className="mt-1 flex items-center gap-1.5 text-sm"
+                    data-testid="profile-rating"
+                  >
+                    <span
+                      className="leading-none tracking-[1px] text-warm"
+                      aria-hidden="true"
+                    >
+                      {Array.from({ length: Math.floor(rating.stars) })
+                        .map(() => "\u2605")
+                        .join("")}
+                      {rating.stars % 1 >= 0.5 ? "\u2606" : ""}
                     </span>
-                  )}
+                    <span className="text-txt-muted">
+                      {`${rating.stars.toFixed(1)} (${dir.ratingReviews(
+                        rating.reviewCount,
+                      )})`}
+                    </span>
+                  </div>
+                  <div
+                    className="mt-1 flex flex-wrap gap-3 text-[0.8125rem] text-txt-sub"
+                    data-testid="profile-facts"
+                  >
+                    {facts.map((fact, index) => {
+                      const Icon = FACT_ICON[fact.icon];
+                      return (
+                        <span
+                          key={index}
+                          data-testid="profile-fact"
+                          className="inline-flex items-center gap-1"
+                        >
+                          {Icon && (
+                            <Icon
+                              className="h-3.5 w-3.5 shrink-0 text-txt-muted"
+                              aria-hidden="true"
+                            />
+                          )}
+                          {fact.label}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <div
+                    className="mt-1 flex flex-wrap gap-1.5"
+                    data-testid="profile-tags"
+                  >
+                    {heroTags.map((tag, index) => (
+                      <span
+                        key={index}
+                        data-testid="profile-tag"
+                        className={`inline-flex min-h-6 items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                          tag.variant === "accent"
+                            ? "border border-accent-border bg-accent-soft text-accent-strong"
+                            : "bg-hairline-soft text-txt-muted"
+                        }`}
+                      >
+                        {tag.label}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-                {subtitle ? (
-                  <p
-                    data-testid="profile-subtitle"
-                    className="mt-1 text-txt-sub"
-                  >
-                    {subtitle}
-                  </p>
-                ) : null}
-                {heroPackage ? (
-                  <p
-                    data-testid="profile-hero-package"
-                    className="mt-1 text-xs text-txt-muted"
-                  >
-                    {heroPackage}
-                  </p>
-                ) : null}
               </div>
+              {heroFee && (
+                <div
+                  className="shrink-0 text-right"
+                  data-testid="profile-hero-fee"
+                >
+                  <div className="text-2xl font-semibold text-accent">
+                    {heroFee}
+                  </div>
+                  <div className="text-xs text-txt-muted">
+                    {t.consultationFeeLabel}
+                  </div>
+                </div>
+              )}
             </div>
-            {address || distance || profile.consulting_hours ? (
+            {address || distance || profile.consulting_hours || heroPackage ? (
               <div
                 data-testid="profile-hero-strip"
-                className="mt-4 flex flex-wrap gap-3 text-xs text-txt-muted"
+                className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-hairline-soft pt-3 text-sm text-txt-muted"
               >
                 {address ? (
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex items-center gap-1 text-txt-sub">
                     <MapPin
-                      className="h-3.5 w-3.5 shrink-0"
+                      className="h-3.5 w-3.5 shrink-0 text-txt-muted"
                       aria-hidden="true"
                     />
                     {address}
                   </span>
                 ) : null}
                 {distance ? (
-                  <span data-testid="profile-hero-distance">{distance}</span>
+                  <span data-testid="profile-hero-distance" className="text-xs">
+                    {distance}
+                  </span>
                 ) : null}
-                {profile.consulting_hours ? (
-                  <span data-testid="profile-hero-hours">
-                    {t.availability.kinds.doctor}: {profile.consulting_hours}
+                {isDoctor && profile.consulting_hours ? (
+                  <span
+                    data-testid="profile-hero-hours"
+                    className="text-txt-sub"
+                  >
+                    {t.opdLabel}: {profile.consulting_hours}
+                  </span>
+                ) : null}
+                {!isDoctor && heroPackage ? (
+                  <span
+                    data-testid="profile-hero-package"
+                    className="text-txt-sub"
+                  >
+                    {heroPackage}
                   </span>
                 ) : null}
               </div>
@@ -380,21 +679,29 @@ export function ProviderProfileBody({
 
           {/* Trust cue */}
           {hasVerifiedCredential && (
-            <section className="mt-3 flex items-center gap-3 rounded-lg border border-accent-border bg-accent-soft px-4 py-3">
+            <section
+              className="mt-3 flex items-center gap-3 rounded-lg border border-accent-border bg-accent-soft px-4 py-3"
+              data-testid="profile-trust"
+            >
               <span aria-hidden="true" className="text-xl">
                 {"\u{1F512}"}
               </span>
-              <div>
+              <div className="min-w-0">
                 <div className="text-sm font-semibold text-txt">
                   {isDoctor ? t.trustDoctorTitle : t.trustPartnerTitle}
                 </div>
-                <div className="text-xs text-txt-muted">{variantLabel}</div>
+                <div
+                  className="text-xs text-txt-muted"
+                  data-testid="profile-trust-detail"
+                >
+                  {trustDetail}
+                </div>
+                {profile.verified && (
+                  <span className="mt-1.5 inline-block rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text">
+                    {t.active}
+                  </span>
+                )}
               </div>
-              {profile.verified && (
-                <span className="ml-auto shrink-0 rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text">
-                  {t.active}
-                </span>
-              )}
             </section>
           )}
 
@@ -405,46 +712,54 @@ export function ProviderProfileBody({
             data-testid="profile-credentials"
           >
             <h2 className="text-base font-semibold text-txt">
-              {profile.partner_type === "doctor"
+              {isDoctor
                 ? t.credentialsHeading
                 : t.credentialsAndLicensesHeading}
             </h2>
             <ul className="mt-2 divide-y divide-hairline">
-              {profile.credentials.map((credential) => (
-                <li
-                  key={credential.credential_type}
-                  data-testid="credential-row"
-                  className="flex items-start justify-between gap-3 py-2.5"
-                >
-                  <div>
-                    <div className="text-sm font-medium text-txt">
-                      {t.credentialTypes[
-                        credential.credential_type as keyof typeof t.credentialTypes
-                      ] ?? credential.credential_type}
-                    </div>
-                    {credential.expires_at ? (
-                      <div className="text-xs text-txt-muted">
-                        {t.expiresOn(
-                          formatExpiryDate(credential.expires_at, lang),
-                        )}
+              {profile.credentials.map((credential) => {
+                const detail = credentialDetailFor(credential.credential_type);
+                const expiry = credential.expires_at
+                  ? t.expiresOn(formatExpiryDate(credential.expires_at, lang))
+                  : null;
+                const sub = joinParts([detail, expiry]);
+                return (
+                  <li
+                    key={credential.credential_type}
+                    data-testid="credential-row"
+                    className="flex items-start justify-between gap-3 py-2.5"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-txt">
+                        {t.credentialTypes[
+                          credential.credential_type as keyof typeof t.credentialTypes
+                        ] ?? credential.credential_type}
                       </div>
-                    ) : null}
-                  </div>
-                  {credential.status === "verified" && (
-                    <span
-                      data-testid="credential-verified"
-                      className="shrink-0 rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text"
-                    >
-                      {t.verified}
-                    </span>
-                  )}
-                </li>
-              ))}
+                      {sub ? (
+                        <div
+                          className="text-xs text-txt-muted"
+                          data-testid="credential-detail"
+                        >
+                          {sub}
+                        </div>
+                      ) : null}
+                    </div>
+                    {credential.status === "verified" && (
+                      <span
+                        data-testid="credential-verified"
+                        className="shrink-0 rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text"
+                      >
+                        {t.verified}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </section>
 
-          {/* Details card (solid edge): the platform's card, with the provider's
-              own claims folded into it and a muted note on its title. */}
+          {/* Practice details / Details card (solid edge): prototype grid2
+              rows + the provider's own claims, with a muted note on the title. */}
           <section
             className="mt-3 rounded-lg border border-hairline bg-surface p-5 shadow-card"
             data-testid="profile-details"
@@ -460,132 +775,63 @@ export function ProviderProfileBody({
                 {t.declaredNote}
               </p>
             )}
-            <dl className="mt-2 space-y-2 text-sm">
-              <div className="flex justify-between gap-3">
-                <dt className="text-txt-muted">{t.typeLabel}</dt>
-                <dd className="text-right font-medium text-txt">
-                  {variantLabel}
-                </dd>
+            <div
+              data-testid={declaresSomething ? "profile-declared" : undefined}
+              className="mt-3"
+            >
+              <div className="grid gap-3 sm:grid-cols-2">
+                {detailRows.map((row) => (
+                  <DetailRow
+                    key={row.key}
+                    label={row.label}
+                    value={row.value}
+                    testId={row.testId}
+                  />
+                ))}
               </div>
-            </dl>
-            {declaresSomething && (
-              <div data-testid="profile-declared" className="mt-3">
-                {declared.clinicName || declared.specialties ? (
-                  <DeclaredGroup
-                    testId="profile-declared-practice"
-                    heading={t.declaredPracticeHeading}
-                  >
-                    {declared.clinicName ? (
-                      <DeclaredRow
-                        label={t.clinicNameLabel}
-                        value={declared.clinicName}
-                        testId="profile-declared-clinic-name"
-                      />
-                    ) : null}
-                    {declared.specialties ? (
-                      <DeclaredRow
-                        label={t.specialtiesLabel}
-                        value={declared.specialties}
-                        testId="profile-declared-specialties"
-                      />
-                    ) : null}
-                  </DeclaredGroup>
-                ) : null}
 
-                {declared.address.length > 0 ? (
-                  <DeclaredGroup
-                    testId="profile-declared-address"
-                    heading={t.declaredAddressHeading}
+              {/* Prose, not a label/value row: `about` is not a value, it is the one
+                  declared field long enough that reading it as a value would flatten it. */}
+              {declared.about ? (
+                <div
+                  className="mt-4"
+                  data-testid="profile-declared-about-block"
+                >
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-txt-muted">
+                    {t.declaredAboutHeading}
+                  </h3>
+                  <p
+                    className="mt-1.5 text-sm text-txt-sub"
+                    data-testid="profile-declared-about"
                   >
-                    {declared.address.map(([field, label, value]) => (
-                      <DeclaredRow
-                        key={field}
-                        label={label}
-                        value={value}
-                        testId={`profile-declared-address-${field}`}
-                      />
-                    ))}
-                  </DeclaredGroup>
-                ) : null}
-
-                {declared.languages ||
-                declared.consultingDays ||
-                declared.consultingHours ||
-                declared.experience ? (
-                  <DeclaredGroup
-                    testId="profile-declared-consulting"
-                    heading={t.declaredConsultingHeading}
-                  >
-                    {declared.languages ? (
-                      <DeclaredRow
-                        label={t.languagesLabel}
-                        value={declared.languages}
-                        testId="profile-declared-languages"
-                      />
-                    ) : null}
-                    {declared.consultingDays ? (
-                      <DeclaredRow
-                        label={t.consultingDaysLabel}
-                        value={declared.consultingDays}
-                        testId="profile-declared-days"
-                      />
-                    ) : null}
-                    {declared.consultingHours ? (
-                      <DeclaredRow
-                        label={t.consultingHoursLabel}
-                        value={declared.consultingHours}
-                        testId="profile-declared-hours"
-                      />
-                    ) : null}
-                    {declared.experience ? (
-                      <DeclaredRow
-                        label={t.experienceLabel}
-                        value={declared.experience}
-                        testId="profile-declared-experience"
-                      />
-                    ) : null}
-                  </DeclaredGroup>
-                ) : null}
-
-                {/* Prose, not a label/value row: `about` is not a value, it is the one
-                    declared field long enough that reading it as a value would flatten it. */}
-                {declared.about ? (
-                  <div
-                    className="mt-4"
-                    data-testid="profile-declared-about-block"
-                  >
-                    <h3 className="text-xs font-semibold uppercase tracking-wide text-txt-muted">
-                      {t.declaredAboutHeading}
-                    </h3>
-                    <p
-                      className="mt-1.5 text-sm text-txt-sub"
-                      data-testid="profile-declared-about"
-                    >
-                      {declared.about}
-                    </p>
-                  </div>
-                ) : null}
-              </div>
-            )}
-
-            {isDoctor ? null : (
-              <div data-testid="profile-services" className="mt-3">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-txt-muted">
-                  {t.servicesHeading}
-                </h3>
-                <div className="mt-1.5 flex flex-wrap gap-2">
-                  {getMockServices(profile.partner_type).map((service) => (
-                    <span
-                      key={service}
-                      className="rounded-lg border border-hairline bg-surface px-2.5 py-0.5 text-[0.75rem] text-txt-sub"
-                    >
-                      {service}
-                    </span>
-                  ))}
+                    {declared.about}
+                  </p>
                 </div>
-              </div>
-            )}
+              ) : null}
+            </div>
           </section>
+
+          {/* Services (non-doctor): standalone card, as in partner-profile.html */}
+          {services.length > 0 && (
+            <section
+              className="mt-3 rounded-lg border border-hairline bg-surface p-5 shadow-card"
+              data-testid="profile-services"
+            >
+              <h2 className="text-base font-semibold text-txt">
+                {t.servicesHeading}
+              </h2>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {services.map((service) => (
+                  <span
+                    key={service}
+                    className="inline-flex min-h-9 items-center rounded-lg border border-hairline bg-surface px-3 py-1 text-sm text-txt-sub"
+                  >
+                    {service}
+                  </span>
+                ))}
+              </div>
+            </section>
+          )}
 
           {/* CTA (future phase) */}
           <section className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-hairline bg-surface p-5 shadow-card">
@@ -594,7 +840,7 @@ export function ProviderProfileBody({
                 {isDoctor ? t.ctaDoctorTitle : t.ctaPartnerTitle}
               </div>
               <p className="mt-0.5 text-xs text-txt-muted">
-                {t.comingSoonBody}
+                {isDoctor ? t.ctaDoctorBody : t.ctaPartnerBody}
               </p>
             </div>
             <button

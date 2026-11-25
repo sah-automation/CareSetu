@@ -269,7 +269,7 @@ describe("ProviderProfile rendering a reachable profile", () => {
     expect(rows[1]).not.toHaveTextContent("Expires");
   });
 
-  it("shows the doctor practice-details heading and no invented fields", async () => {
+  it("shows the doctor practice-details heading and prototype detail rows", async () => {
     mockFetch.mockResolvedValue({ status: "found", profile: doctorProfile() });
 
     renderProfile();
@@ -278,28 +278,22 @@ describe("ProviderProfile rendering a reachable profile", () => {
     expect(
       screen.getByRole("heading", { name: "Practice details" }),
     ).toBeInTheDocument();
-    // The summary band's whole content is the provider TYPE, and that is not an
-    // accident of this fixture: it is what a solid-edged band is allowed to hold.
     expect(screen.getByText("Type")).toBeInTheDocument();
     const summary = screen.getByTestId("profile-details");
     expect(summary).toHaveTextContent("Doctor");
-    // #619: the service area moved out of here and into the declared band, and
-    // that is the one structural change the ticket forced on this section. `area`
-    // is the provider's DECLARED locality since #612/#613, so leaving it here
-    // would put an unverified claim inside a solid-edged band right beside the
-    // credentials - the exact reading the band exists to prevent. It now renders
-    // once, in the band that says nobody checked it.
+    // #968: the practice-details card matches the prototype grid - specialty,
+    // experience, consultation types, languages, location and fee render from
+    // the projection (or a marked mock stand-in), not as a bare Type row.
     expect(screen.queryByText("Service area")).not.toBeInTheDocument();
-    expect(within(summary).queryByText("Specialty")).toBeNull();
+    expect(screen.getByText("Specialty")).toBeInTheDocument();
     expect(
       screen.getByTestId("profile-declared-address-locality"),
     ).toHaveTextContent("Daltonganj");
-    // Fields no part of the payload carries are still never invented. The
-    // consultation fee is the one the backend serves and the page deliberately
-    // does not show (nothing on this page can book, so a price would be a
-    // promise); the services and consult-type blobs were never served at all.
-    expect(screen.queryByText(/consultation fee/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/services/i)).not.toBeInTheDocument();
+    // The fee is the provider's own price and now appears in the hero block and
+    // the details grid (prototype `.profile-fee` / practice-details fee row).
+    expect(screen.getAllByText(/consultation fee/i).length).toBeGreaterThan(0);
+    // Doctors have no services card; labs/chemists do.
+    expect(screen.queryByTestId("profile-services")).not.toBeInTheDocument();
   });
 
   it("renders the lab variant with the credentials & licenses heading", async () => {
@@ -321,6 +315,16 @@ describe("ProviderProfile rendering a reachable profile", () => {
     // nothing gets no heading over nothing.
     expect(screen.queryByText("Specialty")).not.toBeInTheDocument();
     expect(screen.queryByTestId("profile-declared")).not.toBeInTheDocument();
+    // #968: labs get the prototype's Services card and Details grid stand-ins.
+    expect(screen.getByTestId("profile-services")).toBeInTheDocument();
+    // "Accreditation" is both a credential-type label and the details-grid row
+    // label, so scope the assertion to the details card.
+    expect(
+      within(screen.getByTestId("profile-details")).getByText("Accreditation"),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("profile-details")).getByText("NABL"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("profile-subtitle")).toHaveTextContent(
       "Laboratory",
     );
@@ -557,10 +561,12 @@ describe("the declared band renders the provider's own claims", () => {
     fireEvent.click(screen.getByRole("button", { name: "\u0939\u093F\u0902" }));
 
     const band = await screen.findByTestId("profile-declared");
+    // #968: the declared rows are flat prototype grid labels, not group headings.
+    // The clinic-name label follows the language; the claim itself does not.
     expect(
-      within(band).getByRole("heading", {
-        name: "\u0915\u094D\u0932\u093F\u0928\u093F\u0915",
-      }),
+      within(band).getByText(
+        "\u0915\u094D\u0932\u093F\u0928\u093F\u0915 \u0915\u093E \u0928\u093E\u092E",
+      ),
     ).toBeInTheDocument();
     // The vocabulary labels are translated; the provider's own words are not.
     expect(within(band).getByTestId("profile-declared-days")).toHaveTextContent(

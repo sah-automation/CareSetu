@@ -258,3 +258,111 @@ export function getMockServices(type: ProviderType): readonly string[] {
   }
   return [];
 }
+
+/** Avatar stand-in for a non-doctor profile (the prototype's rounded-square
+ * emoji tile). Doctors use initials or their photo instead.
+ *
+ * TODO(BACKEND): none - this is a pure presentational stand-in. */
+export function getMockAvatarEmoji(type: ProviderType): string | null {
+  if (type === "lab") return "\u{1F9EA}"; // test tube
+  if (type === "chemist") return "\u{1F48A}"; // pill
+  return null;
+}
+
+/** Trust-cue detail line under the lock title (prototype's council / license
+ * subtitle). Deterministic in `partner_id`.
+ *
+ * TODO(BACKEND): the real credential issuer + registration number from
+ * `credentials[]`. */
+export function getMockTrustDetail(
+  partnerId: number,
+  type: ProviderType,
+): string {
+  const h = hashPartner(partnerId);
+  if (type === "doctor") {
+    return `Jharkhand State Medical Council \u00b7 JSMC/GEN/2014/0${
+      800 + (h % 100)
+    }`;
+  }
+  if (type === "lab") {
+    return `NABL certificate \u00b7 NB/Path/2023/4${
+      100 + (h % 800)
+    } \u00b7 Valid until Mar 2027`;
+  }
+  return `Drug license \u00b7 DL/PC/2020/${1000 + (h % 9000)}`;
+}
+
+/** Per-credential detail line (prototype's `number \u00b7 issuer` row under the
+ * credential label). Deterministic in `partner_id` + `credential_type`.
+ *
+ * TODO(BACKEND): the real credential metadata (registration number, issuer,
+ * qualification year) once the profile payload carries it. */
+export function getMockCredentialDetail(
+  partnerId: number,
+  credentialType: string,
+): string | null {
+  const h = hashPartner(partnerId);
+  switch (credentialType) {
+    case "medical_registration":
+      return `JSMC/GEN/2014/0${
+        800 + (h % 100)
+      } \u00b7 Jharkhand State Medical Council`;
+    case "qualification_certificate":
+      return `Rajendra Institute of Medical Sciences, Ranchi \u00b7 2014`;
+    case "lab_license":
+      return `DL/20B/201${h % 9} \u00b7 State Drug Controller`;
+    case "accreditation":
+      return `NB/Path/2023/4${100 + (h % 800)} \u00b7 Expires Mar 2027`;
+    case "drug_license":
+      return `DL/PC/2020/${1000 + (h % 9000)}`;
+    case "pharmacist_registration":
+      return `JSPC/R/${2010 + (h % 15)}/${100 + (h % 800)}`;
+    default:
+      return null;
+  }
+}
+
+/** Practice-details consultation-types line (prototype's "In-clinic").
+ *
+ * TODO(BACKEND): the provider's declared consultation / service modes. */
+export function getMockConsultationTypes(type: ProviderType): string | null {
+  if (type === "doctor") return "In-clinic";
+  if (type === "lab") return "Walk-in & Home";
+  return "Walk-in & Delivery";
+}
+
+/** Partner details: accreditation stand-in (prototype's "NABL").
+ *
+ * TODO(BACKEND): the declared accreditation / license category. */
+export function getMockAccreditation(type: ProviderType): string | null {
+  if (type === "lab") return "NABL";
+  if (type === "chemist") return "Licensed pharmacy";
+  return null;
+}
+
+/** Partner details: home-collection stand-in (prototype's "Yes").
+ *
+ * TODO(BACKEND): the partner's declared home-collection flag. */
+export function getMockHomeCollection(type: ProviderType): string | null {
+  if (type === "lab") return "Yes";
+  if (type === "chemist") return "Yes";
+  return null;
+}
+
+/** Partner details: report-turnaround stand-in (prototype's "Within 24 hours").
+ *
+ * TODO(BACKEND): the lab's declared turnaround SLA. */
+export function getMockReportTurnaround(type: ProviderType): string | null {
+  if (type === "lab") return "Within 24 hours";
+  return null;
+}
+
+/** Partner details: service-area stand-in built from the declared locality
+ * (prototype's "Daltonganj + 10 km"). Null when no locality is declared.
+ *
+ * TODO(BACKEND): a real service-area radius if/when the demoted field is
+ * re-surfaced with backend data. */
+export function getMockServiceArea(locality: string | null): string | null {
+  if (!locality) return null;
+  return `${locality} + 10 km`;
+}
