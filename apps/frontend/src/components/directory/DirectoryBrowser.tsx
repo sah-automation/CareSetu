@@ -105,8 +105,9 @@ export function DirectoryBrowser({
   baseRoute?: string;
   /** PHASE-8.1 T11 (#485): card-grid density override for shell-embedded
    * browse (the embedded column is narrower than the public full-width
-   * browse, so the default lg:grid-cols-4 is too cramped). Defaults to the
-   * public full-width grid - existing callers are unchanged. */
+   * browse, so a denser grid would be too cramped). Defaults to the public
+   * single-wide-card grid (PROTO-PHASE-6 `stack-lg` gap, 1.25rem) - existing
+   * callers are unchanged. */
   cardGridClassName?: string;
 }) {
   const { lang } = useLang();
@@ -222,9 +223,10 @@ export function DirectoryBrowser({
     committedType === null || committedType === "doctor";
   const heading = typeKey === "$all" ? t.heading.all : t.heading[typeKey];
   // Shell-embedded browse (patient /patient/find) overrides the density; the
-  // public /directory surface keeps the wider full-width grid.
-  const gridClass =
-    cardGridClassName ?? "grid gap-4 sm:grid-cols-2 lg:grid-cols-4";
+  // public /directory surface uses a single wide card per row (matching the
+  // PROTO-PHASE-6 design where each card is a wide two-panel layout, stacked
+  // at the prototype's stack-lg 1.25rem gap).
+  const gridClass = cardGridClassName ?? "grid gap-5";
   // FilterSheet sections follow the pinned variant, else the committed type,
   // defaulting to the doctor sections on an all-types browse.
   const filterSectionType: ProviderType =

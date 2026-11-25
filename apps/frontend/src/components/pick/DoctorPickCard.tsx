@@ -118,17 +118,17 @@ export function DoctorPickCard({
       <div className="flex w-full items-start justify-between gap-3">
         <span
           data-testid="pick-verified"
-          className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text"
+          className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-xs font-semibold text-success-text"
         >
           <BadgeCheck aria-hidden="true" className="h-3 w-3" />
           {verifiedLabel}
         </span>
-        <span className="whitespace-nowrap text-sm text-txt-sub">
+        <span className="whitespace-nowrap text-[0.8125rem] text-txt-muted">
           {distanceLabel}
         </span>
       </div>
 
-      <div className="grid grid-cols-[72px_1fr] gap-0.5 items-start min-w-0 mb-2">
+      <div className="grid grid-cols-[72px_1fr] gap-2 items-start min-w-0 mb-2">
         <div
           className="relative shrink-0 w-[72px] h-[72px]"
           data-testid="pick-avatar-wrap"
@@ -142,7 +142,7 @@ export function DoctorPickCard({
           ) : (
             <span
               aria-hidden="true"
-              className="flex h-full w-full items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
+              className="flex h-full w-full items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-2xl font-semibold text-accent-strong"
             >
               {initials(name)}
             </span>
@@ -151,31 +151,33 @@ export function DoctorPickCard({
             <span
               data-testid="pick-video-badge"
               aria-label="Video visits available"
-              className="absolute bottom-1 right-1 h-6 w-6 rounded-full bg-accent text-on-accent flex items-center justify-center shadow-pop border-2 border-surface text-xs"
+              className="absolute bottom-0.5 right-0.5 h-6 w-6 rounded-full bg-accent text-on-accent flex items-center justify-center border-2 border-surface text-xs"
             >
               <Video className="h-3 w-3" aria-hidden="true" />
             </span>
           )}
         </div>
-        <div className="flex flex-col gap-0.25 min-w-0">
+        <div className="flex flex-col gap-1 min-w-0">
           {mock.highlightRibbon && (
             <span
               data-testid="pick-ribbon"
-              className="inline-block text-[0.6875rem] font-bold uppercase tracking-wide text-accent-strong bg-accent-soft border border-accent-border rounded-full px-2 py-0.5 whitespace-nowrap"
+              className="inline-block text-[0.6875rem] font-semibold text-warm bg-warm-soft border border-[#fed7aa] rounded-full px-2 py-0.5 whitespace-nowrap"
             >
               {mock.highlightRibbon}
             </span>
           )}
-          <div className="flex items-baseline gap-0.5 flex-wrap min-w-0">
+          <div className="flex items-baseline gap-2 flex-wrap min-w-0">
             <Link
               href={providerProfileHref(entry.partner_id)}
               data-testid="pick-doctor-name"
-              className="text-txt hover:underline truncate"
+              className="text-txt hover:underline"
             >
-              <strong className="text-sm leading-snug">{name}</strong>
+              <strong className="text-lg font-semibold leading-[1.3]">
+                {name}
+              </strong>
             </Link>
             {mock.credentials && (
-              <span className="text-txt-muted text-xs truncate">
+              <span className="text-txt-muted text-[0.8125rem]">
                 {mock.credentials}
               </span>
             )}
@@ -183,7 +185,7 @@ export function DoctorPickCard({
           {practiceLine && (
             <span
               data-testid="pick-practice"
-              className="text-txt-sub text-xs truncate whitespace-normal"
+              className="text-txt-sub text-sm font-medium truncate"
             >
               {practiceLine}
             </span>
@@ -192,13 +194,13 @@ export function DoctorPickCard({
       </div>
 
       {specialtyLine && (
-        <span data-testid="pick-specialty" className="text-txt-muted text-xs">
+        <span data-testid="pick-specialty" className="text-txt-muted text-sm">
           {specialtyLine}
         </span>
       )}
-      <div className="flex items-center gap-0.375">
+      <div className="flex items-center gap-1.5">
         <span
-          className="text-accent-strong text-[0.875rem] font-bold leading-none"
+          className="text-warm text-sm leading-none tracking-[1px]"
           aria-hidden="true"
         >
           {Array.from({ length: Math.floor(rating.stars) })
@@ -206,18 +208,20 @@ export function DoctorPickCard({
             .join("")}
           {rating.stars % 1 >= 0.5 ? "☆" : ""}
         </span>
-        <span className="text-txt-muted text-[0.8125rem]">
-          {`${rating.reviewCount} reviews`}
+        <span className="text-txt-muted text-sm">
+          {`${rating.stars.toFixed(1)} (${t.ratingReviews(
+            rating.reviewCount,
+          )})`}
         </span>
       </div>
-      <div data-testid="pick-facts" className="flex flex-wrap gap-0.75 mt-0.5">
+      <div data-testid="pick-facts" className="flex flex-wrap gap-3 mt-0.5">
         {mock.facts.map((fact, index) => {
           const Icon = FACT_ICON[fact.icon];
           return (
             <span
               key={index}
               data-testid="pick-fact"
-              className="inline-flex items-center gap-0.25 text-txt-sub text-[0.8125rem]"
+              className="inline-flex items-center gap-1 text-txt-sub text-[0.8125rem]"
             >
               {Icon && (
                 <Icon
