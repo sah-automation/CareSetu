@@ -135,11 +135,11 @@ export function DirectoryCard({
         {/* P1T: Avatar | Tag+Name+Practice */}
         <div
           data-testid="directory-card-p1t"
-          className="grid grid-cols-[72px_1fr] gap-2 items-start min-w-0 [@media_(max-width:720px)]:grid-cols-[64px_1fr] [@media_(max-width:480px)]:grid-cols-[1fr] [@media_(max-width:480px)]:justify-items-center [@media_(max-width:480px)]:text-center"
+          className="grid grid-cols-[72px_1fr] gap-2 items-start min-w-0 [@media_(max-width:720px)]:grid-cols-[64px_1fr] [@media_(max-width:480px)]:grid-cols-[1fr] [@media_(max-width:480px)]:text-left"
         >
           <div
             data-testid="directory-card-avatar-wrap"
-            className="relative shrink-0 w-[72px] h-[72px] [@media_(max-width:720px)]:w-16 [@media_(max-width:720px)]:h-16 [@media_(max-width:720px)]:mx-auto [@media_(max-width:480px)]:w-16 [@media_(max-width:480px)]:h-16"
+            className="relative shrink-0 w-[72px] h-[72px] [@media_(max-width:720px)]:w-16 [@media_(max-width:720px)]:h-16 [@media_(max-width:480px)]:w-16 [@media_(max-width:480px)]:h-16"
           >
             {photo.src ? (
               <img
@@ -165,7 +165,7 @@ export function DirectoryCard({
               </span>
             )}
           </div>
-          <div className="flex flex-col gap-1 min-w-0 [@media_(max-width:480px)]:justify-center">
+          <div className="flex flex-col gap-1 min-w-0">
             {mock.highlightRibbon && (
               <span
                 data-testid="directory-card-ribbon"
@@ -174,7 +174,7 @@ export function DirectoryCard({
                 {mock.highlightRibbon}
               </span>
             )}
-            <div className="flex items-baseline gap-2 flex-wrap min-w-0 [@media_(max-width:480px)]:justify-center">
+            <div className="flex items-baseline gap-2 flex-wrap min-w-0">
               <strong className="text-txt text-lg font-semibold leading-[1.3]">
                 {name}
               </strong>
@@ -198,7 +198,7 @@ export function DirectoryCard({
         {/* P1B: Specialty, Rating, Facts, Meta, Tags, Location, Fee */}
         <div
           data-testid="directory-card-p1b"
-          className="flex flex-col gap-1.5 min-w-0 [@media_(max-width:480px)]:justify-center"
+          className="flex flex-col gap-1.5 min-w-0"
         >
           {specialtyLine && (
             <span
@@ -226,7 +226,7 @@ export function DirectoryCard({
           </div>
           <div
             data-testid="directory-card-facts"
-            className="flex flex-wrap gap-3 [@media_(max-width:480px)]:justify-center"
+            className="flex flex-wrap gap-3"
           >
             {mock.facts.map((fact, index) => {
               const Icon = FACT_ICON[fact.icon];
@@ -247,7 +247,7 @@ export function DirectoryCard({
               );
             })}
           </div>
-          <div className="flex flex-wrap items-center gap-2 [@media_(max-width:480px)]:justify-center">
+          <div className="flex flex-wrap items-center gap-2">
             <span
               data-testid="directory-card-verified"
               className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-xs font-semibold text-success-text"
@@ -261,7 +261,7 @@ export function DirectoryCard({
           </div>
           <div
             data-testid="directory-card-tags"
-            className="flex flex-wrap gap-1.5 [@media_(max-width:480px)]:justify-center"
+            className="flex flex-wrap gap-1.5"
           >
             {mock.tags.map((tag, index) => (
               <span
