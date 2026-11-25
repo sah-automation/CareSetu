@@ -336,10 +336,13 @@ export function DirectoryBrowser({
               key={chip.key}
               data-testid="active-filter-chip"
               data-filter={chip.key}
-              className={`${chipClass(true)} gap-1.5 pr-1.5`}
+              className="flex items-center gap-1.5 text-txt-muted text-sm"
             >
               {chip.key === "location" && (
-                <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <MapPin
+                  className="h-3.5 w-3.5 shrink-0 text-txt-muted"
+                  aria-hidden="true"
+                />
               )}
               <span className="max-w-[12rem] truncate">{chip.label}</span>
               <button
@@ -347,7 +350,7 @@ export function DirectoryBrowser({
                 data-testid={`dismiss-${chip.key}`}
                 aria-label={chip.ariaLabel}
                 onClick={chip.onDismiss}
-                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-on-accent/25 text-sm leading-none text-on-accent transition-colors hover:bg-on-accent/40"
+                className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-on-accent/25 text-sm leading-none text-on-accent transition-colors hover:bg-on-accent/40"
               >
                 ×
               </button>

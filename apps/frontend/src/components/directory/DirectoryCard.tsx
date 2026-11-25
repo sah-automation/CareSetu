@@ -165,7 +165,7 @@ export function DirectoryCard({
               </span>
             )}
           </div>
-          <div className="flex flex-col gap-1 min-w-0">
+          <div className="flex flex-col gap-1 min-w-0 [@media_(max-width:480px)]:justify-center">
             {mock.highlightRibbon && (
               <span
                 data-testid="directory-card-ribbon"
@@ -198,7 +198,7 @@ export function DirectoryCard({
         {/* P1B: Specialty, Rating, Facts, Meta, Tags, Location, Fee */}
         <div
           data-testid="directory-card-p1b"
-          className="flex flex-col gap-1.5 min-w-0"
+          className="flex flex-col gap-1.5 min-w-0 [@media_(max-width:480px)]:justify-center"
         >
           {specialtyLine && (
             <span
