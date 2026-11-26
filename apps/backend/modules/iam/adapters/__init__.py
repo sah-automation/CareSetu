@@ -85,7 +85,6 @@ def register_handlers(registry: HandlerRegistry) -> None:
         (EVENT_OPERATOR_TIER_CHANGED, OperatorTierChangedPayload),
         (EVENT_OPERATOR_ACTIVE_CHANGED, OperatorActiveChangedPayload),
         (EVENT_CREDENTIAL_INVALIDATED, CredentialInvalidatedPayload),
-        (EVENT_OPERATOR_MFA_FAILED, OperatorMfaFailedPayload),
     ):
         registry.register_payload_model(event_type, payload_model)
 
