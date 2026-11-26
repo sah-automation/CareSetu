@@ -139,6 +139,8 @@ def init_sentry(settings: SentrySettings) -> bool:
             release=resolve_release(settings),
             traces_sample_rate=settings.sentry_traces_sample_rate,
             before_send=scrub_event,
+            before_send_transaction=scrub_event,
+            send_default_pii=False,
         )
     except Exception:
         log.warning("sentry init failed; error tracking disabled", exc_info=True)

@@ -35,6 +35,7 @@ from sqlalchemy import and_, func, not_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
+from typing import Protocol
 
 from app.config import Settings
 from app.db import AsyncEngineLike
@@ -570,7 +571,14 @@ async def query_access_history(
     )
 
 
-def _metric_entry_from_row(row: Row[Any] | tuple[Any, ...]) -> HealthBackgroundMetricEntry:
+class _MetricRow(Protocol):
+    id: Any
+    height_cm: Any | None
+    weight_kg: Any | None
+    recorded_at: Any
+
+
+def _metric_entry_from_row(row: _MetricRow) -> HealthBackgroundMetricEntry:
     """Concretize one ``health_background_metrics`` row as the typed entry.
 
     A ``Row[Any]`` proxy is genuinely required here (the columns are read off
