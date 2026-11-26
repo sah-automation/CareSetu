@@ -1,0 +1,6 @@
+# Generated Grafana provisioning assets (#748). Their format is owned by
+# apps/backend/scripts/gen_grafana_assets.py, and the committed copy is asserted to
+# equal a fresh generation in tests/unit/test_grafana_assets.py. Letting prettier
+# reformat them would create a second owner of the bytes and a Windows-only CRLF
+# churn against the generator's LF output.
+/deploy/grafana/provisioning/

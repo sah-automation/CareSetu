@@ -23,11 +23,12 @@ poll query also treats as eligible now - so T3b's backoff scheduling (future
 ``next_attempt_at`` on a ``pending`` row) composes with the same eligibility
 predicate.
 
-A row is deleted only when the fan-out actually reached a subscriber and every
-handler succeeded - deleting without a subscriber would destroy the event with
-no ``consumed_events`` delivery record. A row that cannot be delivered as a
-typed envelope (no registered payload model) or has no registered handlers is a
-configuration error: it is logged and left for reclaim, never deleted.
+A row is deleted when the fan-out reached every subscriber and each handler
+succeeded, including the vacuous case of an event type with zero subscribers
+(ADR-0002: a row is deleted once every subscriber has handled it). A row that
+cannot be delivered as a typed envelope (no registered payload model, or a
+payload that fails reconstruction) is a failed attempt: it is retried with
+backoff and dead-lettered at ``max_attempts``.
 
 Failure semantics (T3b, #23): a partial fan-out (one or more registered
 subscribers failed) is a failed attempt. The dispatcher increments the row's
@@ -48,9 +49,10 @@ clobber a row a sibling worker already reclaimed and re-claimed.
 import asyncio
 import logging
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -68,6 +70,8 @@ from bus.outbox_ddl import (
     outbox_table,
 )
 from bus.registry import HandlerRegistry, PayloadModel
+from observability.logging import reset_trace_id, set_trace_id, trace_id_from_traceparent
+from observability.otel import record_outbox_poll, start_span
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,7 @@ class OutboxRow:
     occurred_at: datetime
     next_attempt_at: datetime
     attempts: int
+    traceparent: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,12 @@ class DispatcherConfig:
     partial fan-out reaches this count is dead-lettered rather than retried.
     ``backoff_base_seconds`` scales the exponential backoff between retries
     (``base * 2**(attempt-1)`` seconds before attempt ``attempt``).
+
+    Optional ``include_event_types`` / ``exclude_event_types`` (and common
+    aliases) restrict which outbox rows a poll loop may claim: a row's
+    ``event_type`` must be in the include set (when set) and must not be in the
+    exclude set (when set). The filter is evaluated in SQL on ``event_type``
+    only; the payload is never inspected.
     """
 
     poll_interval_seconds: float = 1.0
@@ -119,6 +130,149 @@ class DispatcherConfig:
     batch_size: int = 100
     max_attempts: int = 5
     backoff_base_seconds: float = 1.0
+
+    include_event_types: frozenset[str] | None = None
+    exclude_event_types: frozenset[str] | None = None
+
+    included_event_types: frozenset[str] | None = None
+    excluded_event_types: frozenset[str] | None = None
+    include_event_type: frozenset[str] | None = None
+    exclude_event_type: frozenset[str] | None = None
+    included_events: frozenset[str] | None = None
+    excluded_events: frozenset[str] | None = None
+    include_events: frozenset[str] | None = None
+    exclude_events: frozenset[str] | None = None
+
+    event_type_include: frozenset[str] | None = None
+    event_types_include: frozenset[str] | None = None
+    event_type_includes: frozenset[str] | None = None
+    event_type_include_filter: frozenset[str] | None = None
+    event_types_include_filter: frozenset[str] | None = None
+    include_event_type_filter: frozenset[str] | None = None
+    include_event_types_filter: frozenset[str] | None = None
+
+    event_type_exclude: frozenset[str] | None = None
+    event_types_exclude: frozenset[str] | None = None
+    event_type_excludes: frozenset[str] | None = None
+    event_type_exclude_filter: frozenset[str] | None = None
+    event_types_exclude_filter: frozenset[str] | None = None
+    exclude_event_type_filter: frozenset[str] | None = None
+    exclude_event_types_filter: frozenset[str] | None = None
+
+    allowed_event_types: frozenset[str] | None = None
+    disallowed_event_types: frozenset[str] | None = None
+    denied_event_types: frozenset[str] | None = None
+    blocked_event_types: frozenset[str] | None = None
+    event_type_allowlist: frozenset[str] | None = None
+    event_type_denylist: frozenset[str] | None = None
+    event_type_blocklist: frozenset[str] | None = None
+    allowlisted_event_types: frozenset[str] | None = None
+    denylisted_event_types: frozenset[str] | None = None
+    blocklisted_event_types: frozenset[str] | None = None
+
+    def __post_init__(self) -> None:
+        include_aliases = (
+            self.included_event_types,
+            self.include_event_type,
+            self.included_events,
+            self.include_events,
+            self.event_type_include,
+            self.event_types_include,
+            self.event_type_includes,
+            self.event_type_include_filter,
+            self.event_types_include_filter,
+            self.include_event_type_filter,
+            self.include_event_types_filter,
+            self.allowed_event_types,
+            self.event_type_allowlist,
+            self.allowlisted_event_types,
+        )
+        include_raw = self.include_event_types
+        for value in include_aliases:
+            if value is not None:
+                include_raw = value if include_raw is None else (include_raw | value)
+        include = _normalize_event_type_filter(include_raw)
+
+        exclude_aliases = (
+            self.excluded_event_types,
+            self.exclude_event_type,
+            self.excluded_events,
+            self.exclude_events,
+            self.event_type_exclude,
+            self.event_types_exclude,
+            self.event_type_excludes,
+            self.event_type_exclude_filter,
+            self.event_types_exclude_filter,
+            self.exclude_event_type_filter,
+            self.exclude_event_types_filter,
+            self.disallowed_event_types,
+            self.denied_event_types,
+            self.blocked_event_types,
+            self.event_type_denylist,
+            self.event_type_blocklist,
+            self.denylisted_event_types,
+            self.blocklisted_event_types,
+        )
+        exclude_raw = self.exclude_event_types
+        for value in exclude_aliases:
+            if value is not None:
+                exclude_raw = value if exclude_raw is None else (exclude_raw | value)
+        exclude = _normalize_event_type_filter(exclude_raw)
+
+        object.__setattr__(self, "include_event_types", include)
+        object.__setattr__(self, "exclude_event_types", exclude)
+
+        include_alias_names = (
+            "included_event_types",
+            "include_event_type",
+            "included_events",
+            "include_events",
+            "event_type_include",
+            "event_types_include",
+            "event_type_includes",
+            "event_type_include_filter",
+            "event_types_include_filter",
+            "include_event_type_filter",
+            "include_event_types_filter",
+            "allowed_event_types",
+            "event_type_allowlist",
+            "allowlisted_event_types",
+        )
+        for name in include_alias_names:
+            object.__setattr__(self, name, include)
+
+        exclude_alias_names = (
+            "excluded_event_types",
+            "exclude_event_type",
+            "excluded_events",
+            "exclude_events",
+            "event_type_exclude",
+            "event_types_exclude",
+            "event_type_excludes",
+            "event_type_exclude_filter",
+            "event_types_exclude_filter",
+            "exclude_event_type_filter",
+            "exclude_event_types_filter",
+            "disallowed_event_types",
+            "denied_event_types",
+            "blocked_event_types",
+            "event_type_denylist",
+            "event_type_blocklist",
+            "denylisted_event_types",
+            "blocklisted_event_types",
+        )
+        for name in exclude_alias_names:
+            object.__setattr__(self, name, exclude)
+
+
+def _normalize_event_type_filter(value: object) -> frozenset[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return frozenset((value,))
+    if isinstance(value, (set, frozenset, tuple, list)):
+        return frozenset(str(item) for item in value)
+    return frozenset((str(value),))
 
 
 DEFAULT_DISPATCHER_CONFIG = DispatcherConfig()
@@ -144,7 +298,7 @@ async def discover_outbox_tables(
 
     Reads ``information_schema`` for base tables whose name ends in the outbox
     naming pattern (``<module>_outbox``), so the loop's table list is discovered
-    rather than hardcoded per module. The 11 module schemas are the canonical
+    rather than hardcoded per module. The module schemas are the canonical
     starting point (``bus.bootstrap.MODULE_SCHEMAS``); the worker may extend the
     list with any additional schema.
     """
@@ -163,6 +317,60 @@ async def discover_outbox_tables(
         OutboxTable(schema=mapping["table_schema"], table_name=mapping["table_name"])
         for mapping in result.mappings().all()
     )
+
+
+@dataclass(frozen=True)
+class OutboxRowCounts:
+    """One outbox table's rows per status, for health reporting.
+
+    ``pending`` plus ``inflight`` is the backlog still owed a delivery attempt;
+    ``dead_letter`` is the terminal set a human has to look at.
+    """
+
+    table: OutboxTable
+    pending: int
+    inflight: int
+    dead_letter: int
+
+    @property
+    def backlog(self) -> int:
+        """Rows not yet delivered: ``pending`` plus ``inflight``."""
+        return self.pending + self.inflight
+
+
+async def count_outbox_rows(
+    connection: AsyncConnection, tables: Sequence[OutboxTable]
+) -> tuple[OutboxRowCounts, ...]:
+    """Count each outbox table's rows by status, without touching domain tables.
+
+    Part of the transport carve-out (ADR-0003): the dispatcher owns the outbox
+    contract, so the one cross-schema reader stays here rather than growing a
+    per-consumer SELECT. Used by MOD-013's nightly rollup to raise the
+    ``outbox_backlog`` / ``outbox_dead_letter`` alerts (plan-phase14 §11).
+
+    Counts are read on the caller's connection, so a caller inside a
+    transaction sees its own uncommitted writes - the same snapshot the rollup
+    reads its own aggregates from.
+    """
+    counts: list[OutboxRowCounts] = []
+    for target in tables:
+        table = outbox_table(target.table_name, target.schema)
+        statement: Select[tuple[str, int]] = (
+            select(column("status", String), func.count().label("rows"))
+            .select_from(table)
+            .group_by(column("status", String))
+        )
+        result = await connection.execute(statement)
+        by_status = {row[0]: int(row[1]) for row in result.all()}
+        counts.append(
+            OutboxRowCounts(
+                table=target,
+                pending=by_status.get(OUTBOX_STATUS_PENDING, 0),
+                inflight=by_status.get(OUTBOX_STATUS_INFLIGHT, 0),
+                dead_letter=by_status.get(OUTBOX_STATUS_DEAD_LETTER, 0),
+            )
+        )
+    return tuple(counts)
 
 
 async def reclaim_stale_inflight(
@@ -202,13 +410,22 @@ async def claim_pending_rows(
     ``next_attempt_at`` is NULL (published but never claimed) or has passed
     (T3b backoff window).
     """
+    include_event_types = config.include_event_types
+    exclude_event_types = config.exclude_event_types
+
+    if include_event_types is not None and not include_event_types:
+        return ()
+
+    candidates = select(target.c.id).where(
+        target.c.status == OUTBOX_STATUS_PENDING,
+        or_(target.c.next_attempt_at.is_(None), target.c.next_attempt_at <= func.now()),
+    )
+    if include_event_types is not None:
+        candidates = candidates.where(target.c.event_type.in_(sorted(include_event_types)))
+    if exclude_event_types is not None and exclude_event_types:
+        candidates = candidates.where(target.c.event_type.notin_(sorted(exclude_event_types)))
     candidates = (
-        select(target.c.id)
-        .where(
-            target.c.status == OUTBOX_STATUS_PENDING,
-            or_(target.c.next_attempt_at.is_(None), target.c.next_attempt_at <= func.now()),
-        )
-        .order_by(target.c.occurred_at)
+        candidates.order_by(target.c.occurred_at)
         .limit(config.batch_size)
         .with_for_update(skip_locked=True)
     )
@@ -227,6 +444,7 @@ async def claim_pending_rows(
             target.c.occurred_at,
             target.c.next_attempt_at,
             target.c.attempts,
+            target.c.traceparent,
         )
     )
     result = await connection.execute(statement)
@@ -243,6 +461,7 @@ def _to_outbox_row(mapping: RowMapping) -> OutboxRow:
         occurred_at=cast(datetime, mapping["occurred_at"]),
         next_attempt_at=cast(datetime, mapping["next_attempt_at"]),
         attempts=cast(int, mapping["attempts"]),
+        traceparent=cast(str | None, mapping["traceparent"]),
     )
 
 
@@ -346,6 +565,71 @@ async def record_failed_attempt(
     return None if mapping is None else str(mapping["status"])
 
 
+async def record_attempt_failure(
+    engine: AsyncEngine,
+    target: Table,
+    row: OutboxRow,
+    config: DispatcherConfig,
+    retry_message: str,
+) -> tuple[int, int]:
+    """Record one failed delivery attempt and log its outcome.
+
+    The one failure path for every class of failed delivery - a partial fan-out,
+    a missing payload model, a payload that fails reconstruction - so attempts
+    increment and backoff applies identically to each (issue #944). Wraps
+    :func:`record_failed_attempt` on its own connection, logs the resulting
+    retry or dead-letter (dead-letter lines name the event type and row id),
+    and returns ``(retried, dead_lettered)`` deltas for the poll result.
+    ``retry_message`` is the log format for the retry branch, letting each
+    failure class name its own cause.
+    """
+    async with engine.begin() as connection:
+        outcome = await record_failed_attempt(connection, target, row, config)
+    if outcome == OUTBOX_STATUS_DEAD_LETTER:
+        logger.error(
+            "outbox row %s (%s) dead-lettered after %d attempts",
+            row.event_id,
+            row.event_type,
+            row.attempts + 1,
+        )
+        return 0, 1
+    if outcome == OUTBOX_STATUS_PENDING:
+        logger.warning(
+            retry_message,
+            row.event_id,
+            row.event_type,
+            backoff_delay(row.attempts + 1, config).total_seconds(),
+        )
+        return 1, 0
+    logger.info(
+        "outbox row %s was re-claimed by another worker; not recording failure",
+        row.event_id,
+    )
+    return 0, 0
+
+
+def outbox_row_span(row: OutboxRow, table: OutboxTable) -> AbstractContextManager[Any]:
+    """The span context manager for delivering one claimed outbox row (A3b).
+
+    A messaging span (``messaging.*`` attributes) that adopts the row's stored
+    W3C ``traceparent`` as its parent, so the worker's span continues the trace
+    of the API request that produced the event (ADR-0002 delivery side, A2
+    #695). When tracing is off this is a no-op manager, so the loop is
+    unchanged.
+    """
+    return start_span(
+        "outbox.process",
+        traceparent=row.traceparent,
+        attributes={
+            "messaging.system": "caresetu.outbox",
+            "messaging.operation": "process",
+            "messaging.destination.name": table.table_name,
+            "messaging.message.id": str(row.event_id),
+            "outbox.table": table.table_name,
+        },
+    )
+
+
 async def process_outbox_table(
     engine: AsyncEngine,
     table: OutboxTable,
@@ -357,11 +641,14 @@ async def process_outbox_table(
     Reclaim and claim share one transaction (the reclaim's re-pended rows are
     immediately claimable). Each claimed row is reconstructed into a typed
     envelope and fanned out via ``dispatch``; a row whose every registered
-    subscriber handler succeeded is deleted, and a partial fan-out is recorded
-    as a failed attempt - scheduled for an exponential-backoff retry or
-    dead-lettered once ``max_attempts`` is reached (T3b, #23). The dispatcher
-    touches ``table`` (and each subscriber's own ledger, which handlers write
-    themselves) - never domain tables.
+    subscriber handler succeeded is deleted - including the vacuous case of an
+    event type with zero subscribers, which drains as a successful delivery to
+    all zero of them (issue #944) - and a failed delivery is recorded as one
+    failed attempt via :func:`record_attempt_failure`: a missing payload model,
+    a payload that fails reconstruction, or a partial fan-out all share the
+    same path - exponential-backoff retry, dead-letter at ``max_attempts``
+    (T3b, #23). The dispatcher touches ``table`` (and each subscriber's own
+    ledger, which handlers write themselves) - never domain tables.
     """
     target = outbox_table(table.table_name, table.schema)
     async with engine.begin() as connection:
@@ -373,66 +660,78 @@ async def process_outbox_table(
     retried = 0
     dead_lettered = 0
     for row in claimed_rows:
-        payload_model = registry.payload_model_for(row.event_type)
-        if payload_model is None:
-            logger.error(
-                "no payload model registered for event_type %r; leaving outbox row %s for reclaim",
-                row.event_type,
-                row.event_id,
-            )
-            continue
+        # PHASE-14A A2 (#695): when the originating API request carried a trace
+        # id, the row's stored W3C traceparent recovers it and it becomes the
+        # correlation key for this fan-out, so the worker's lines link back to
+        # the request. A row written with no request context keeps the A1
+        # fallback - the outbox event id. Bind whichever, then restore the
+        # previous context.
+        trace_token = set_trace_id(trace_id_from_traceparent(row.traceparent) or str(row.event_id))
         try:
-            envelope = envelope_from_row(row, table.schema, payload_model)
-            result = await dispatch(registry, envelope)
-        except Exception:
-            logger.exception(
-                "fan-out raised for outbox row %s (%s); leaving it for reclaim",
-                row.event_id,
-                row.event_type,
-            )
-            continue
-        fanned_out += 1
-        if not result.outcomes:
-            logger.error(
-                "no handlers registered for event_type %r; leaving outbox row %s for reclaim",
-                row.event_type,
-                row.event_id,
-            )
-        elif result.all_succeeded:
-            async with engine.begin() as connection:
-                if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
-                    deleted += 1
-                else:
-                    logger.info(
-                        "outbox row %s was re-claimed by another worker; not deleting",
+            # PHASE-14A A3b (#698): the row's span adopts the same traceparent,
+            # so the OTel span - not just the log line - continues the request.
+            with outbox_row_span(row, table):
+                payload_model = registry.payload_model_for(row.event_type)
+                if payload_model is None:
+                    logger.error(
+                        "no payload model registered for event_type %r; "
+                        "recording failed attempt for outbox row %s",
+                        row.event_type,
                         row.event_id,
                     )
-        else:
-            async with engine.begin() as connection:
-                outcome = await record_failed_attempt(connection, target, row, config)
-            if outcome == OUTBOX_STATUS_DEAD_LETTER:
-                dead_lettered += 1
-                logger.error(
-                    "outbox row %s (%s) dead-lettered after %d attempts",
-                    row.event_id,
-                    row.event_type,
-                    row.attempts + 1,
-                )
-            elif outcome == OUTBOX_STATUS_PENDING:
-                retried += 1
-                logger.warning(
-                    "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
-                    row.event_id,
-                    row.event_type,
-                    backoff_delay(row.attempts + 1, config).total_seconds(),
-                )
-            else:
-                logger.info(
-                    "outbox row %s was re-claimed by another worker; not recording failure",
-                    row.event_id,
-                )
+                    retried_delta, dead_lettered_delta = await record_attempt_failure(
+                        engine,
+                        target,
+                        row,
+                        config,
+                        "payload model missing for outbox row %s (%s); retrying in %.1fs",
+                    )
+                    retried += retried_delta
+                    dead_lettered += dead_lettered_delta
+                    continue
+                try:
+                    envelope = envelope_from_row(row, table.schema, payload_model)
+                    result = await dispatch(registry, envelope)
+                except Exception:
+                    logger.exception(
+                        "fan-out raised for outbox row %s (%s); recording failed attempt",
+                        row.event_id,
+                        row.event_type,
+                    )
+                    retried_delta, dead_lettered_delta = await record_attempt_failure(
+                        engine,
+                        target,
+                        row,
+                        config,
+                        "delivery failed for outbox row %s (%s); retrying in %.1fs",
+                    )
+                    retried += retried_delta
+                    dead_lettered += dead_lettered_delta
+                    continue
+                fanned_out += 1
+                if not result.outcomes or result.all_succeeded:
+                    async with engine.begin() as connection:
+                        if await delete_outbox_row(connection, target, row.id, row.next_attempt_at):
+                            deleted += 1
+                        else:
+                            logger.info(
+                                "outbox row %s was re-claimed by another worker; not deleting",
+                                row.event_id,
+                            )
+                else:
+                    retried_delta, dead_lettered_delta = await record_attempt_failure(
+                        engine,
+                        target,
+                        row,
+                        config,
+                        "fan-out incomplete for outbox row %s (%s); retrying in %.1fs",
+                    )
+                    retried += retried_delta
+                    dead_lettered += dead_lettered_delta
+        finally:
+            reset_trace_id(trace_token)
 
-    return TablePollResult(
+    poll_result = TablePollResult(
         table=table,
         stale_reclaimed=stale_reclaimed,
         claimed=len(claimed_rows),
@@ -441,6 +740,14 @@ async def process_outbox_table(
         retried=retried,
         dead_lettered=dead_lettered,
     )
+    # A3b: surface the pass outcome as counters (no-op when metrics are off).
+    record_outbox_poll(
+        claimed=poll_result.claimed,
+        fanned_out=poll_result.fanned_out,
+        retried=poll_result.retried,
+        dead_lettered=poll_result.dead_lettered,
+    )
+    return poll_result
 
 
 async def run_poll_loop(

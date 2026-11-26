@@ -11,9 +11,19 @@ wall clock.
 from __future__ import annotations
 
 from app.gateway.idempotency import (
+    _DEFAULT_TTL_SECONDS,
     _MAX_TRACKED_KEYS,
     IdempotencyStore,
 )
+from modules.iam.facade import OTP_TTL_SECONDS
+
+
+def test_default_ttl_derives_from_the_otp_lifetime_constant() -> None:
+    """WI-4 (#335): the gateway idempotency window is sourced from the OTP
+    lifetime constant by construction, so a retried mutation stays replayable
+    for exactly as long as the issued challenge is usable and the two values
+    cannot drift apart."""
+    assert _DEFAULT_TTL_SECONDS == OTP_TTL_SECONDS
 
 
 def test_put_then_get_returns_the_stored_result(fake_clock) -> None:

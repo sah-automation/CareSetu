@@ -58,19 +58,28 @@ def test_event_id_must_be_uuid() -> None:
 
 def test_event_type_must_be_domain_action() -> None:
     for invalid in (
-        "no_dot",
         "Domain.action",
         "domain.Action",
         "domain.",
         ".action",
         "9dom.action",
+        "domain",
+        "9dom_9action",
+        "Domain_action",
+        "",
     ):
         with pytest.raises(ValidationError):
             _envelope(event_type=invalid)
 
 
 def test_event_type_accepts_registry_shapes() -> None:
-    for valid in ("patient.registered", "pre_summary.low_confidence", "phase1.round_trip"):
+    for valid in (
+        "patient.registered",
+        "pre_summary.low_confidence",
+        "phase1.round_trip",
+        "record.accessed",
+        "record.denied",
+    ):
         assert _envelope(event_type=valid).event_type == valid
 
 

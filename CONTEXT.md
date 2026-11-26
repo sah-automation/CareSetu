@@ -4,16 +4,20 @@
 
 ## Doc inventory
 
-| File                                     | Purpose                                                                                                              | Read when                                                 | ~Tokens  |
-| :--------------------------------------- | :------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------- | :------- |
-| `CONTEXT.md` (this file)                 | Navigation guide - what to read/skip                                                                                 | Always (first)                                            | ~0.5K    |
-| `docs/prd/project-prd.md`                | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks                                                             | Every build; the §4.x section for the features in scope   | ~13K     |
-| `docs/architecture/system-context.md`    | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                              | When touching integrations, actors, or boundary rules     | ~6K      |
-| `docs/architecture/internal-modules.md`  | HOW modules work: per-module specs (`MOD-001..011`), sync matrix §4.1, event registry §4.2, traceability §5          | Every build; specs for the modules you touch              | ~14K     |
-| `docs/roadmap/implementation-roadmap.md` | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14`), phased traceability §3                                      | Every build; the section for the current phase            | ~16K     |
-| `docs/adr/*`                             | Resolved decisions (ADR-0001: AMB-006 confidence split, 0.70 threshold, forced-review gate)                          | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope | ~1K each |
-| `docs/standards/*`                       | Top-level rules per area (coding, api, integrations, errors, security, AI)                                           | The relevant standard before working in its area          | ~2K each |
-| `docs/agents/briefs/*`                   | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket | The ticket's own brief, before anything else              | ~2K each |
+| File                                       | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Read when                                                                                                                                                                                                                                      | ~Tokens  |
+| :----------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------- |
+| `CONTEXT.md` (this file)                   | Navigation guide - what to read/skip                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Always (first)                                                                                                                                                                                                                                 | ~0.5K    |
+| `docs/prd/project-prd.md`                  | WHAT we build: epics, features (`FEAT-xxx`), NFRs, risks - the risk register (§7.2) carries the accepted observability-vendor risk as `RISK-EVAL-007`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Every build; the §4.x section for the features in scope                                                                                                                                                                                        | ~13K     |
+| `docs/architecture/system-context.md`      | External actors (`ACT-xxx`) + third-party integrations (`EXT-001..004`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | When touching integrations, actors, or boundary rules                                                                                                                                                                                          | ~6K      |
+| `docs/architecture/internal-modules.md`    | HOW modules work: per-module specs (`MOD-001..011` plus `MOD-013` observability and `MOD-014` ops, and the two delivered schema-less seams - the facade-only `MOD-012` doctor console and the `profile-media` storage adapter), sync matrix §4.1, event registry §4.2, traceability §5                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Every build; specs for the modules you touch                                                                                                                                                                                                   | ~15K     |
+| `docs/roadmap/implementation-roadmap.md`   | IN WHAT ORDER we build: per-phase specs (`PHASE-0..14B` - the release gate split into `PHASE-14A` observability and `PHASE-14B` release readiness - plus delivered chassis inserts `PHASE-2.5`/`PHASE-2.6`/`PHASE-8.1`), phased traceability §3                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Every build; the section for the current phase                                                                                                                                                                                                 | ~17K     |
+| `docs/plans/plan-phase14-observability.md` | The `PHASE-14A` plan: observability topology, `MOD-013` + the `observability` schema, rollup, operator API/UI, SLOs, the delivered Batch 1 and Batch 3 scopes, and Appendix A (the carried-forward hardening backlog)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Observability, cost metering, alerting, or operator-dashboard work; its §12 (Batch 1), §12.1 (Batch 3) and §13 (what is still deferred) are the scope authority                                                                                | ~9K      |
+| `docs/adr/*`                               | Resolved decisions (ADR-0001: confidence split; ADR-0005: dual JWT storage; **ADR-0007: split-origin deploy + session-transport invariants**; **ADR-0016: partner login method - phone-OTP**; ADR-0024/0025/0026: observability topology, the `MOD-013` `observability` schema, and OpenTelemetry adoption; **ADR-0027/0028/0029: the Batch 3 design records** - the cost attribution model, product analytics in the system of record, and the console/Grafana split with the cardinality firewall; **ADR-0030: the service level objectives** and symptom-based alerting; **ADR-0031: the accepted AI-tracing-vendor compliance risk**; **ADR-0032: the webhook-signature monitoring deferral**; **ADR-0033: operator tiers**; **ADR-0034: MOD-014 ops module**; **ADR-0035: CSP report-only**) | When a decision or `AMB`/`CFL`/`GAP` baseline is in scope; ADR-0007 before ANY auth/session/CORS/middleware/deploy-env work; ADR-0030 before adding or changing an alert; ADR-0031 before touching AI span metadata or the evaluation pipeline | ~1K each |
+| `docs/design/ui-blueprint.md`              | Top-level UI design for all five surfaces: navigation model, design system, per-surface IA, cross-cutting patterns                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Any UI/frontend build; the surface sections you touch                                                                                                                                                                                          | ~10K     |
+| `docs/research/ui-component-library.md`    | Component-library evidence and migration notes behind the blueprint's §1.1 recommendation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | When adopting UI components or touching bundle budget                                                                                                                                                                                          | ~2K      |
+| `docs/standards/*`                         | Top-level rules per area (coding, api, integrations, errors, security, AI)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | The relevant standard before working in its area                                                                                                                                                                                               | ~2K each |
+| `docs/agents/briefs/*`                     | Per-ticket **context packs** (read-list, do-not-read, baseline/done-verify) - the contract for implementing a ticket                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | The ticket's own brief, before anything else                                                                                                                                                                                                   | ~2K each |
+| `docs/agents/latency-probe.md`             | The backend latency measurement harness (#901): how to run `npm run check:latency`, interpret the p50/p95/server-split table, exit codes, and auth resolution - the before/after verification gate the latency tickets cite                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Any latency work; verifying a latency change                                                                                                                                                                                                   | ~1K      |
 
 ## Build-session protocol
 
@@ -27,6 +31,8 @@ Follow this order and stop when you have what you need:
 6. **`docs/standards/*`** - the standard(s) relevant to the area you're editing.
 
 Read only the sections you need. If a task stays confined to one module or phase, do not pull in unrelated sections.
+
+**Hard gate:** if the task touches session/auth cookies, CORS, middleware or proxy route guards, `credentials` options, deploy env vars, or Vercel/Render config, read **`docs/adr/0007-split-origin-deployment-session-invariants.md`** before editing. Production is split-origin (Vercel frontend + Render backend) while localhost is same-origin, so designs that pass locally can still fail only when deployed - this has caused incidents #119/#159/#208.
 
 ## Cross-reference rule
 
@@ -95,6 +101,216 @@ _Avoid_: dedupe, merge (there is no merge - concurrent writers converge on the w
 The canonical stored form `+91XXXXXXXXXX`, normalized server-side from the 10-digit Indian mobile number; the country code is derived server-side and never trusted from the client.
 _Avoid_: mobile number (when meaning the stored canonical form), client-supplied country code
 
+### Record & consent
+
+**record scope**:
+The closed enum of record areas a consent grant may name - `consultations | prescriptions | lab_results | metrics | health_background | full_record`; `check_consent` matches on (counterparty, scope). Never per-entry, never free-form.
+_Avoid_: data category (when meaning a grant's scope), permission level
+
+**health background**:
+The patient-authored snapshot of their own health - blood group, conditions, allergies, medications, immunizations, and family history - plus height/weight entries kept as a timestamped time series. Owned by `MOD-003` in the `health` schema as its own patient-authored tables (`health_background_snapshots`, `health_background_metrics`), never a care-generated record entry; surfaced to a doctor only through a `health_background` consent check, fail-closed on denial with the same access-history and egress-disclosure discipline as any consented record read. Its first write carries the first-save acknowledgment (`ADR-0018`).
+_Avoid_: health record (that is the `MOD-003` care-generated timeline), patient history (when meaning the stored snapshot), health profile (that is the `MOD-001` identity profile)
+
+**first-save acknowledgment**:
+The one-time PHI confirmation a patient gives on the first health-background write, before anything persists: it states the snapshot becomes visible to their live-relationship doctors and records a normal `health_background` standing grant to each of them. Refused (not defaulted) when absent on a first save, stamped once and never re-prompted, and never re-granting afterwards.
+_Avoid_: consent checkbox, opt-in banner (it is a write-time gate, not a passive notice)
+
+**profile media**:
+The private, encrypted object storage for profile photos: one `profile-media` bucket, never public, holding role-prefixed keys - `patient/{user_id}/...` and `doctor/{user_id}/...`, each object AES-256-GCM encrypted at rest. Backend-only (service-role) writes; SQL stores only the object key (`photo_ref` on the patient or partner profile row), and every read streams decrypted bytes through the backend, so a leaked URL discloses nothing. Delivered as the `ProfileMediaStore` adapter (protocol, local + object-storage backends, factory, retry/circuit-breaker wrapper) behind ADR-0020.
+_Avoid_: avatar URL, public image link, media bucket (that is the intake/`rx_input` media store)
+
+**standing grant**:
+One live consent authorization for one (patient, counterparty, record scope) triple, effective from grant until revoked or superseded by a re-grant. "Per-action" consent means this per-purpose targeting, never a one-shot token. Pick-at-doctor (Phase 8.1) is the deliberate multi-grant moment: it records `consultations`, `prescriptions`, and `health_background` standing grants together, atomically in the same transaction as the doctor assignment, so the AI drafting assistant's consent-gated read can pass and the picked doctor's health-background section unlocks (#663).
+_Avoid_: per-action token, one-shot consent
+
+**grant lineage**:
+The identity of a consent across re-grants - the (patient, counterparty, record scope) triple; referenced to patients as `C-YYYY-NNN`, with versions counting the re-grants inside it.
+_Avoid_: consent relationship
+
+**consent version**:
+The immutable state of a grant lineage after each grant or re-grant; egress receipts cite lineage id + version exactly as they authorized.
+_Avoid_: consent update, consent edit
+
+**revocation**:
+The terminal consent transition: stops all future access by the counterparty immediately, durably written before treated inactive, and recorded. Data already disclosed while the grant was live stays outside platform control - deletion requests are operator-mediated (`GAP-005` baseline).
+_Avoid_: recall, retroactive revoke (neither happens)
+
+### Partner onboarding & gated activation (Phase 5)
+
+**partner identity**:
+The one stable entity per registration that carries the partner lifecycle status (`[Registered] → [Under Verification] → [Active] | [Rejected]`), separate from the display profile and credential metadata. Mirrors patient identity in `MOD-001`.
+_Avoid_: partner profile (that is credentials/metadata), partner account (that is the `iam` credential account)
+
+**partner type**:
+The closed enum from `doctor | lab | chemist` that fixes which credential types a partner must submit and how verification branches.
+_Avoid_: provider kind, role (that is an `iam` scope)
+
+**credential type**:
+The closed enum of professional documents a partner submits per partner type - e.g. `medical_registration | lab_license | drug_license` - giving deterministic verification routing, operator-facing labels, and a queryable `partner_credentials` key.
+_Avoid_: document type (when meaning the free-form upload), license category
+
+**two-step verification**:
+The `AMB-003` resolution: Step 1 is an automated pre-filter (format + duplicate) that auto-rejects obvious bad submissions without queueing; Step 2 is the manual activation gate where every Step-1-pass clears through the operator queue. There is no auto-approve path - no partner activates without human review.
+_Avoid_: automated verification, auto-approve (there is none)
+
+**verification round**:
+An individual pass through the verification process (first-time or re-verification), each emitting `partner.verification_started` with a round/version in the payload so the audit trail distinguishes rounds.
+_Avoid_: verification attempt (that is the Step 1 check), resubmission count
+
+**credential document**:
+A sensitive-class upload (a partner's professional identity artifact, e.g. license photo, registration cert) held in the `partner/` object-storage prefix, encrypted at rest, readable only by the owning partner and the operator during review, and logged on every operator view. Not PHI, but access and retention are restricted. Deleted 30 days after permanent rejection/closure.
+_Avoid_: credential (that is the structured record), registration proof, supporting file
+
+**grace window**:
+The fixed period (7 days, configurable) an `[Active]` partner keeps active while newly submitted credentials are reverified; on lapse without a decision the partner auto-drops to `[Under Verification]`; on verification failure they go `[Rejected]` with `credential.invalidated` firing.
+_Avoid_: suspension grace, review buffer
+
+**rejection appeal**:
+The rate-limited path for a `[Rejected]` partner: re-submit corrected credentials (a new verification round) or file a one-time appeal that re-enters the operator queue. Guarded to prevent queue spam (max 3 re-submissions before cooldown).
+_Avoid_: re-registration (that is a fresh partner identity), complaint
+
+**credential account**:
+The `MOD-001` login record a partner gets at registration - created synchronously through the `MOD-002 → MOD-001` facade seam (`create_credential_account`, ADR-0010) in the same transaction as the partner profile, one per partner identity, bound to the normalized phone. Distinct from the partner profile (the `partner` schema row) and from the role grant (async, activation-gated); it is what a returning partner logs into.
+_Avoid_: partner account (when meaning the `iam` row - say credential account), login profile
+
+**partner login**:
+Phone + SMS one-time code, served on dedicated `POST /v1/auth/partner/*` routes (ADR-0016) so a partner login can never mint a patient session, grant the patient role, or emit a `patient.*` event. Works in every lifecycle state except `Suspended`; the demo code read-back matches the patient wizard. Supersedes the blueprint's earlier "email + password for all staff roles / No OTP for staff".
+_Avoid_: staff login (that phrase bundles partner and operator login together), email/password login
+
+**pre-activation restriction**:
+The rule that no unactivated partner reaches patient-facing pages. It is enforced by which routes the partner self-service surface exposes per state (status, rejection reason, and appeal reachable in every state except suspended; credential submission gated; consultation fee only when active; suspended is a contact-support-only surface) - never by a separate, reduced kind of login.
+_Avoid_: restricted login kind, limited-scope login (there is one partner login for every state)
+
+**operator login**:
+Phone + authenticator-app (TOTP), MFA-bound, for the trusted operator group only; the operator entry stays hidden from the partner-facing login page and is untouched by partner login. The platform distinguishes phone-OTP (patient and partner) from operator-TOTP (operators).
+_Avoid_: staff login (when meaning a shared partner+operator entry), password login
+
+**operator**:
+A member of the trusted closed group that runs the verification queue; bootstrapped at deploy and grown by operator-invites-operator, never self-registering, and MFA-bound at login.
+_Avoid_: admin, moderator (when meaning the operator console role)
+
+**operator decision**:
+An individual, attributed approve/reject action on a verification round; reason is required on reject, every view of a partner's credentials is itself audited (`partner.credential_reviewed`), and bulk actions are forbidden in Phase 5 so every decision maps to an actor.
+_Avoid_: moderation action, verdict
+
+**egress log**:
+The consent-schema ledger of successful, consent-authorized PHI disclosures - what left, when, to whom, under which consent id + version; the source of a record entry's "who has seen this" trail.
+_Avoid_: access log (that is the record access history), audit log (that is the Phase 4 engine)
+
+**record access history**:
+The health-schema ledger of counterparty read attempts on a record - partner reads and denied attempts, never the owner's own reads (it answers "who ELSE has seen my record"); feeds the patient's trust view (`FEAT-003`, Phase 4). Consent-scoped reads record the record scope; surfaces that are not entry-keyed record a surface marker instead (`doctor_patients_list`, `doctor_patient_detail` for the doctor console), so revoking consent never rewinds the historical "viewed where" signal.
+_Avoid_: audit trail, disclosure log (that is the `egress log`)
+
+### Provider directory & credential validity (Phase 6)
+
+**provider**:
+Not a domain term. The patient-facing display word for an `[Active]` partner - legal in UI copy and the public profile route, never in schema, events, model, or lifecycle language. A provider stops existing the moment its partner leaves `[Active]`.
+_Avoid_: using "provider" where the entity/status/lifecycle is meant - say partner
+
+**locality**:
+The neighbourhood a practice sits in. Distinct from the broader service area.
+_Avoid_: area, sector, colony
+
+**service area**:
+DEMOTED, deliberately (`batch #599`). The table, its seeded Daltonganj row and the `service_area_id` column all still exist and registration still resolves them, but no user-visible surface renders the name any more - search has always used the 25 km peri-urban radius as its real constraint, so the vocabulary was a second, unrepresented notion of "where". The terms and column are **kept, not deleted**: removing them is separate cleanup and is explicitly out of scope. If you grep for "service area" and find it still wired up, that is this decision standing, not work someone forgot.
+_Avoid_: using it in patient- or doctor-facing copy; treating the seeded row as the search radius
+
+**clinic name**:
+The optional clinic or hospital name for a practice; distinct from the doctor's own name. Not treated as the display name for the doctor.
+_Avoid_: treating it as the display name, practice name (when conflated with the doctor name)
+
+**directory entry**:
+The single read-side row per `[Active]` partner that makes them discoverable in search: one entry per partner identity, one geo point (the derived practice position, written whenever the declared address is saved, rather than frozen at activation), the partner type, specialty (doctors only), and the verified indicator. One partner = one entry; multiple practice locations are a future extension, never a Phase 6 shape.
+_Avoid_: provider record, listing
+
+**specialty**:
+The label from a closed pick-list (doctors only) of values of the kind of care an `[Active]` doctor offers. Doctors may hold one or more specialty values from this closed list; the list is not null. Labs and chemists carry no specialty; the field is never free-form. Homepage chips pre-seed the search filter over it.
+_Avoid_: consultation type, expertise
+
+**verified**:
+The derived indicator on a directory entry: true iff the partner is `[Active]` AND every required credential is unexpired and unrevoked. Never stored - computed from activation state + credential dates, always agreeing with search visibility: if the tick is gone, the card is gone. Credentials are verified; profile detail is declared, and verified gains no coverage of the declared fields.
+_Avoid_: verification badge (when meaning a stored flag), approved
+
+**credential expiry**:
+One of the two `credential.invalidated` triggers: the credential's recorded date passes without renewal. Detection is lazy-on-read (an expired partner never appears, even mid-day) plus a daily sweep that records the official close-out; deliberately no background scanner.
+_Avoid_: license expiry in model language (fine in UI copy), auto-deactivation (that implies a scanner)
+
+**credential revocation**:
+The other `credential.invalidated` trigger: the credential is taken away by authority or operator decision. Same directory effect as expiry (hidden instantly, tick removed) but the reason is recorded on the event, and the partner keeps the renewal path - no dead-end state is invented.
+_Avoid_: suspension
+
+**wider-area fallback**:
+The `FEAT-004` no-results shape: when no directory entry matches the patient's filters within the Daltonganj peri-urban scope, relax only the location constraint (keep type and specialty filters), show nearest-first, and label the results "outside your area". The patient is never silently served results that dropped a filter.
+_Avoid_: fuzzy match, relaxed filters
+
+### Consultation orchestration & e-prescription (Phase 8)
+
+**care case**:
+The per-visit work record in `MOD-006` (the `care` schema), born the moment its pre-summary is finalized, one per visit, carrying the patient, the attending doctor, and the prescription lineage.
+_Avoid_: case (bare), visit record (the visit is the off-platform consult that precedes the case), consultation (that is the off-platform event)
+
+**case stage**:
+The closed enum dwell state of a care case: `PreSummary → PrescriptionPending → Closed`. `ConsultComplete` is not a stage - it is the milestone on the `PreSummary → PrescriptionPending` transition. A rejected draft never changes the case stage; `Closed` comes only from the doctor's deliberate close-without-prescription.
+_Avoid_: case status (the column is `stage`, and status implies free transitions), lifecycle phase
+
+**consult complete milestone**:
+The audited marker recorded on the `PreSummary → PrescriptionPending` transition when the doctor closes the off-platform consult on-platform in one action - a milestone on the transition, never a dwell state. It fires `case.consult_complete` and the patient's single notification, then the case enters prescription pending.
+_Avoid_: consult complete state, consult-closed flag
+
+**finalized pre-summary**:
+The Phase-7 pre-summary in its terminal `final` state - the only summary the handshake gate `get_finalized_pre_summary` ever returns. `mark_consult_complete` is blocked while none exists, so a prescription-stage case can never arise from an unreviewed summary.
+_Avoid_: completed summary, reviewed summary (that is the intermediate `reviewed` state, not the gate's `final` state)
+
+**e-prescription**:
+The issued, immutable prescription a doctor approves and the patient's record stores: the frozen approved revision, timestamped and attributed to the issuing doctor, with no supersede or void path - corrections require a fresh visit. `get_approved_prescription` serves only these.
+_Avoid_: digital prescription, electronic prescription, Rx (in model language; fine in UI copy)
+
+**prescription source**:
+The closed enum on a prescription recording where its revision came from: `ai_draft` (from the drafting assistant's immutable draft snapshot) or `manual` (the doctor authored `rx_items` directly). Keeps the audit trail honest about AI involvement.
+_Avoid_: origin, provenance
+
+**draft snapshot**:
+The immutable AI-draft artifact captured when `request_rx_draft` produces a draft - the frozen baseline against which `edited_yn` is derived on approval. Editing never touches it; the working revision (the current `Draft`/`DoctorReviewed` row and its `rx_items`) is the only thing that changes.
+_Avoid_: AI output, stored draft
+
+**drafting cap**:
+The guard that a new AI draft is only generated while the care case has fewer than 2 rejected drafts - so at most two AI drafts per care case (`MAX_REJECTED_DRAFTS = 2`, `can_create_draft(rejected_count) = rejected_count < 2`); a rejected draft never auto-closes the case. The cap limits only AI draft generation; manual authoring, edit-and-approve, and close-without-prescription stay open regardless, so an AI outage never strands a patient's visit.
+_Avoid_: retry limit, draft budget
+
+**revision-freeze approval**:
+The core issuance guarantee: approval saves and freezes exactly the doctor's working revision (the current `Draft`/`DoctorReviewed` row and its `rx_items`), sets `issued_at` and `attributed_doctor`, and derives `edited_yn` against the immutable draft snapshot. If the revision save fails the approval is blocked - the raw AI draft is never approvable, so a lost edit can never mean a wrong prescription issued.
+_Avoid_: one-click approve, approve-draft
+
+**verification declaration**:
+The mandatory double-check: `approve_prescription` accepts only a `verification_declaration = true`, stored on `care_rx_approvals` with `declared_at`. A declaration-less approval is rejected, so no prescription is issued without the doctor's recorded, double-checked review.
+_Avoid_: consent, agree-checkbox
+
+**edited_yn**:
+The derived flag on an approval computed by comparing the frozen revision against the immutable draft snapshot - `edited` tells an auditor whether the issued prescription differs from the AI draft. Never set by hand or from client input.
+_Avoid_: modified flag, changed flag
+
+**doctor input**:
+A voice note or photo the doctor submits as prescribing input for the AI drafting assistant, stored as a sensitive-class object in the `rx_input/` storage prefix. Any use of the patient's record history to shape an AI draft goes through consent-gated reads (`check_consent`), fail-closed.
+_Avoid_: media upload, attachment
+
+**close-without-prescription**:
+The doctor's deliberate terminal action that moves a care case to `Closed` with no prescription - recorded with a close reason and leaving the pending list. A rejected draft never auto-closes the case; only this explicit action closes a visit when no medicine is needed.
+_Avoid_: close case, end-visit-without-prescription
+
+### Doctor console & care loops (doctor-console/profiles batch)
+
+**care loop**:
+The continuous patient-doctor relationship where a patient returns to the same doctor across visits; the doctor Patients list is the care-loop anchor - a patient stays listed while any live standing grant remains or a care case is open, and drops from Current only once both the last grant is revoked and no open care case remains.
+_Avoid_: patient-doctor bond, follow-up relationship
+
+**doctor patients list**:
+The derived, consent-gated Current/Past patient list for a doctor - Current = live standing grant (any record scope) or an open care case; Past = closed care cases only with no live grant. Never stored; recomputed from the standing-grant lineage and care cases on every read, with no patient-relationship table. The two buckets are the wire vocabulary (`current` / `past`); the read is paginated and name-searchable, and every row actually served is access-logged (`ADR-0019`).
+_Avoid_: patient registry, my patients (that is UI copy)
+
+**patient detail section**:
+One block of the doctor console's per-patient read, gated on its own consent scope: contact/photo on any live grant, consultation history on `consultations`, health background on `health_background`. A denied section renders locked, never an error, and never a leak; a patient with no live grant at all answers every section locked (the detail read still returns 200 and leaks nothing), while the photo stream itself fails closed with 403.
+_Avoid_: patient record (that is the `MOD-003` timeline), detail tab
+
 ### Event bus & module seams
 
 **outbox**:
@@ -122,7 +338,7 @@ No cross-schema imports, no cross-schema SQL, no cross-schema foreign keys; the 
 _Avoid_: bounded-context separation (when meaning this CI-enforced rule)
 
 **edge**:
-The deployment boundary - the reverse proxy (Caddy/nginx) that terminates TLS at the VM perimeter. Distinct from the in-app gateway.
+The deployment boundary - the reverse proxy (Caddy/nginx) that terminates TLS at the VM perimeter. Distinct from the in-app gateway. (The current Vercel+Render demo runs without this edge - see split-origin deployment; the edge arrives with the same-origin VM path.)
 _Avoid_: gateway
 
 **gateway**:
@@ -131,4 +347,57 @@ _Avoid_: API proxy
 
 **audit event**:
 `audit.event` - published by each owning module into its own outbox in the same transaction as the audited change, and consumed by MOD-011 which appends to the audit schema. Never synthesized by the dispatcher.
-_Avoid_: audit log entry
+
+### Observability (Phase 14A)
+
+**system of record**:
+The Postgres `observability` schema for cost, quality, latency and business aggregates (`MOD-013`, `PHASE-14A`). Vendor retention limits (Grafana ~14 days, Sentry ~5k events/mo, Langfuse ~50k observations/mo) and vendor churn never lose the decision data, because the vendors are read-throughs over it, not the store. The term generalizes: for AI cost the system of record is Postgres, for rendered pages it is the client.
+_Avoid_: source of truth (ambiguous - say what is true), vendor database
+
+**observability aggregates**:
+The read-side rollups in the `observability` schema - per-day AI usage, per-provider cost budget and provider health, a registry-driven business-daily registry, and the alert feed. They are telemetry, never a domain bounded context: they are filled by consuming outbox events into their own schema, never by reading another module's tables, and they carry no PHI - pseudonymous ids and metrics only.
+_Avoid_: analytics tables, reporting database
+
+**attribution edge**:
+The one-row-per-intake record of which doctor an intake belongs to, written by `MOD-013` from the `intake.doctor_assigned` event and held in the `observability` schema. It is the only legal path to per-doctor cost attribution: a join to the care or partner tables is forbidden by the module isolation rule, so the pairing travels as an event and a consumer learns it only because the event said so. The edge holds the intake's current doctor, so a re-pick moves it.
+_Avoid_: doctor-spend table, attribution join, doctor assignment row (that is the `care` module's own)
+
+**cardinality firewall**:
+The committed OpenTelemetry collector configuration that bounds metric series cardinality before export - three status classes, a fixed HTTP-method vocabulary, no raw path or host labels, native histograms. It is the one place the free tier's ten-thousand-active-series ceiling is enforced, so the application never has to know the vendor's budget.
+_Avoid_: metric filter, sampling (sampling is the SDK's own choice, the firewall is the collector's)
+
+**symptom alert**:
+An alert that fires on something a user, the business or the operator experiences - failing requests, work that is not finishing, an upstream refusing service, spend departing from an actor's own history. An internal cause (a function's p95, a provider's success rate) is measured and shown but never paged, because no user experiences it.
+_Avoid_: cause alert, technical alert, threshold alert
+
+**accepted risk**:
+A risk the platform has decided to carry, recorded with its mitigation and the trigger that would reopen it - not a resolved issue and not an oversight. The AI tracing vendor's free tier (no healthcare compliance agreement, no healthcare data region, two users) is the standing one, mitigated by PHI-free metadata behind a hard allow-list and evaluations over a synthetic golden dataset.
+_Avoid_: deferred issue, known problem, accepted issue
+
+### Split-origin deployment (ADR-0007)
+
+**split-origin deployment**:
+The production/demo topology: Vercel serves the frontend and Render serves the backend as two different sites, so browsers apply cross-site cookie rules between them; localhost dev is same-origin and masks every one of those rules. Session-transport changes are reasoned against this topology first (`ADR-0007`) and verified by live gates, never by local runs alone.
+_Avoid_: multi-domain setup, separated hosting (when meaning this specific Vercel+Render topology)
+
+**presence-hint cookie**:
+`caresetu_authed=1` - a secret-free, first-party cookie written/cleared by the frontend's `saveSession()`/`clearSession()` and the ONLY cookie the edge guard (`src/proxy.ts`) reads. Attributes are deliberate: `SameSite=Lax`, `Secure` on https, fixed 30-day window (not the JWT TTL). The backend's `caresetu_session` httpOnly cookie never reaches the frontend origin under split hosting.
+_Avoid_: session cookie (that name belongs to the backend's httpOnly JWT cookie), auth cookie, JWT cookie (when meaning the hint)
+
+### PHASE-14B Batch 2 (Operator tiers, ops config, security monitoring)
+
+**operator tier**:
+The closed enum on an operator profile distinguishing `admin` from `operator`. Only admins may invite operators, change tiers, change active state, and access admin-gated settings writes. The tier is carried as a JWT claim, derived on refresh, and exposed on the gateway principal. New invites default to `operator`. Tier changes are guarded: an operator cannot change their own tier or active state, and the last admin cannot be demoted or deactivated.
+_Avoid_: operator role (when meaning the tier distinction), admin flag (when meaning the tier)
+
+**ops module (MOD-014)**:
+The platform's operational configuration module - effective settings read with source precedence (database override → environment → default), allowlisted settings writes with versioned history and audit, feature flags with runtime/restart-required typing, and notification routing configuration. It owns the private `ops` schema (the thirteenth `MODULE_SCHEMAS` entry) and exposes operator-gated HTTP surfaces. A configuration module, not a domain bounded context - it publishes `audit.event` and owns no domain tables.
+_Avoid_: settings module (when meaning the ops schema), config service
+
+**CSP report-only**:
+The `Content-Security-Policy-Report-Only` header mode that instructs the browser to send violation reports to a collector endpoint without blocking resources. Used to validate a CSP before enforcing it. The collector is public, rate-limited, caps reports at 16 KB, normalizes both CSP report formats, aggregates daily by directive/disposition/blocked-source/document-path, returns 204, and never stores raw reports. The reporting directives are omitted when the build-time collector URL is unset.
+_Avoid_: CSP enforce (when meaning report-only), CSP monitor
+
+**webhook signature monitoring deferral**:
+An explicit deferral of webhook-signature failure monitoring because no inbound webhook receiver exists today. The event name `webhook_signature_failure` and alert kind `webhook_signature_failure` are reserved in the registries. A decision to add an inbound webhook receiver reopens this deferral.
+_Avoid_: webhook monitoring (when meaning the deferred inbound signature verification)

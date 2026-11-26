@@ -28,7 +28,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-_GATED_DOMAINS = ("patient", "otp")
+_GATED_DOMAINS = ("patient", "otp", "partner")
 _BINARY_SNIFF_BYTES = 1024
 _BACKEND_PACKAGE = Path(__file__).resolve().parents[1]
 

@@ -9,28 +9,108 @@ adapter, clock - is resolved once from ``Settings`` and stored on
 protected route that proves the edge admit/deny.
 """
 
+import asyncio
+import contextlib
+import logging
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated, Literal, cast
 
-from fastapi import Depends, FastAPI, Request, status
+from fastapi import Depends, FastAPI, File, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
-from app.config import Settings, get_settings
-from app.gateway.errors import register_gateway_error_handlers
-from app.gateway.idempotency import IdempotencyStore
+from app.config import APP_VERSION, Settings, get_settings
+from app.db import create_engine, create_read_replica_engines, dispose_engine
+from app.db.read_replica import ReadReplicaMiddleware
+from app.gateway.errors import (
+    CODE_INTERNAL_SERVER_ERROR,
+    MESSAGE_INTERNAL_SERVER_ERROR,
+    ErrorEnvelope,
+    error_response,
+    register_gateway_error_handlers,
+)
+from app.gateway.http_counter import HttpCounterMiddleware
+from app.gateway.idempotency import IdempotencyStore, run_idempotent
 from app.gateway.jwt_verify import JWTVerifyMiddleware
 from app.gateway.principal import Principal
-from app.gateway.rate_limit import RateLimitMiddleware
-from app.gateway.rbac import require_patient
+from app.gateway.rate_limit import RateLimitMiddleware, RedisRateLimitMiddleware
+from app.gateway.rbac import require_authenticated, require_patient
 from app.gateway.security_headers import SecurityHeadersMiddleware
+from app.gateway.server_timing import ServerTimingMiddleware
+from app.gateway.sharding import ShardingMiddleware
 from app.gateway.trace import TraceMiddleware, resolve_trace_id
-from modules.iam.adapters.routes import ErrorEnvelope, register_error_handlers
+from app.redis import close_redis_client, init_redis_client
+
+# Type-only import to avoid a heavy dependency at module load? Keep runtime
+# since DispatcherConfig is a simple dataclass and is needed for the annotation.
+from bus.dispatcher import DispatcherConfig
+from modules.audit.adapters.routes import router as audit_router
+from modules.audit.facade import AuditFacade
+from modules.care.adapters.routes import (
+    register_error_handlers as register_care_error_handlers,
+)
+from modules.care.adapters.routes import router as care_router
+from modules.care.case_facade import CaseConsoleFacade
+from modules.care.rx_facade import PrescriptionFacade
+from modules.consent.adapters.routes import (
+    register_error_handlers as register_consent_error_handlers,
+)
+from modules.consent.adapters.routes import router as consent_router
+from modules.consent.facade import ConsentFacade, CounterpartyDisplayNameResolver
+from modules.doctor.adapters.routes import (
+    register_error_handlers as register_doctor_error_handlers,
+)
+from modules.doctor.adapters.routes import router as doctor_router
+from modules.doctor.facade import DoctorConsoleFacade
+from modules.health.adapters.routes import register_error_handlers as register_health_error_handlers
+from modules.health.adapters.routes import router as health_router
+from modules.health.facade import HealthFacade
+from modules.iam.adapters.routes import operator_profile_router, register_error_handlers
 from modules.iam.adapters.routes import router as iam_router
 from modules.iam.adapters.sms import MockSmsAdapter, build_sms_adapter
-from modules.iam.facade import IamFacade
+from modules.iam.facade import IamFacade, PatientProfile
+from modules.intake.adapters import AI_EGRESS_COUNTERPARTY_ID
+from modules.intake.adapters.media_store import build_media_store
+from modules.intake.adapters.routes import (
+    register_error_handlers as register_intake_error_handlers,
+)
+from modules.intake.adapters.routes import router as intake_router
+from modules.intake.facade import IntakeFacade
+from modules.observability.adapters.csp_routes import router as csp_collector_router
+from modules.observability.adapters.routes import (
+    register_error_handlers as register_observability_error_handlers,
+)
+from modules.observability.adapters.routes import router as observability_router
+from modules.observability.facade import ObservabilityFacade
+from modules.ops.adapters.routes import router as ops_router
+from modules.ops.facade import OpsFacade
+from modules.partner.adapters.artifact_store import build_artifact_store
+from modules.partner.adapters.routes import directory_router
+from modules.partner.adapters.routes import (
+    register_error_handlers as register_partner_error_handlers,
+)
+from modules.partner.adapters.routes import router as partner_router
+from modules.partner.facade import PartnerFacade, ProviderProfileNotFoundError
+from modules.profile_media.adapters.media_store import build_profile_media_store
+from modules.profile_media.facade import ProfileMediaRetryPolicy
+from observability.error_capture import (
+    ERROR_KIND_UNHANDLED_EXCEPTION,
+    capture_server_error,
+    configure_error_capture,
+    route_template_for,
+)
+from observability.http_counter import configure_http_counter, record_request
+from observability.langfuse_client import flush_langfuse, get_langfuse_client
+from observability.logging import SERVICE_API, configure_logging
+from observability.otel import flush_otel, init_otel
+from observability.sentry import flush_sentry, init_sentry
+from worker.main import build_dispatcher_config, run_worker_until_stopped
+
+logger = logging.getLogger(__name__)
 
 # Browser dev/E2E origin the PWA calls the API from (:3000). The staging edge
 # reverse-proxies /api/* same-origin (deploy/edge/Caddyfile), so no CORS entry
@@ -44,10 +124,38 @@ class MockOtpResponse(BaseModel):
     code: str | None
 
 
+class SeedResponse(BaseModel):
+    """Payload of the test-only /v1/test/seed endpoint.
+
+    Returns the record entries created via synthetic outbox rows processed
+    through the real dispatcher (PHASE-3 T11, #220).
+    """
+
+    entry_ids: list[int]
+    entry_types: list[str]
+
+
+class SeedEgressResponse(BaseModel):
+    """Payload of the test-only /v1/test/seed-egress endpoint.
+
+    Inserts a synthetic egress log row to prove the egress slice renders
+    in the consent log screen (PHASE-3 T11, #220).
+    """
+
+    egress_id: int
+
+
 class HealthResponse(BaseModel):
-    """Payload of the ``/health`` route."""
+    """Payload of the ``/health`` route.
+
+    Multi-region (ARCH-P3 #856) records its region and replication intent here;
+    nothing about routing changes in this shape.
+    """
 
     status: Literal["ok"]
+    region: str = ""
+    multi_region_enabled: bool = False
+    cross_region_replication: bool = False
 
 
 class MeResponse(BaseModel):
@@ -55,11 +163,140 @@ class MeResponse(BaseModel):
 
     ``subject_id`` is the identity the token is scoped to - a patient sees
     their own record id and nothing else; ``roles`` is the resolved RBAC scope
-    from the token claim (api-standards §6).
+    from the token claim (api-standards §6). ``phone`` (PHASE-2.6 T05, #196,
+    decision D4) is the caller's E.164 number resolved from the identity
+    table, additive so older clients keep working. ``tier`` is the operator
+    authority tier from the token claim (spec #761) - ``None`` for patient and
+    partner callers.
     """
 
     subject_id: str
     roles: list[str]
+    phone: str
+    tier: str | None = None
+
+
+class PatientProfileResponse(BaseModel):
+    """Typed read-back of the protected ``/v1/me/profile`` routes (#482).
+
+    ``set`` discriminates a stored profile (``profile`` populated) from the
+    typed "not set" answer (``profile`` null) the PWA hydrates from before its
+    local-draft fallback (ticket #488). The same shape answers ``GET`` and
+    ``PUT`` so the client handles one contract. ``GET /v1/me`` stays unchanged
+    - the profile gets its own read surface by deliberate D-A decision.
+    """
+
+    set: bool
+    profile: PatientProfile | None = None
+
+
+async def _run_in_process_dispatcher(
+    stop_event: asyncio.Event,
+    settings: Settings,
+    *,
+    config: DispatcherConfig | None = None,
+    restart_delay_seconds: float = 5.0,
+) -> None:
+    """Run the outbox poll loop in-process, restarting it after a crash.
+
+    Mirrors how the standalone worker recovers under an orchestrator
+    (systemd/Render restart the crashed process): a dispatcher failure here
+    would otherwise strand outbox rows silently for the process's lifetime.
+    Each restart builds a fresh engine + scheduler via
+    ``run_worker_until_stopped``; a crash is logged + re-scheduled, and the
+    loop only exits on ``stop_event`` (graceful shutdown drain). Never grows a
+    second loop - exactly one ``run_worker_until_stopped`` coroutine is in
+    flight at any time.
+    """
+    while not stop_event.is_set():
+        try:
+            resolved_config = config if config is not None else build_dispatcher_config(settings)
+            await run_worker_until_stopped(
+                stop_event, settings=settings, config=resolved_config, host="web"
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "in-process dispatcher loop crashed; restarting in %ss "
+                "(single poll loop preserved)",
+                restart_delay_seconds,
+            )
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=restart_delay_seconds)
+
+
+# MOD-004 + composition root (#649, shared by #668): what a counterparty
+# DISPLAY NAME says about the AI intake pseudo-counterparty. It is a service
+# name, not a person's name - it must read as a machine having read the intake,
+# because the AI egress path records this id under the doctor counterparty type
+# and the patient is shown the resolved name. #653's frontend fallback
+# recognises the same id and must say the same thing.
+AI_INTAKE_COUNTERPARTY_DISPLAY_NAME = "CareSetu AI Intake Assistant"
+
+
+def _build_counterparty_display_name_resolver(app: FastAPI) -> CounterpartyDisplayNameResolver:
+    """Build the shared counterparty-name resolver (#649, #668).
+
+    One resolver serves both the consent facade (#649) and the health facade's
+    access-history read (#668). The composition root is the one place allowed
+    to know more than one module, so the resolution rules live here and
+    ``modules.consent`` / ``modules.health`` learn a doctor's practice name
+    without importing partner - the same boundary the issued-rx attribution
+    resolver below already owns, and the same degrade-to-null shape.
+
+    The order of the branches IS the rule:
+
+    1. ``intake-ai`` answers the branded service label. It is recorded under
+       the DOCTOR type by the AI egress path, so the id check runs before any
+       type parse - otherwise a machine's disclosure renders as a clinician's.
+    2. A doctor counterparty whose id parses as a partner id resolves through
+       the partner facade's public provider-profile seam and answers the
+       practice name.
+    3. Lab and chemist counterparties answer null: those partner phases have not
+       landed, and null is the honest answer the frontend's type-derived step
+       turns into words. Adding them later is a change to THIS resolver, not a
+       model change.
+
+    The partner facade is read from ``app.state`` when the resolver is CALLED,
+    never when it is built, so binding it before the partner facade exists is
+    safe. Every failure path answers None so the reads that name counterparties
+    - the consent log and the access history - never go blank on a partner
+    outage. Both warnings name the counterparty type only: never the
+    counterparty id, never PHI, never the exception payload
+    (error-handling-observability §2).
+    """
+
+    async def _resolve(counterparty_type: str, counterparty_id: str) -> str | None:
+        if counterparty_id == AI_EGRESS_COUNTERPARTY_ID:
+            return AI_INTAKE_COUNTERPARTY_DISPLAY_NAME
+        # Only a doctor counterparty addresses a partner profile; lab and
+        # chemist stay null until those partner phases land.
+        if counterparty_type != "doctor":
+            return None
+        try:
+            # An id that is not a partner id answers null too - the parse and
+            # the profile read share the catch-all, so a bad id degrades exactly
+            # like a missing profile instead of raising at the read.
+            profile = await cast(PartnerFacade, app.state.partner_facade).get_provider_profile(
+                int(counterparty_id)
+            )
+        except ProviderProfileNotFoundError:
+            logger.warning(
+                "counterparty display name unresolved for type %s; degrading to no name",
+                counterparty_type,
+            )
+            return None
+        except Exception:
+            logger.warning(
+                "counterparty display-name resolution failed for type %s; degrading to no name",
+                counterparty_type,
+            )
+            return None
+        return profile.practice_name
+
+    return _resolve
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -69,8 +306,168 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     worker (#30) can read the same resolved config from the app instance.
     """
     resolved_settings = settings if settings is not None else get_settings()
-    app = FastAPI(title="CareSetu API", version="0.1.0")
+    # ARCH-P1 #824: process identity. Generate a UUID when INSTANCE_ID is empty,
+    # store it on application state below, and log it once with environment and
+    # region. Never put it in responses.
+    resolved_instance_id = resolved_settings.instance_id.strip() or str(uuid.uuid4())
+    # PHASE-14A A1 (#694): configure structured logging once at the composition
+    # root, before any route/middleware can emit a line. Never raises - a
+    # logging setup failure degrades to stdlib defaults instead of blocking boot.
+    configure_logging(resolved_settings, service=SERVICE_API)
+    logger.info(
+        "process_instance_id instance_id=%s environment=%s region=%s",
+        resolved_instance_id,
+        resolved_settings.app_environment,
+        resolved_settings.region,
+    )
+    if not resolved_settings.circuit_breaker_enabled:
+        logger.warning("circuit breakers disabled (CIRCUIT_BREAKER_ENABLED=false); failing open")
+    if resolved_settings.degraded_mode:
+        # ARCH-P3 #855: exactly one structured warning listing the capabilities
+        # that are reduced. The list is the single source of truth for boot.
+        _reduced_capabilities = [
+            "ai_gateway (forced to mock provider)",
+            "cache_ttl (capped to degraded TTL)",
+            "http_counter_fold",
+            "llm_judge_run",
+            "evaluation_jobs",
+            "analytics_jobs",
+        ]
+        logger.warning(
+            "degraded mode enabled; reduced capabilities: %s",
+            ", ".join(_reduced_capabilities),
+            extra={"reduced_capabilities": _reduced_capabilities, "event": "degraded_mode"},
+        )
+    if resolved_settings.sharding_enabled:
+        logger.warning(
+            "sharding enabled (inert, ARCH-P3 #856): no routing performed; "
+            "shard identity %r recorded on request state",
+            resolved_settings.shard_key,
+            extra={
+                "event": "sharding",
+                "sharding_enabled": True,
+                "shard_key": resolved_settings.shard_key,
+                "shard_count": resolved_settings.shard_count,
+            },
+        )
+    if resolved_settings.multi_region_enabled or resolved_settings.cross_region_replication:
+        logger.warning(
+            "multi-region enabled (inert, ARCH-P3 #856): region=%r replication=%s; "
+            "no region selection, failover, or cross-region replication performed",
+            resolved_settings.region,
+            resolved_settings.cross_region_replication,
+            extra={
+                "event": "multi_region",
+                "multi_region_enabled": resolved_settings.multi_region_enabled,
+                "region": resolved_settings.region,
+                "cross_region_replication": resolved_settings.cross_region_replication,
+            },
+        )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # PHASE-14A A4 (#696): initialise Sentry error tracking at the app
+        # composition root when SENTRY_DSN is set; a no-op when it is empty and
+        # never a boot failure (init failures are logged and swallowed).
+        init_sentry(resolved_settings)
+        # PHASE-14A B2 (#700): wire the Langfuse client explicitly at boot so AI
+        # tracing is intentional rather than an accident of the SDK's env-global
+        # client. A no-op (returns None, SDK never imported) when the keys are
+        # absent, so boot is byte-for-byte unchanged when Langfuse is off.
+        get_langfuse_client(
+            resolved_settings.langfuse_public_key,
+            resolved_settings.langfuse_secret_key,
+            resolved_settings.langfuse_host,
+        )
+        # Seed in-process runtime toggles from the resolved settings so env-driven
+        # defaults (cache.enabled/redis.enabled) apply without a server restart.
+        from app.runtime_toggles import set_cache_enabled, set_redis_enabled
+
+        set_cache_enabled(resolved_settings.cache_enabled)
+        set_redis_enabled(resolved_settings.redis_enabled)
+        # Initialize shared Redis client for consent-status and directory-search
+        # caches (both degrade to SQL when absent/unhealthy)
+        await init_redis_client(resolved_settings)
+        # PHASE-14A B8 (#726): size the in-process error-capture buffer here, at the
+        # WEB composition root - not only in worker/main.py. This is the process
+        # that captures: a route that raises calls ``capture_server_error`` before
+        # any worker exists, so a setting applied only by the worker would leave the
+        # ceiling at its import-time default on the one path the ceiling exists to
+        # protect. The worker applies it too, so whichever process runs first has
+        # already done it. #753: the same call applies ERROR_CAPTURE_ENABLED, so
+        # this root also decides whether the seam is armed at all.
+        configure_error_capture(
+            resolved_settings.error_capture_max_records,
+            enabled=resolved_settings.error_capture_enabled,
+        )
+        # PHASE-14A B9 (#727): the per-minute HTTP counter's ceiling, applied for
+        # the same reason as the error buffer above. It is set HERE rather than in
+        # the gateway middleware because the middleware runs on the request path
+        # and must not know about Settings, and because the worker that drains it
+        # applies it too - so whichever process starts first has already sized it.
+        # #753: the same call applies HTTP_COUNTER_ENABLED, so this root also
+        # decides whether the counter is armed at all.
+        configure_http_counter(
+            resolved_settings.http_counter_max_series,
+            enabled=resolved_settings.http_counter_enabled,
+        )
+        # In-process dispatcher (worker-outbox-runbook Rule 1, Render free
+        # worker gap): when DISPATCHER_IN_PROCESS_ENABLED=true the lifespan
+        # hosts exactly one outbox poll loop (intake pipeline, audit/consent/
+        # partner handlers, credential-expiry sweep) inside the web process
+        # instead of a separate Render worker - free compute covers web
+        # services only (background workers need a paid instance). Single
+        # poll-loop rule: valid ONLY under uvicorn --workers 1 (the Render
+        # startCommand), never alongside `python -m worker.main`, never with
+        # more than one uvicorn worker.
+        dispatcher_task: asyncio.Task[None] | None = None
+        dispatcher_stop = asyncio.Event()
+        _inprocess_mode = resolved_settings.dispatcher_runs_in_process
+        if _inprocess_mode:
+            logger.warning(
+                "in-process dispatcher enabled; single poll loop under uvicorn --workers 1"
+            )
+            dispatcher_task = asyncio.create_task(
+                _run_in_process_dispatcher(
+                    dispatcher_stop,
+                    resolved_settings,
+                    config=build_dispatcher_config(resolved_settings),
+                )
+            )
+
+        try:
+            yield
+        finally:
+            if dispatcher_task is not None:
+                # Signal a graceful drain: run_poll_loop honours stop_event
+                # between passes, so the pass in flight finishes and inflight
+                # claims already under delivery drain before the loop returns
+                # (ADR-0002 §2, worker-outbox-runbook Rule 1).
+                dispatcher_stop.set()
+                await dispatcher_task
+            # Close shared Redis client on shutdown
+            await close_redis_client()
+            # PHASE-14A A4 (#696): flush queued Sentry events on shutdown so a
+            # Render spin-down does not drop them; no-op when Sentry is off.
+            flush_sentry()
+            # PHASE-14A A3a (#697): force-flush the OTel exporter on shutdown so
+            # a Render spin-down does not drop buffered spans; no-op when off.
+            flush_otel()
+            # PHASE-14A B2 (#700): force-flush buffered Langfuse AI spans on
+            # shutdown; no-op when Langfuse is unconfigured.
+            flush_langfuse()
+            # ARCH-P1 #813: dispose the primary database engine on shutdown.
+            # Worker, script, and test entry points keep constructing raw engines
+            # and manage their own disposal.
+            primary_engine = getattr(app.state, "primary_engine", None)
+            if primary_engine is not None:
+                await dispose_engine(primary_engine)
+            for replica_engine in getattr(app.state, "replica_engines", []) or []:
+                await dispose_engine(replica_engine)
+
+    app = FastAPI(title="CareSetu API", version=APP_VERSION, lifespan=lifespan)
     app.state.settings = resolved_settings
+    app.state.instance_id = resolved_instance_id
 
     # MOD-001 (PHASE-2 T3, #54): one resolved iam facade instance behind the
     # gateway stack. The engine is lazy - no connection is opened at boot. It
@@ -80,16 +477,251 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # OTP read-back route (the E2E suite and the deployed demo) - the real
     # provider is gated out of dev/test by Settings, so the adapter is a
     # MockSmsAdapter whenever it is stored.
-    engine = create_async_engine(resolved_settings.database_url, poolclass=NullPool)
+    primary_engine = create_engine(resolved_settings)
+    app.state.primary_engine = primary_engine
+    replica_engines = create_read_replica_engines(resolved_settings)
+    app.state.replica_engines = replica_engines
+    from app.db.read_replica import ReadReplicaRouter
+
+    engine = ReadReplicaRouter(
+        primary=primary_engine,
+        replicas=replica_engines,
+        settings=resolved_settings,
+        enabled=resolved_settings.read_replica_enabled,
+    )
+    app.state.engine = engine
+    app.state.engine_router = engine
     sms_adapter = build_sms_adapter(resolved_settings)
+    # Profile photos (#529, ADR-0020, #532): the private ``profile-media``
+    # object-storage surface holds patient/doctor profile photos, encrypted at
+    # rest (AES-256-GCM) and written with the service-role key only - never a
+    # public bucket. The store is built at the composition root and injected
+    # into the iam facade so the patient photo surface (``/v1/me/photo``,
+    # #533) reads one settled instance; it is also exposed on state so the
+    # doctor private-profile surface (#540) injects the same store. Only the
+    # ref, never a blob URL, is persisted on the owning profile. The key comes
+    # from the environment (never committed), dev/test without a key derives an
+    # ephemeral one, and the concrete backend is selected by
+    # ``PROFILE_MEDIA_BACKEND``: local disk (default) or a private Supabase
+    # Storage bucket (production, same SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
+    # pair as the intake store).
+    profile_media_store = build_profile_media_store(
+        root=resolved_settings.profile_media_root,
+        b64_key=resolved_settings.profile_media_key,
+        backend=resolved_settings.profile_media_backend,
+        supabase_url=resolved_settings.supabase_url,
+        supabase_service_role_key=resolved_settings.supabase_service_role_key,
+        retry_policy=ProfileMediaRetryPolicy(
+            max_attempts=resolved_settings.profile_media_max_attempts,
+            backoff_seconds=resolved_settings.profile_media_backoff_seconds,
+            jitter_fraction=resolved_settings.profile_media_jitter_fraction,
+            circuit_breaker_threshold=(resolved_settings.profile_media_circuit_breaker_threshold),
+            circuit_breaker_cooldown_seconds=(
+                resolved_settings.profile_media_circuit_breaker_cooldown_seconds
+            ),
+        ),
+        timeout_seconds=resolved_settings.profile_media_timeout_seconds,
+        enabled=resolved_settings.circuit_breaker_enabled,
+    )
+    app.state.profile_media_store = profile_media_store
+    app.state.profile_media_max_upload_bytes = resolved_settings.profile_media_max_upload_bytes
     facade = IamFacade(
         engine=engine,
         sms_adapter=sms_adapter,
         access_token_signing_key=resolved_settings.gateway_jwt_signing_key,
         access_token_ttl_seconds=resolved_settings.gateway_access_token_ttl_seconds,
         refresh_token_ttl_seconds=resolved_settings.gateway_refresh_token_ttl_seconds,
+        mfa_secret_key=resolved_settings.iam_mfa_secret_key,
+        operator_mfa_lockout_threshold=resolved_settings.iam_operator_mfa_lockout_threshold,
+        operator_mfa_lockout_seconds=resolved_settings.iam_operator_mfa_lockout_seconds,
+        media_store=profile_media_store,
+        photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
+        profile_cache_ttl_seconds=resolved_settings.profile_cache_ttl_seconds,
     )
     app.state.iam_facade = facade
+    # MOD-004 (PHASE-3 T3, #212): the consent facade shares the same settled
+    # engine and app-state pattern - routes read one resolved object and unit
+    # tests stub it on state. MOD-004 + composition root (#649/#668): the
+    # consent and health modules hold no knowledge of the modules that own
+    # counterparty names, so ONE resolver (with its ordered rules) is built
+    # here and bound into BOTH facades - the same instance, so the two reads
+    # can never drift. Built before the partner facade exists on purpose - the
+    # closure reads ``app.state.partner_facade`` only when called.
+    counterparty_display_name_resolver = _build_counterparty_display_name_resolver(app)
+    app.state.consent_facade = ConsentFacade(
+        engine=engine,
+        counterparty_display_name_resolver=counterparty_display_name_resolver,
+    )
+    # MOD-005 (PHASE-7 T12, #356): the intake facade shares the settled engine
+    # and is stored on state so the patient intake routes read one resolved
+    # instance and unit tests can stub it. MOD-006 (PHASE-7 T08, #373; #385):
+    # intake audio clips are AES-256-GCM encrypted into the ``intake/``
+    # object-storage prefix via the injected media store. The store's key comes
+    # from the environment (never committed), dev/test without a key derives an
+    # ephemeral one, and the concrete backend is selected by
+    # ``INTAKE_MEDIA_BACKEND``: local disk (default) or a private Supabase
+    # Storage bucket (production, so captures survive Render's ephemeral disk).
+    intake_media_store = build_media_store(
+        root=resolved_settings.intake_media_root,
+        b64_key=resolved_settings.intake_media_key,
+        backend=resolved_settings.intake_media_backend,
+        supabase_url=resolved_settings.supabase_url,
+        supabase_service_role_key=resolved_settings.supabase_service_role_key,
+    )
+    app.state.intake_facade = IntakeFacade(
+        engine=engine,
+        media_store=intake_media_store,
+        # PHASE-8.1 (#443): the pick-a-doctor write grants its consent in the
+        # SAME transaction as the doctor assignment (consent-at-pick, MOD-004)
+        # via ``ConsentFacade.grant_consent_on``.
+        consent_facade=app.state.consent_facade,
+        # PHASE-8.1 (#489): the review-queue read resolves the card's patient
+        # name/age through the iam seam (composition boundary, no cross-schema
+        # read) - the same settled facade the profile routes use, so a missing
+        # profile degrades to the card fallback, never a crash.
+        iam_facade=app.state.iam_facade,
+        intake_cache_ttl_seconds=resolved_settings.intake_cache_ttl_seconds,
+    )
+    # MOD-006 (PHASE-8 T06, #422): the two care facades share the settled
+    # engine and the settled intake/health facades - the consult-complete
+    # handshake gates on ``get_finalized_pre_summary`` (intake) and AI drafting
+    # draws the consent-gated history via the health facade (fail-closed,
+    # NFR-SEC-006). Stored on state so the doctor routes read one resolved
+    # instance per state machine and unit tests stub them.
+    app.state.care_console_facade = CaseConsoleFacade(
+        engine=engine,
+        intake_facade=app.state.intake_facade,
+        care_cases_cache_ttl_seconds=resolved_settings.care_cases_cache_ttl_seconds,
+    )
+    # MOD-003 (PHASE-3 T2, #211): the record facade shares the one settled
+    # engine - no connection opens at boot - and is stored like the iam
+    # instance so routes read one resolved object and unit tests can stub it.
+    # Pass consent_facade for PHASE-3 T5 (#214) gated reads, and scope the
+    # health-background first-save auto-grant's live-doctor discovery through
+    # the care facade's open-case seam (#534, ADR-0018) - both facades are
+    # built above so the health facade can close over the settled instances.
+    # #668: the SAME resolver instance the consent facade owns (#649) is bound
+    # here too - the access-history read answers real counterparty names while
+    # the health module stays name-agnostic behind the identical
+    # composition-root seam. The shared closure was built above.
+    app.state.health_facade = HealthFacade(
+        engine=engine,
+        consent_facade=app.state.consent_facade,
+        care_facade=app.state.care_console_facade,
+        counterparty_display_name_resolver=counterparty_display_name_resolver,
+    )
+    # MOD-011 (PHASE-4 T6, #240): the audit facade shares the settled engine
+    # for the operator query surface - stored on state so routes read one
+    # resolved object and unit tests stub it. The health facade (MOD-003) is
+    # passed for T7's patient access-history delegation: the ledger lives in
+    # the health schema, so the audit facade calls through the facade seam
+    # instead of reading across schemas (module isolation rule).
+    app.state.audit_facade = AuditFacade(engine=engine, health_facade=app.state.health_facade)
+    # MOD-013 (PHASE-14A C1a, #706): the operator observability read facade shares
+    # the settled engine - it only ever reads this module's own schema, so it needs
+    # no other module's facade. Stored on state so the four operator read routes
+    # read one resolved object and their tests stub it wholesale, like the audit
+    # instance above.
+    app.state.observability_facade = ObservabilityFacade(
+        engine=engine,
+        settings=resolved_settings,
+        provider_health_cache_ttl_seconds=resolved_settings.provider_health_cache_ttl_seconds,
+    )
+    # MOD-014 (PHASE-14B Batch 2, #771): the operator effective-settings facade
+    # reads this module's own ``ops_settings`` table for database overrides and
+    # falls back to the settled Settings (environment then default). Its 30s
+    # in-process cache keeps an operator read from re-querying on every poll.
+    app.state.ops_facade = OpsFacade(engine=engine, settings=resolved_settings)
+    # Provide OpsFacade to ObservabilityFacade for alert delivery operations
+    app.state.observability_facade.set_ops_facade(app.state.ops_facade)
+    # MOD-002 (PHASE-5 T05, #249): the partner facade shares the settled engine
+    # and, for open registration (ADR-0010), the settled iam facade - the sync
+    # ``create_credential_account`` seam is called in-sequence at registration
+    # so a login-capable account exists before the partner can authenticate.
+    # Stored on state so the registration route reads one resolved instance and
+    # unit tests stub it.
+    # MOD-002 (PHASE-5 T06, #251): credential documents are AES-encrypted into
+    # the ``partner/`` object-storage prefix before a Step-1 pass enters the
+    # queue. The store's key/root come from the environment (fail-closed when a
+    # key is supplied but malformed); dev/test without a key derives an ephemeral
+    # one so the encrypted write path still runs.
+    partner_artifact_store = build_artifact_store(
+        root=resolved_settings.partner_artifact_root,
+        b64_key=resolved_settings.partner_artifact_key,
+    )
+    app.state.partner_facade = PartnerFacade(
+        engine=engine,
+        iam_facade=facade,
+        artifact_store=partner_artifact_store,
+        audit_facade=app.state.audit_facade,
+        profile_media_store=profile_media_store,
+        doctor_profile_photo_max_bytes=resolved_settings.profile_media_max_upload_bytes,
+        re_submission_max=resolved_settings.partner_re_submission_max,
+        re_submission_cooldown_days=resolved_settings.partner_re_submission_cooldown_days,
+        credential_cleanup_days=resolved_settings.partner_credential_cleanup_days,
+        directory_ttl_seconds=resolved_settings.redis_directory_ttl_seconds,
+        directory_max_results=resolved_settings.directory_max_results,
+    )
+
+    # MOD-012 (PHASE-8.2 T01, #539): the doctor console facade owns no schema
+    # or outbox - it composes the settled consent/care/iam/health facades into
+    # the derived Patients list (ADR-0019). Stored on state so the doctor
+    # routes read one resolved instance and route tests stub it wholesale.
+    # Built after the partner facade because the console re-checks the edge's
+    # role decision through MOD-002's ``require_active_doctor`` seam on every
+    # read (api-standards §6) - the one place the console is told whether the
+    # id it was handed is still an active doctor.
+    app.state.doctor_console_facade = DoctorConsoleFacade(
+        consent_facade=app.state.consent_facade,
+        care_facade=app.state.care_console_facade,
+        iam_facade=app.state.iam_facade,
+        health_facade=app.state.health_facade,
+        partner_facade=app.state.partner_facade,
+    )
+
+    # PHASE-8.1 T10c (#495): the issued-rx attribution reads the issuing
+    # doctor's display name through the partner facade's public provider-
+    # profile seam (composition boundary - care never imports partner). The
+    # display name is cosmetic: any attribution failure - an unresolvable
+    # profile (doctor since deactivated, directory index dropped, credential
+    # lapsed) or an unexpected seam error (partner-schema DB down) - degrades
+    # to None so the frontend falls back to the existing "attributed to you"
+    # copy. The issued read and the approve response must never fail because
+    # of the attribution, so the fallback is wholesale and logged (warning,
+    # error-handling-observability §2), never propagated. partner_id only, no
+    # PHI in the log line.
+    async def _resolve_attributed_doctor_name(partner_id: int) -> str | None:
+        try:
+            profile = await cast(PartnerFacade, app.state.partner_facade).get_provider_profile(
+                partner_id
+            )
+        except ProviderProfileNotFoundError:
+            logger.warning(
+                "issued-rx attribution name unresolved for partner %s; falling back to static copy",
+                partner_id,
+            )
+            return None
+        except Exception:
+            logger.warning(
+                "issued-rx attribution partner-profile read failed; "
+                "falling back to static copy for partner %s",
+                partner_id,
+            )
+            return None
+        return profile.practice_name
+
+    app.state.prescription_facade = PrescriptionFacade(
+        engine=engine,
+        intake_facade=app.state.intake_facade,
+        health_facade=app.state.health_facade,
+        attributed_doctor_name_resolver=_resolve_attributed_doctor_name,
+    )
+
+    # MOD-001/MOD-002 independence (WI-3, #336): iam and partner are now
+    # constructed independently with zero post-construction glue. The
+    # partner-session route verifies partner-profile existence itself at the
+    # composition boundary (via ``resolve_partner_id_by_identity``), so the old
+    # ``set_partner_resolver`` seam and its closure are gone.
     # The edge's in-process idempotency store (api-standards §5, PHASE-2 REM
     # T11, #80): the auth mutation adapters read/write it per ``Idempotency-Key``
     # so a retried register/verify/resend replays the stored result instead of
@@ -104,23 +736,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if resolved_settings.mock_otp_readback_enabled:
         app.state.mock_sms_adapter = cast(MockSmsAdapter, sms_adapter)
 
+    # Issue #902: response compression - large JSON must not ride uncompressed
+    # over the demo's high-RTT link. Registered INNERMOST (before jwt_verify)
+    # deliberately: every gateway layer is a BaseHTTPMiddleware, whose streaming
+    # dispatch converts any inner response into chunked body messages, and
+    # GZipMiddleware compresses streams unconditionally - only a placement that
+    # sees the router's single complete body message can honour
+    # ``minimum_size``. At this position the size threshold genuinely holds for
+    # module responses; the gateway rejections produced ABOVE this layer
+    # (401/429/404) bypass compression, which is fine - those envelopes are
+    # tiny. The outer layers (trace, security headers, the #901 ServerTiming
+    # outermost window) still see and stamp every response. Off = not
+    # installed, no per-request cost (#753 posture).
+    if resolved_settings.response_compression_enabled:
+        app.add_middleware(
+            GZipMiddleware,
+            minimum_size=resolved_settings.response_compression_min_size,
+        )
+
     # Gateway middleware stack (PHASE-1 T7b, #29; PHASE-2 T8, #59; REM T6, #77;
-    # REM T8, #78). The auth surface is unauthenticated, so rate_limit is the
-    # outermost of the gateway pair: every /v1/auth/* request - valid, invalid,
-    # or missing token - is counted toward the per-client-IP cap before
-    # jwt_verify can short-circuit on a bad token. jwt_verify runs inside the
-    # limiter and attaches the settled Principal for the routes and the
-    # protected-route dependency.
+    # REM T8, #78; PS-05, #403). The auth and intake-write surfaces are
+    # unauthenticated entry points, so rate_limit is the outermost of the
+    # gateway pair: every /v1/auth/* request plus the intake write trio
+    # (upload-media, submit, re-record) - valid, invalid, or missing token - is
+    # counted toward its per-surface, per-client-IP cap before jwt_verify can
+    # short-circuit on a bad token. Each surface keeps an independent tier so a
+    # burst on one can never exhaust the other's budget ("auth-only limiting
+    # semantics still hold", PS-05). jwt_verify runs inside the limiter and
+    # attaches the settled Principal for the routes and the protected-route
+    # dependency.
     app.add_middleware(
         JWTVerifyMiddleware,
         enabled=resolved_settings.gateway_jwt_verify_enabled,
         validate_token=facade.validate_token,
     )
+    # ARCH-P1 #815: selectable rate-limit backend. The middleware keeps its
+    # in-memory constructor behaviour; under settings.rate_limit_backend="redis"
+    # the shared Redis client is resolved lazily via the gateway accessor so
+    # the middleware stack built at app construction still sees the client once
+    # the lifespan has initialised it.
+    _RateLimitMiddleware = (
+        RedisRateLimitMiddleware
+        if resolved_settings.rate_limit_backend == "redis"
+        else RateLimitMiddleware
+    )
     app.add_middleware(
-        RateLimitMiddleware,
+        _RateLimitMiddleware,
         enabled=resolved_settings.gateway_rate_limit_enabled,
         max_requests=resolved_settings.gateway_rate_limit_auth_max_requests,
         window_seconds=resolved_settings.gateway_rate_limit_auth_window_seconds,
+        intake_max_requests=resolved_settings.gateway_rate_limit_intake_max_requests,
+        intake_window_seconds=resolved_settings.gateway_rate_limit_intake_window_seconds,
+        rate_limit_backend=resolved_settings.rate_limit_backend,
+        redis_rate_limit_key_prefix=resolved_settings.redis_rate_limit_key_prefix,
     )
     # CORS for the local-dev PWA origin (added so the allow-origin header
     # reaches every response, including 401/403 from the gateway stack). The
@@ -133,6 +801,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=allow_origins,
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=True,
+        # Issue #902: a LONG preflight cache - on the split-origin demo (ADR-0007)
+        # every un-cached preflight is one full cross-site round trip, so the
+        # middleware echoes the day-long hint (browsers clamp it themselves) and
+        # repeated authenticated calls stop re-preflighting every time.
+        max_age=resolved_settings.cors_preflight_max_age_seconds,
     )
     # Trace established outermost of the whole stack (PHASE-2 REM T6, #77), so
     # the one request-scoped trace id is settled before the gateway middleware
@@ -146,20 +820,299 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Registered last so it wraps the trace middleware's responses too; the
     # one path it does not cover is a 500 regenerated by Starlette's
     # ServerErrorMiddleware, which sits outside all user middleware.
+    app.add_middleware(
+        ReadReplicaMiddleware,
+        settings=resolved_settings,
+        primary_engine=primary_engine,
+        replica_engines=replica_engines,
+        enabled=resolved_settings.read_replica_enabled,
+        router=engine,
+    )
     app.add_middleware(SecurityHeadersMiddleware)
+    # ARCH-P3 #856: no-op sharding middleware, installed only when enabled.
+    if resolved_settings.sharding_enabled:
+        app.add_middleware(
+            ShardingMiddleware,
+            settings=resolved_settings,
+            shard_key=resolved_settings.shard_key,
+            shard_count=resolved_settings.shard_count,
+            enabled=True,
+        )
+    # PHASE-14A B9 (#727): count every ANSWERED request into the in-process
+    # per-minute bucket the worker folds into `observability_http_minute`. The
+    # OUTERMOST user middleware, so a gateway rejection - a 401 from jwt_verify, a
+    # 429 from rate_limit - is counted like any other served request; an inner
+    # registration would omit exactly the requests the gateway turned away, which are
+    # the ones an availability signal is made of. The one request it cannot see is
+    # the one where a handler raised: Starlette answers that 500 from its
+    # ServerErrorMiddleware, outside all user middleware, so it is counted by the
+    # catch-all below instead.
+    # #753: the middleware is only installed when HTTP_COUNTER_ENABLED is on, so
+    # the gate's off path is a genuine no-op - a deployment that did not opt in
+    # does not even pay the middleware's per-request cost.
+    if resolved_settings.http_counter_enabled:
+        app.add_middleware(HttpCounterMiddleware)
+    # LAT-HARNESS (#901): the opt-in server-processing timing header, registered
+    # after the HTTP counter so it is the OUTERMOST user middleware - the same
+    # full-stack window the latency probe measures from outside, gateway
+    # rejections included. Off = not installed, no per-request cost (#753
+    # posture); ON is dev/test default, production opt-in.
+    if resolved_settings.server_timing_header_enabled:
+        app.add_middleware(ServerTimingMiddleware)
 
     app.include_router(iam_router)
+    app.include_router(operator_profile_router)
+    app.include_router(health_router)
+    app.include_router(consent_router)
+    if resolved_settings.module_audit_enabled:
+        app.include_router(audit_router)
+    if resolved_settings.module_observability_enabled:
+        app.include_router(observability_router)
+        app.include_router(csp_collector_router)
+    if resolved_settings.module_ops_enabled:
+        app.include_router(ops_router)
+    if resolved_settings.module_partner_enabled:
+        app.include_router(partner_router)
+        app.include_router(directory_router)
+    if resolved_settings.module_intake_enabled:
+        app.include_router(intake_router)
+    if resolved_settings.module_care_enabled:
+        app.include_router(care_router)
+    if resolved_settings.module_doctor_enabled:
+        app.include_router(doctor_router)
     register_error_handlers(app)
     register_gateway_error_handlers(app)
+    register_health_error_handlers(app)
+    register_consent_error_handlers(app)
+    register_partner_error_handlers(app)
+    register_intake_error_handlers(app)
+    register_care_error_handlers(app)
+    register_doctor_error_handlers(app)
+    register_observability_error_handlers(app)
+
+    # Catch-all for any unhandled exception that escapes the module-level
+    # handlers above (e.g. SQLAlchemy OperationalError from a DB connection
+    # failure).  Without this, Starlette's own ServerErrorMiddleware - which
+    # sits OUTSIDE all user middleware including CORSMiddleware - generates a
+    # raw 500 HTML page with no CORS headers, causing the browser to report a
+    # misleading CORS error instead of the real failure.
+    @app.exception_handler(Exception)
+    async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+        trace_id = resolve_trace_id(request)
+        # #757: the ROUTE TEMPLATE, never the concrete path. A path carries
+        # whatever the client put in it - a case id, a patient id, anything a
+        # query string was built from - and a log line is a telemetry store
+        # (security-phii §4). The capture below already uses the template for
+        # exactly this reason; the log line beside it said otherwise.
+        logger.exception(
+            "unhandled_exception trace_id=%s route=%s",
+            trace_id,
+            route_template_for(request),
+        )
+        envelope = ErrorEnvelope(
+            code=CODE_INTERNAL_SERVER_ERROR,
+            message=MESSAGE_INTERNAL_SERVER_ERROR,
+            trace_id=trace_id,
+            details={},
+        )
+        # PHASE-14A B8 (#726): capture the failure into the bounded in-process
+        # buffer the worker drains into the observability error stream. One append
+        # to a deque, on a request that is ALREADY failing - deliberately not a
+        # write, which would add latency to exactly the requests least able to
+        # afford it. The record carries the matched ROUTE TEMPLATE rather than the
+        # path just logged above, so no identifier reaches telemetry.
+        capture_server_error(
+            request=request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            kind=ERROR_KIND_UNHANDLED_EXCEPTION,
+            code=CODE_INTERNAL_SERVER_ERROR,
+            trace_id=trace_id,
+        )
+        # PHASE-14A B9 (#727): count this 500 as a served request too. It is NOT
+        # double counting with HttpCounterMiddleware - an escaped exception never
+        # comes back through it, because Starlette answers the 500 from
+        # ServerErrorMiddleware, outside all user middleware. Without this line the
+        # requests that failed worst would be the only ones missing from
+        # throughput, and an error rate reading zero during a crash loop is the
+        # exact answer this ticket exists to make impossible.
+        record_request(
+            request=request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=envelope.model_dump(mode="json"),
+        )
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok")
+        return HealthResponse(
+            status="ok",
+            region=resolved_settings.region,
+            multi_region_enabled=resolved_settings.multi_region_enabled,
+            cross_region_replication=resolved_settings.cross_region_replication,
+        )
 
     @app.get("/v1/me", response_model=MeResponse)
-    def me(principal: Annotated[Principal, Depends(require_patient)]) -> MeResponse:
-        """Protected proof route: admit only a valid patient-scoped session."""
-        return MeResponse(subject_id=principal.subject_id, roles=list(principal.roles))
+    async def me(
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
+    ) -> MeResponse:
+        """Protected proof route: admit any authenticated principal.
+
+        The phone is resolved through the iam facade's one-column lookup by
+        the principal's subject id (PHASE-2.6 T05, #196) - the route never
+        touches the database itself.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        phone = await facade.identity_phone(int(principal.subject_id))
+        return MeResponse(
+            subject_id=principal.subject_id,
+            roles=list(principal.roles),
+            phone=phone,
+            tier=principal.tier,
+        )
+
+    @app.get("/v1/me/profile", response_model=PatientProfileResponse)
+    async def me_profile_get(
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
+    ) -> PatientProfileResponse:
+        """Protected read: the caller's saved profile, or the typed "not set".
+
+        The profile gets its own read surface so ``MeResponse`` and the
+        ``/v1/me`` consumers never change (#482, deliberate D-A decision). The
+        row is scoped to the principal's subject id through the identity facade
+        seam - the route never touches the database itself.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        profile = await facade.get_patient_profile(int(principal.subject_id))
+        if profile is None:
+            return PatientProfileResponse(set=False, profile=None)
+        return PatientProfileResponse(set=True, profile=profile)
+
+    @app.put("/v1/me/profile", response_model=PatientProfileResponse)
+    async def me_profile_put(
+        request: Request,
+        body: PatientProfile,
+        principal: Annotated[Principal, Depends(require_authenticated)],
+    ) -> PatientProfileResponse:
+        """Protected upsert: persist the caller's profile-completion data.
+
+        Idempotent - the facade upserts one row per identity (ON CONFLICT DO
+        UPDATE), so a repeat PUT converges and a returning patient is asked
+        only once. The body is the profile shape itself (no wrapper), and the
+        ``Idempotency-Key`` contract (api-standards §5) applies like the other
+        mutations: a replayed key with the same value returns the stored
+        result without a second facade call. The key is namespaced to the
+        principal's subject id, so one key can never replay another caller's
+        stored profile across identities. The write is scoped to the
+        principal's subject id.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        saved = await run_idempotent(
+            request,
+            lambda: facade.save_patient_profile(int(principal.subject_id), body),
+            namespace=f"identity:{principal.subject_id}",
+        )
+        return PatientProfileResponse(set=True, profile=saved)
+
+    @app.put("/v1/me/photo", response_model=PatientProfileResponse)
+    async def me_photo_put(
+        request: Request,
+        file: Annotated[
+            UploadFile,
+            File(
+                description=(
+                    "Profile photo: JPEG, PNG, or WebP of at most "
+                    f"{resolved_settings.profile_media_max_upload_bytes // (1024 * 1024)}MB"
+                )
+            ),
+        ],
+        principal: Annotated[Principal, Depends(require_authenticated)],
+    ) -> PatientProfileResponse:
+        """Protected upload/replace: persist the caller's profile photo (US-20).
+
+        Thin patient-scoped adapter (#533): the ``require_authenticated`` gate
+        admits the session owner, the multipart ``file`` part is read with a
+        size ceiling (the configured ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` + 1) so
+        an oversized or malicious upload is bounded in memory, and the facade
+        enforces the photo contract (JPEG/PNG/WebP only - GIF refused - and the
+        same size ceiling) before encrypting the bytes into the private
+        ``profile-media`` store under the ``patient/`` prefix, persisting only
+        the opaque ref on the profile row (ADR-0020 D2, never a public URL).
+        Both the read bound and the enforced limit resolve from the one settings
+        value, shared with the doctor console photo path (coding-standards
+        §9.2). The mutation honours the ``Idempotency-Key`` replay contract
+        (api-standards §5) like the other ``/v1/me`` mutations - a replayed key
+        returns the stored result without a second facade call, and the key is
+        namespaced to the principal's subject id. A repeat upload with a fresh
+        key converges to the replaced photo. The photo is bound to the
+        principal's subject id, so one identity can never overwrite another's
+        photo. Answers the updated profile carrying the new ``photo_ref``.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        max_upload_bytes = cast(int, request.app.state.profile_media_max_upload_bytes)
+        data = await file.read(max_upload_bytes + 1)
+        saved = await run_idempotent(
+            request,
+            lambda: facade.save_patient_photo(
+                identity_id=int(principal.subject_id),
+                data=data,
+                media_type=file.content_type,
+            ),
+            namespace=f"identity:{principal.subject_id}",
+        )
+        return PatientProfileResponse(set=True, profile=saved)
+
+    @app.get("/v1/me/photo")
+    async def me_photo_get(
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
+    ) -> Response:
+        """Protected read: stream the caller's stored profile photo (US-20).
+
+        Thin patient-scoped adapter (#533): the facade resolves the caller's
+        stored ref and returns the decrypted bytes with their sniffed
+        ``Content-Type`` - the image is streamed through the backend for the
+        session owner and is never exposed as a public URL (ADR-0020). A
+        missing photo (no profile, no ref, or a dangling ref whose object is
+        gone) answers the shared 404 envelope so the app degrades to the
+        photo-picker card instead of a broken image. The scope is the
+        principal's subject id; a doctor's read of a patient photo is later
+        consent-gated work (#540).
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        photo = await facade.get_patient_photo(identity_id=int(principal.subject_id))
+        if photo is None:
+            return error_response(
+                status.HTTP_404_NOT_FOUND,
+                "PROFILE_PHOTO_NOT_FOUND",
+                "no profile photo is set for this patient",
+                request=request,
+                log_tag="iam_rejection",
+            )
+        return Response(content=photo.data, media_type=photo.media_type)
+
+    @app.delete("/v1/me/photo", response_model=PatientProfileResponse)
+    async def me_photo_delete(
+        request: Request, principal: Annotated[Principal, Depends(require_authenticated)]
+    ) -> PatientProfileResponse:
+        """Protected remove: clear the caller's stored profile photo (US-20).
+
+        Thin patient-scoped adapter (#533): the facade clears the profile's
+        ref first (removal means "the stored key is gone"), then best-effort
+        deletes the ciphertext so a removed photo is not orphaned. Removal is
+        idempotent - a caller with no photo answers the unchanged profile - and
+        bound to the principal's subject id so one identity can never clear
+        another's photo. The ``Idempotency-Key`` replay contract (api-standards
+        §5) applies like the other mutations, with the key namespaced to the
+        principal.
+        """
+        facade = cast(IamFacade, request.app.state.iam_facade)
+        profile = await run_idempotent(
+            request,
+            lambda: facade.delete_patient_photo(identity_id=int(principal.subject_id)),
+            namespace=f"identity:{principal.subject_id}",
+        )
+        return PatientProfileResponse(set=True, profile=profile)
 
     @app.get("/v1/auth/dev/otp", response_model=MockOtpResponse)
     async def dev_otp(request: Request, phone: str) -> MockOtpResponse | JSONResponse:
@@ -193,6 +1146,165 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=status.HTTP_404_NOT_FOUND,
             content=envelope.model_dump(),
         )
+
+    @app.post("/v1/test/seed", response_model=SeedResponse)
+    async def test_seed(
+        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+    ) -> SeedResponse | JSONResponse:
+        """Test-only data seeding via synthetic outbox rows (PHASE-3 T11, #220).
+
+        Creates a lab report and a prescription entry by publishing synthetic
+        outbox events through the real dispatcher. Gated to the same dev/test
+        surface as the mock OTP read-back (``mock_otp_readback_enabled``).
+
+        Timeline entries are seeded by emitting synthetic outbox rows fanned
+        out through the real dispatcher - no direct table inserts.
+        """
+        settings = cast(Settings, request.app.state.settings)
+        if not settings.mock_otp_readback_enabled:
+            envelope = ErrorEnvelope(
+                code="SEED_UNAVAILABLE",
+                message="test seeding is only available in dev/test mode",
+                trace_id=resolve_trace_id(request),
+                details={},
+            )
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content=envelope.model_dump(),
+            )
+
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from bus.dispatch import dispatch
+        from bus.envelope import Envelope
+        from bus.outbox_writer import write_outbox
+        from modules.care.domain.events import (
+            PrescriptionIssuedItem as CarePrescriptionIssuedItem,
+        )
+        from modules.care.domain.events import (
+            PrescriptionIssuedPayload as CarePrescriptionIssuedPayload,
+        )
+        from modules.health.domain.events import ReportFiledPayload
+        from modules.health.outbox import HEALTH_OUTBOX_TABLE
+        from worker.main import build_registry
+
+        patient_id = int(principal.subject_id)
+        now = datetime.now(UTC)
+        registry = build_registry()
+        entry_ids: list[int] = []
+        entry_types: list[str] = []
+
+        # Publish report.filed + prescription.issued through the outbox and
+        # dispatch synchronously so the handlers create record entries in the
+        # same request cycle.
+        report_envelope = Envelope[ReportFiledPayload](
+            event_id=uuid4(),
+            event_type="report.filed",
+            occurred_at=now,
+            producer="test.seed",
+            payload=ReportFiledPayload(
+                order_id=9001,
+                patient_id=patient_id,
+                filename="Blood_Panel_2026.pdf",
+                occurred_at=now.isoformat(),
+            ),
+        )
+        # RX envelope is typed to the REGISTERED care producer model (the
+        # registry maps prescription.issued to modules.care.domain.events): the
+        # background dispatcher revalidates the outbox row against that model,
+        # so a health-mirror-shaped payload would fail validation every poll and
+        # strand the row. The health mirror tolerates the extra case_id and
+        # doctor_id fields (pydantic ignores unknown keys), and its lean
+        # consumer leniently renders the entry either way. Exactly one
+        # medicine line (#660): the entry detail's labelled medicine block
+        # only renders with a non-empty item list, and one row keeps the e2e
+        # strict-mode label lookups (``Dose:``, ``Frequency:``, ``Duration:``)
+        # unique.
+        rx_envelope = Envelope[CarePrescriptionIssuedPayload](
+            event_id=uuid4(),
+            event_type="prescription.issued",
+            occurred_at=now,
+            producer="test.seed",
+            payload=CarePrescriptionIssuedPayload(
+                case_id=9002,
+                prescription_id=8001,
+                patient_id=patient_id,
+                doctor_id=5555,
+                occurred_at=now.isoformat(),
+                items=[
+                    CarePrescriptionIssuedItem(
+                        name="Amlodipine",
+                        dose="5 mg",
+                        frequency="once daily",
+                        duration="30 days",
+                    )
+                ],
+            ),
+        )
+
+        engine = create_engine(settings)
+        try:
+            async with engine.begin() as connection:
+                await write_outbox(connection, "health", HEALTH_OUTBOX_TABLE, report_envelope)
+                await write_outbox(connection, "health", HEALTH_OUTBOX_TABLE, rx_envelope)
+            # Dispatch synchronously - handlers create record entries.
+            await dispatch(registry, report_envelope)
+            await dispatch(registry, rx_envelope)
+        finally:
+            await engine.dispose()
+
+        # Read back the created entries to return their IDs.
+        health_facade = cast(HealthFacade, request.app.state.health_facade)
+        entry_ids, entry_types = await health_facade.seed_record_entries(patient_id)
+
+        return SeedResponse(entry_ids=entry_ids, entry_types=entry_types)
+
+    @app.post("/v1/test/seed-egress", response_model=SeedEgressResponse)
+    async def test_seed_egress(
+        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+    ) -> SeedEgressResponse | JSONResponse:
+        """Test-only egress data seeding (PHASE-3 T11, #220).
+
+        Inserts a synthetic row into ``consent.consent_egress_log`` so the
+        consent log screen's egress table renders with real data. Gated to
+        the same dev/test surface as mock OTP read-back.
+
+        The egress log normally records partner disclosures; since partners
+        do not exist yet, this endpoint creates the row directly.
+        """
+        settings = cast(Settings, request.app.state.settings)
+        if not settings.mock_otp_readback_enabled:
+            envelope = ErrorEnvelope(
+                code="SEED_UNAVAILABLE",
+                message="test seeding is only available in dev/test mode",
+                trace_id=resolve_trace_id(request),
+                details={},
+            )
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content=envelope.model_dump(),
+            )
+
+        patient_id = int(principal.subject_id)
+        consent_facade = cast(ConsentFacade, request.app.state.consent_facade)
+        egress_id = await consent_facade.seed_egress_log(
+            patient_id=patient_id,
+            counterparty_type="doctor",
+            counterparty_id="e2e-test-doctor",
+            record_scope="full_record",
+            disclosed_entry_ids=[],
+        )
+
+        return SeedEgressResponse(egress_id=egress_id)
+
+    # PHASE-14A A3a (#697): wire the OTel SDK and instrument the request path
+    # (FastAPI server spans, SQLAlchemy async DB spans, httpx outbound spans)
+    # when OTEL_ENABLED is on; inert when off. Done here rather than in the
+    # lifespan because the FastAPI instrumentor adds ASGI middleware, which
+    # Starlette forbids once the app has started - the lifespan force-flushes
+    # the exporter on shutdown instead. Never raises.
+    init_otel(resolved_settings, service=SERVICE_API, engine=engine, app=app)
 
     return app
 

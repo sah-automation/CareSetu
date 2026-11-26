@@ -3,7 +3,7 @@ const net = require('node:net');
 const fs = require('node:fs');
 
 const WORKSPACE = '@caresetu/frontend';
-const TARGET_ROUTE = '/patient';
+const TARGET_ROUTE = '/';
 const HOST = '127.0.0.1';
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_MS = 250;
@@ -219,7 +219,10 @@ async function main() {
   server = startServer(port);
   try {
     await waitUntilReady(baseUrl, server);
-    const warm = await fetch(`${baseUrl}${TARGET_ROUTE}`);
+    const warm = await fetch(`${baseUrl}${TARGET_ROUTE}`, {
+      // Route-guard bypass cookie - must track HINT_COOKIE in apps/frontend/src/lib/auth/session.ts (ADR-0007).
+      headers: { 'Cookie': 'caresetu_authed=1' },
+    });
     if (!warm.ok) {
       throw new Error(`GET ${TARGET_ROUTE} -> ${warm.status} ${warm.statusText}; not scanning`);
     }

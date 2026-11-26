@@ -10,11 +10,15 @@ claim/reclaim/delete/retry SQL and the drain behaviour are exercised against
 the native PostgreSQL in ``tests/integration/test_dispatcher.py``.
 """
 
+from __future__ import annotations
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from pydantic import BaseModel
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from bus.dispatcher import (
@@ -22,6 +26,9 @@ from bus.dispatcher import (
     OutboxRow,
     OutboxTable,
     backoff_delay,
+    claim_pending_rows,
+    count_outbox_rows,
+    discover_outbox_tables,
     envelope_from_row,
     retry_status_after_failure,
     run_poll_loop,
@@ -86,6 +93,76 @@ def test_run_poll_loop_returns_immediately_when_stop_event_is_set() -> None:
     )
 
 
+def _outbox_table() -> sa.Table:
+    metadata = sa.MetaData()
+    return sa.Table(
+        "arch_p3_outbox",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("event_id", sa.Integer),
+        sa.Column("event_type", sa.String),
+        sa.Column("payload", sa.JSON),
+        sa.Column("status", sa.String),
+        sa.Column("occurred_at", sa.DateTime),
+        sa.Column("next_attempt_at", sa.DateTime),
+        sa.Column("attempts", sa.Integer),
+        sa.Column("traceparent", sa.String),
+    )
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.statement: object | None = None
+
+    async def execute(self, statement: object) -> _EmptyRows:
+        self.statement = statement
+        return _EmptyRows()
+
+
+class _EmptyRows:
+    def mappings(self) -> _EmptyRows:
+        return self
+
+    def all(self) -> list[object]:
+        return []
+
+
+def test_claim_query_applies_include_and_exclude_event_type_filters() -> None:
+    connection = _RecordingConnection()
+    config = DispatcherConfig(
+        include_event_types=frozenset({"intake.captured", "intake.retry_requested"}),
+        exclude_event_types=frozenset({"ai_job.completed"}),
+    )
+
+    asyncio.run(claim_pending_rows(connection, _outbox_table(), config))  # type: ignore[arg-type]
+
+    assert connection.statement is not None
+    sql = str(connection.statement.compile(dialect=postgresql.dialect()))
+    assert "event_type IN" in sql
+    assert "event_type NOT IN" in sql
+
+
+def test_claim_query_with_an_empty_include_filter_claims_nothing() -> None:
+    connection = _RecordingConnection()
+    config = DispatcherConfig(include_event_types=frozenset())
+
+    rows = asyncio.run(claim_pending_rows(connection, _outbox_table(), config))  # type: ignore[arg-type]
+
+    assert rows == ()
+    assert connection.statement is None
+
+
+def test_claim_query_with_no_filter_preserves_the_unfiltered_claim() -> None:
+    connection = _RecordingConnection()
+
+    asyncio.run(claim_pending_rows(connection, _outbox_table(), DispatcherConfig()))  # type: ignore[arg-type]
+
+    assert connection.statement is not None
+    sql = str(connection.statement.compile(dialect=postgresql.dialect()))
+    assert "event_type IN" not in sql
+    assert "event_type NOT IN" not in sql
+
+
 def test_backoff_delay_doubles_exponentially_with_each_attempt() -> None:
     config = DispatcherConfig(backoff_base_seconds=2.0)
 
@@ -121,3 +198,61 @@ def test_retry_status_respects_custom_cap() -> None:
 
     assert retry_status_after_failure(2, config) == OUTBOX_STATUS_PENDING
     assert retry_status_after_failure(3, config) == OUTBOX_STATUS_DEAD_LETTER
+
+
+class _CountingConnection:
+    """A connection that answers the per-status count with a canned row set."""
+
+    def __init__(self, rows: list[tuple[str, int]]) -> None:
+        self.rows = rows
+        self.statements: list[str] = []
+
+    async def execute(self, statement: object) -> object:
+        self.statements.append(str(statement))
+        result = _Rows(self.rows)
+        return result
+
+
+class _Rows:
+    def __init__(self, rows: list[tuple[str, int]]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[tuple[str, int]]:
+        return self._rows
+
+
+def test_count_outbox_rows_groups_by_status_and_defaults_absent_ones_to_zero() -> None:
+    """The health read the nightly rollup depends on, with no database."""
+    connection = _CountingConnection([(OUTBOX_STATUS_PENDING, 3), (OUTBOX_STATUS_DEAD_LETTER, 1)])
+    tables = [OutboxTable(schema="intake", table_name="intake_outbox")]
+
+    counts = asyncio.run(count_outbox_rows(connection, tables))  # type: ignore[arg-type]
+
+    assert len(counts) == 1
+    assert counts[0].pending == 3
+    assert counts[0].inflight == 0
+    assert counts[0].dead_letter == 1
+    assert counts[0].backlog == 3
+    assert counts[0].table == tables[0]
+
+
+def test_count_outbox_rows_reads_each_discovered_table_and_only_outbox_columns() -> None:
+    """Counts stay on the shared outbox contract - no domain column is touched."""
+    connection = _CountingConnection([])
+    tables = [
+        OutboxTable(schema="intake", table_name="intake_outbox"),
+        OutboxTable(schema="care", table_name="care_outbox"),
+    ]
+
+    counts = asyncio.run(count_outbox_rows(connection, tables))  # type: ignore[arg-type]
+
+    assert [row.table.table_name for row in counts] == ["intake_outbox", "care_outbox"]
+    assert all(row.pending == 0 and row.backlog == 0 for row in counts)
+    assert len(connection.statements) == 2
+    for statement in connection.statements:
+        assert "GROUP BY status" in str(statement)
+        assert "payload" not in str(statement).split("FROM")[0].replace("SELECT", "")
+
+
+def test_discover_outbox_tables_with_no_schemas_is_a_no_op() -> None:
+    assert asyncio.run(discover_outbox_tables(_CountingConnection([]), [])) == ()

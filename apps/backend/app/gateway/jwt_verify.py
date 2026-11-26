@@ -28,8 +28,7 @@ from app.gateway.errors import (
 )
 from app.gateway.principal import Principal
 from app.gateway.rbac import resolve_scope_roles
-from modules.iam.domain.exceptions import InvalidAccessTokenError
-from modules.iam.facade import ValidatedAccessToken
+from modules.iam.facade import InvalidAccessTokenError, ValidatedAccessToken
 
 TokenValidator = Callable[[str], Awaitable[ValidatedAccessToken]]
 
@@ -67,7 +66,9 @@ class JWTVerifyMiddleware(BaseHTTPMiddleware):
             return await _deny_unauthenticated(request)
 
         request.state.principal = Principal.for_subject(
-            str(validated.subject_id), *resolve_scope_roles(validated.scope)
+            str(validated.subject_id),
+            *resolve_scope_roles(validated.scope),
+            tier=validated.tier,
         )
         return await call_next(request)
 

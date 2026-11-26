@@ -1,0 +1,949 @@
+// PHASE-3 T7 (#216): the My Record screen suite - real-API timeline render
+// (mocked at the facade-client seam per the brief), type filtering including
+// the ratified More-dropdown rename, §2.7 Soon placeholders, empty/error
+// states, and the bilingual EN/HI contract (परामर्श everywhere).
+
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+import { QueryClientProvider } from "@tanstack/react-query";
+import { makeTestQueryClient } from "@/test/query-client";
+
+import RecordPage from "./page";
+import PatientGroupLayout from "@/app/(patient)/layout";
+import { __resetLangForTests, useLang } from "@/lib/i18n/LangContext";
+import { STRINGS } from "@/lib/i18n/dictionaries";
+import {
+  fetchOwnRecord,
+  type RecordEntryView,
+  type RecordTimeline,
+} from "@/lib/record/api";
+import { fetchAccessHistory, type AccessHistoryEntry } from "@/lib/audit/api";
+
+vi.mock("@/lib/record/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/record/api")>();
+  return { ...mod, fetchOwnRecord: vi.fn() };
+});
+
+vi.mock("@/lib/audit/api", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/audit/api")>();
+  return { ...mod, fetchAccessHistory: vi.fn() };
+});
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: vi.fn() }),
+  usePathname: () => "/patient/record",
+}));
+
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: { id: 7, phone: "+911234567890", roles: ["patient"] },
+    selectedRole: "patient",
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
+const mockFetchOwnRecord = vi.mocked(fetchOwnRecord);
+const mockFetchAccessHistory = vi.mocked(fetchAccessHistory);
+
+// Radix popper relies on ResizeObserver and opens menus on real pointer
+// events, neither of which jsdom implements fully (same stubs as the
+// dropdown-menu primitive suite). File isolation keeps them local.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+beforeAll(() => {
+  window.ResizeObserver =
+    window.ResizeObserver ??
+    (ResizeObserverStub as unknown as typeof ResizeObserver);
+  if (!window.PointerEvent) {
+    class PointerEventStub extends MouseEvent {}
+    window.PointerEvent = PointerEventStub as unknown as typeof PointerEvent;
+  }
+});
+
+function langFlip() {
+  // Provider-less suites subscribe to the shared module store directly; this
+  // button is the one-mutation-path way to flip locale mid-test.
+  const { lang, setLang } = useLang();
+  return (
+    <button type="button" onClick={() => setLang(lang === "en" ? "hi" : "en")}>
+      flip-lang
+    </button>
+  );
+}
+
+function entry(overrides: Partial<RecordEntryView>): RecordEntryView {
+  return {
+    entry_id: 1,
+    entry_type: "consultation",
+    payload: {},
+    occurred_at: "2026-08-19T10:00:00Z",
+    created_at: "2026-08-19T10:00:05Z",
+    ...overrides,
+  };
+}
+
+// Deliberately shuffled vs clinical time - the screen must still render
+// newest-first (defensive sort in the view model).
+const TIMELINE: RecordTimeline = {
+  record_id: 5,
+  patient_id: 7,
+  created_at: "2026-08-01T09:00:00Z",
+  entries: [
+    entry({
+      entry_id: 31,
+      entry_type: "metric",
+      payload: {},
+      occurred_at: "2026-08-18T07:45:00Z",
+    }),
+    entry({
+      entry_id: 30,
+      entry_type: "prescription",
+      payload: { prescription_id: 12, status: "issued" },
+      occurred_at: "2026-08-19T09:00:00Z",
+    }),
+    entry({
+      entry_id: 28,
+      entry_type: "consultation",
+      payload: {},
+      occurred_at: "2026-08-19T10:30:00Z",
+    }),
+    entry({
+      entry_id: 26,
+      entry_type: "lab_report",
+      payload: { order_id: 1042, filename: "cbc-panel.pdf" },
+      occurred_at: "2026-08-21T14:30:00Z",
+    }),
+    entry({
+      entry_id: 24,
+      entry_type: "prescription",
+      payload: {
+        prescription_id: 9,
+        fulfillment_order_id: 3,
+        status: "delivered",
+      },
+      occurred_at: "2026-08-22T08:00:00Z",
+    }),
+  ],
+};
+
+function resolveWith(timeline: RecordTimeline | null) {
+  mockFetchOwnRecord.mockImplementation(() =>
+    timeline === null
+      ? Promise.reject(new Error("network down"))
+      : Promise.resolve(timeline),
+  );
+}
+
+// #904: the record page reads through the shared TanStack query - every
+// render gets a fresh test client (retry disabled) so cache never leaks
+// between tests and fetch counts stay exact.
+const testQueryClientRef = { current: makeTestQueryClient() };
+
+function QueryWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <QueryClientProvider client={testQueryClientRef.current}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+
+function renderWithShell(ui: React.ReactNode) {
+  return render(ui, { wrapper: QueryWrapper });
+}
+
+function accessEntry(
+  overrides: Partial<AccessHistoryEntry>,
+): AccessHistoryEntry {
+  return {
+    actor_id: 3,
+    actor_display_name: null,
+    accessed_at: "2026-08-15T11:00:00Z",
+    denied: false,
+    ...overrides,
+  };
+}
+
+const ACCESS_HISTORY: AccessHistoryEntry[] = [
+  // Deliberately out of order (lab first, doctor second) - the screen must
+  // still render newest-first by accessed_at. The doctor has a resolved name;
+  // the lab falls back to its role word (#670).
+  accessEntry({
+    actor_id: 4,
+    actor_type: "lab",
+    actor_display_name: null,
+    scope: "lab_results",
+    accessed_at: "2026-08-18T07:45:00Z",
+  }),
+  accessEntry({
+    actor_id: 3,
+    actor_type: "doctor",
+    actor_display_name: "Dr A Kumar",
+    scope: "consultations",
+    accessed_at: "2026-08-19T09:00:00Z",
+  }),
+];
+
+function resolveAccessWith(entries: AccessHistoryEntry[] | null) {
+  mockFetchAccessHistory.mockImplementation(() =>
+    entries === null
+      ? Promise.reject(new Error("network down"))
+      : Promise.resolve({ entries }),
+  );
+}
+
+beforeEach(() => {
+  __resetLangForTests();
+  testQueryClientRef.current = makeTestQueryClient();
+  resolveWith(TIMELINE);
+  resolveAccessWith(ACCESS_HISTORY);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+  testQueryClientRef.current = makeTestQueryClient();
+});
+
+async function waitForTimeline() {
+  await screen.findByTestId("record-timeline");
+}
+
+function openMoreMenu() {
+  const trigger = screen.getByTestId("filter-more-btn");
+  fireEvent.pointerDown(trigger);
+  fireEvent.click(trigger);
+}
+
+describe("RecordPage (inside the patient light shell)", () => {
+  it("mounts within the patient AppShell with header and filters", async () => {
+    renderWithShell(
+      <PatientGroupLayout>
+        <LangFlipHost />
+      </PatientGroupLayout>,
+    );
+    await waitForTimeline();
+
+    expect(screen.getByTestId("app-shell")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "My Health Record" })) //
+      .toBeInTheDocument();
+    expect(
+      screen.getByRole("group", { name: "Filter record entries" }),
+    ).toBeInTheDocument();
+    // The health-tracking snapshot is now a live card (#511), rendered once
+    // per responsive zone (jsdom ignores the lg visibility classes).
+    const health = await screen.findAllByTestId("health-snapshot");
+    expect(health).toHaveLength(2);
+    // The access-history Soon placeholder was replaced by real data (#283).
+    expect(screen.queryByTestId("placeholder-access")).not.toBeInTheDocument();
+    // The full patient shell + both zone fetches is heavier than a bare page
+    // render; give it headroom so parallel-suite load can't flake the default.
+  }, 15_000);
+
+  it("renders API entries newest-first regardless of payload order", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const ids = [
+      ...screen.getByTestId("record-timeline").querySelectorAll("li"),
+    ].map((li) => li.getAttribute("data-testid"));
+    expect(ids).toEqual([
+      "entry-24",
+      "entry-26",
+      "entry-28",
+      "entry-30",
+      "entry-31",
+    ]);
+  });
+
+  it("shows the delivered prescription with its success badge", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("entry-24")).toHaveTextContent("Delivered");
+    expect(screen.getByTestId("entry-26")).toHaveTextContent("cbc-panel.pdf");
+  });
+
+  it("shows skeletons while loading and recovers when Retry succeeds", async () => {
+    resolveWith(null);
+    renderWithShell(<RecordPage />);
+
+    expect(screen.getByTestId("record-loading")).toBeInTheDocument();
+    await screen.findByTestId("error-banner");
+
+    // A failed read never renders as a calm empty state.
+    expect(screen.queryByTestId("empty-state")).not.toBeInTheDocument();
+
+    // Still failing: the banner returns (wait out the loading swap first so
+    // the lookup cannot catch the pre-click banner).
+    resolveWith(null);
+    fireEvent.click(screen.getByTestId("error-banner-retry"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument(),
+    );
+    await screen.findByTestId("error-banner");
+    expect(mockFetchOwnRecord).toHaveBeenCalledTimes(2);
+
+    // Then the retry succeeds and the timeline replaces the banner.
+    resolveWith(TIMELINE);
+    fireEvent.click(screen.getByTestId("error-banner-retry"));
+    await waitForTimeline();
+
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+    // RecordPage's shared query fetches 3x (initial fail, retry fail, retry success);
+    // the two health-snapshot cards now read the same query, so no extra fetches.
+    await screen.findAllByTestId("health-snapshot");
+    await waitFor(() => expect(mockFetchOwnRecord).toHaveBeenCalledTimes(3));
+  });
+
+  it("lets Dismiss close the error banner without refetching", async () => {
+    resolveWith(null);
+    renderWithShell(<RecordPage />);
+    await screen.findByTestId("error-banner");
+
+    fireEvent.click(screen.getByTestId("error-banner-dismiss"));
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+    expect(mockFetchOwnRecord).toHaveBeenCalledTimes(1);
+  });
+});
+
+function LangFlipHost() {
+  return (
+    <>
+      {langFlip()}
+      <RecordPage />
+    </>
+  );
+}
+
+describe("RecordPage type filters", () => {
+  it("filters by a chip's type and reflects aria-pressed", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    fireEvent.click(screen.getByTestId("filter-chip-prescription"));
+    const visible = screen
+      .getByTestId("record-timeline")
+      .querySelectorAll("li");
+    expect([...visible].map((li) => li.getAttribute("data-testid"))).toEqual([
+      "entry-24",
+      "entry-30",
+    ]);
+    expect(screen.getByTestId("filter-chip-prescription")) //
+      .toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("filter-chip-all")) //
+      .toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("collapses Lab results + Metrics into More, which renames to the active filter", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const trigger = screen.getByTestId("filter-more-btn");
+    // Closed by default; trigger reads "More".
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+    expect(screen.getByTestId("filter-more-label")) //
+      .toHaveTextContent("More");
+
+    // Open and pick Lab results from the radio menu.
+    fireEvent.pointerDown(trigger);
+    fireEvent.click(trigger);
+    const item = screen.getByRole("menuitemradio", { name: "Lab results" });
+    fireEvent.click(item);
+
+    // The trigger renamed itself to the active filter (ratified outcome).
+    expect(await screen.findByTestId("record-timeline")).toBeInTheDocument();
+    expect(screen.getByTestId("filter-more-label")) //
+      .toHaveTextContent("Lab results");
+    const visible = screen
+      .getByTestId("record-timeline")
+      .querySelectorAll("li");
+    expect([...visible].map((li) => li.getAttribute("data-testid"))).toEqual([
+      "entry-26",
+    ]);
+  });
+
+  it("shows the empty state when the filter has no entries", async () => {
+    resolveWith({
+      ...TIMELINE,
+      entries: [entry({ entry_id: 28, entry_type: "consultation" })],
+    });
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    // Metrics is a chip at 720px+; this exercises the mobile menu path down
+    // to the empty state.
+    openMoreMenu();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Metrics" }));
+    expect(screen.getByTestId("empty-state")).toBeInTheDocument();
+    expect(screen.queryByTestId("record-timeline")) //
+      .not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("filter-chip-all"));
+    await waitForTimeline();
+  });
+
+  it("shows the empty state when the fresh timeline has no entries at all", async () => {
+    resolveWith({ ...TIMELINE, entries: [] });
+    renderWithShell(<RecordPage />);
+
+    expect(await screen.findByTestId("empty-state")).toHaveTextContent(
+      "No entries yet",
+    );
+  });
+});
+
+describe("RecordPage bilingual EN/HI (REQ-006)", () => {
+  it("renames everything incl. Consultations -> परामर्श in Hindi", async () => {
+    renderWithShell(<LangFlipHost />);
+    await waitForTimeline();
+
+    fireEvent.click(screen.getByText("flip-lang"));
+
+    expect(screen.getByRole("heading", { name: "मेरा हेल्थ रिकॉर्ड" })) //
+      .toBeInTheDocument();
+    expect(screen.getByTestId("filter-chip-consultation")) //
+      .toHaveTextContent(STRINGS.hi.record.filter.consultation);
+    expect(
+      screen.getByRole("heading", {
+        name: STRINGS.hi.record.accessHistory.heading,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("entry-24")) //
+      .toHaveTextContent(STRINGS.hi.record.badge.delivered);
+  });
+});
+
+describe("RecordPage access history", () => {
+  it("renders the resolved label, role word, scope and timestamp", async () => {
+    renderWithShell(<RecordPage />);
+    await screen.findByTestId("access-history-list");
+
+    expect(mockFetchAccessHistory).toHaveBeenCalledWith(7);
+    // Newest row: a doctor with a resolved display name, with the role word as
+    // its own muted line beneath it.
+    expect(screen.getByTestId("access-entry-0")).toHaveTextContent(
+      "Dr A Kumar",
+    );
+    expect(screen.getByTestId("access-entry-0")) //
+      .toHaveTextContent("Doctor");
+    expect(screen.getByTestId("access-entry-0")) //
+      .toHaveTextContent("consultations");
+    // Older row: no resolved name, so it falls back to the role word.
+    expect(screen.getByTestId("access-entry-1")) //
+      .toHaveTextContent("Lab");
+    expect(screen.getByTestId("access-entry-1")) //
+      .toHaveTextContent("lab_results");
+  });
+
+  it("sorts entries newest-first by accessed_at", async () => {
+    renderWithShell(<RecordPage />);
+    await screen.findByTestId("access-history-list");
+
+    const first = screen.getByTestId("access-entry-0").textContent ?? "";
+    const second = screen.getByTestId("access-entry-1").textContent ?? "";
+    // Payload ships lab-before-doctor; the screen reorders newest-first.
+    expect(first).toContain("Dr A Kumar");
+    expect(second).toContain("Lab");
+  });
+
+  it("never shows a resolved name on a denied row", async () => {
+    resolveAccessWith([
+      accessEntry({
+        actor_id: 3,
+        actor_type: "doctor",
+        actor_display_name: "Dr Sneaky",
+        accessed_at: "2026-08-12T02:33:00Z",
+        denied: true,
+        denial_reason: "consent check failed",
+      }),
+    ]);
+    renderWithShell(<RecordPage />);
+    await screen.findByTestId("access-entry-0");
+
+    const row = screen.getByTestId("access-entry-0");
+    // The refused identity falls back to the role word, never a resolved name.
+    expect(row).not.toHaveTextContent("Dr Sneaky");
+    expect(row).toHaveTextContent("Doctor");
+    expect(row).toHaveTextContent(STRINGS.en.record.accessHistory.deniedLabel);
+    expect(row).toHaveTextContent("consent check failed");
+  });
+
+  it("flags a cross-patient denied attempt with the denied label and reason", async () => {
+    resolveAccessWith([
+      accessEntry({
+        actor_id: 9,
+        actor_type: "patient",
+        actor_display_name: null,
+        accessed_at: "2026-08-12T02:33:00Z",
+        denied: true,
+        denial_reason: "no consent",
+      }),
+    ]);
+    renderWithShell(<RecordPage />);
+    await screen.findByTestId("access-entry-0");
+
+    const row = screen.getByTestId("access-entry-0");
+    expect(row).toHaveTextContent(STRINGS.en.record.accessHistory.deniedLabel);
+    expect(row).toHaveTextContent("no consent");
+    // The intruder is shown as the generic role word only - never a resolved
+    // name and never their raw identity id (stories 21-22, #672 review).
+    expect(row.querySelector("strong")?.textContent).toBe(
+      STRINGS.en.consentLog.counterparty.patient,
+    );
+    expect(row).not.toHaveTextContent("Dr");
+    expect(row.querySelector("strong")?.textContent).not.toBe("9");
+  });
+
+  it("shows an empty state when there is no access history", async () => {
+    resolveAccessWith([]);
+    renderWithShell(<RecordPage />);
+
+    // Growing inline empty copy inside the accordion (both zones carry it).
+    const mobileCard = await screen.findByTestId("access-history");
+    expect(
+      within(mobileCard).getByText(STRINGS.en.record.accessHistory.emptyTitle),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("access-history-list")).not.toBeInTheDocument();
+  });
+
+  it("shows a loading skeleton before the entries resolve", async () => {
+    mockFetchAccessHistory.mockReturnValue(new Promise(() => {}));
+    renderWithShell(<RecordPage />);
+
+    expect(await screen.findByTestId("access-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("access-history-list")).not.toBeInTheDocument();
+  });
+
+  it("shows an error banner when access history fails and recovers on Retry", async () => {
+    resolveAccessWith(null);
+    renderWithShell(<RecordPage />);
+    await screen.findByTestId("error-banner");
+    expect(mockFetchAccessHistory).toHaveBeenCalledTimes(1);
+
+    resolveAccessWith(ACCESS_HISTORY);
+    fireEvent.click(screen.getByTestId("error-banner-retry"));
+    await screen.findByTestId("access-history-list");
+    expect(mockFetchAccessHistory).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("error-banner")).not.toBeInTheDocument();
+  });
+});
+
+describe("RecordPage PROTO-3.1 snapshot strip", () => {
+  it("never flashes counts while the record is still loading", async () => {
+    mockFetchOwnRecord.mockReturnValue(new Promise(() => {}));
+    renderWithShell(<RecordPage />);
+
+    expect(screen.queryByTestId("snapshot-strip")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("snapshot-strip-desktop"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("derives counts from the payload and shows honest zero micro-labels", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const strip = screen.getByTestId("snapshot-strip");
+    expect(within(strip).getByTestId("snapshot-all")).toHaveTextContent("5");
+    expect(within(strip).getByTestId("snapshot-prescription")) //
+      .toHaveTextContent("2");
+    // One of two rx entries is still issued -> the tile carries `1 issued`.
+    expect(screen.getByTestId("snapshot-issued")).toHaveTextContent("1 issued");
+    // No out-of-range rows in the payload: no flagged micro-label at all.
+    expect(screen.queryByTestId("snapshot-flagged")).not.toBeInTheDocument();
+  });
+
+  it("doubles as a jump-filter: it scopes the feed and mirrors aria-pressed", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("snapshot-consultation")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    fireEvent.click(screen.getByTestId("snapshot-consultation"));
+    expect(screen.getByTestId("snapshot-consultation")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("filter-chip-consultation")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    const visible = screen
+      .getByTestId("record-timeline")
+      .querySelectorAll("li");
+    expect([...visible].map((li) => li.getAttribute("data-testid"))).toEqual([
+      "entry-28",
+    ]);
+  });
+
+  it("mirrors the same counts as static read-only tiles on desktop", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const desktop = screen.getByTestId("snapshot-strip-desktop");
+    // The desktop copy is informational only - never a second set of controls.
+    expect(desktop.querySelectorAll("button")).toHaveLength(0);
+    expect(within(desktop).getByText("5")).toBeInTheDocument();
+    expect(within(desktop).getByText("Prescriptions")).toBeInTheDocument();
+    // One rx entry is still issued -> the prescription tile carries it; other
+    // tiles never claim anything about delivery.
+    expect(within(desktop).getByText("1 issued")).toBeInTheDocument();
+  });
+
+  it("renders a truthful `0 issued` micro-label, and never on other tiles", async () => {
+    resolveWith({
+      ...TIMELINE,
+      entries: [
+        entry({
+          entry_type: "prescription",
+          payload: { prescription_id: 9, status: "delivered" },
+          occurred_at: "2026-08-22T08:00:00Z",
+        }),
+        entry({
+          entry_type: "consultation",
+          payload: {},
+          occurred_at: "2026-08-21T10:30:00Z",
+        }),
+        entry({
+          entry_type: "lab_report",
+          payload: { order_id: 1042 },
+          occurred_at: "2026-08-21T14:30:00Z",
+        }),
+      ],
+    });
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    expect(
+      within(screen.getByTestId("snapshot-prescription")).getByTestId(
+        "snapshot-issued",
+      ),
+    ).toHaveTextContent("0 issued");
+    expect(
+      within(screen.getByTestId("snapshot-consultation")).queryByText(/issued/),
+    ).toBeNull();
+    expect(
+      within(screen.getByTestId("snapshot-lab_report")).queryByText(/issued/),
+    ).toBeNull();
+    expect(
+      within(screen.getByTestId("snapshot-strip-desktop")).getByText(
+        "0 issued",
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("RecordPage PROTO-3.1 filter chip vocabulary", () => {
+  it("renders Metrics as a 720px+ chip and in the mobile More menu", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("filter-chip-metric")).toBeInTheDocument();
+    // jsdom applies no media queries, so the desktop chip and the mobile
+    // More copy coexist - the chip is the >=720px surface, the menu the
+    // <720px one.
+    openMoreMenu();
+    expect(
+      screen.getByRole("menuitemradio", { name: "Metrics" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitemradio", { name: "Lab results" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("RecordPage PROTO-3.1 timeline date grouping", () => {
+  it("labels month buckets with a localized heading and count", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("group-2026-08")).toBeInTheDocument();
+    expect(screen.getByTestId("group-count-2026-08")).toHaveTextContent("5");
+  });
+
+  // #667: the spacing contract lives on the group section, not the heading.
+  // Two groups so the contract is pinned on every section; jsdom computes no
+  // styles, so the class list is the only observable. `first:mt-0` on the
+  // section - a sibling under the timeline wrapper - suppresses only the very
+  // first group; on the heading (always first-child of its own section) it
+  // suppressed the margin for every group.
+  it("carries the month-divider spacing contract on each group section, not the heading (#667)", async () => {
+    resolveWith({
+      ...TIMELINE,
+      entries: [
+        ...TIMELINE.entries,
+        entry({ entry_id: 20, occurred_at: "2026-07-05T10:00:00Z" }),
+      ],
+    });
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    for (const key of ["2026-08", "2026-07"]) {
+      const heading = screen.getByTestId(`group-${key}`);
+      expect(heading.parentElement).toHaveClass("mt-5", "first:mt-0");
+      expect(heading).not.toHaveClass("mt-5");
+      expect(heading).not.toHaveClass("first:mt-0");
+    }
+  });
+
+  it("links every entry card to its detail page", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("entry-link-24")).toHaveAttribute(
+      "href",
+      "/patient/record/24",
+    );
+    expect(screen.getByTestId("entry-link-26")).toHaveAttribute(
+      "href",
+      "/patient/record/26",
+    );
+  });
+});
+
+describe("RecordPage PROTO-3.1 out-of-range lab flags", () => {
+  const FLAGGED_TIMELINE: RecordTimeline = {
+    ...TIMELINE,
+    entries: [
+      entry({
+        entry_id: 26,
+        entry_type: "lab_report",
+        payload: {
+          order_id: 1042,
+          filename: "cbc-panel.pdf",
+          results: [
+            { test: "Hb", value: "8.2", status: "below_range" },
+            { test: "WBC", value: "12.1", status: "above_range" },
+          ],
+        },
+        occurred_at: "2026-08-21T14:30:00Z",
+      }),
+    ],
+  };
+
+  it("renders per-row amber badges and the flagged micro-label", async () => {
+    resolveWith(FLAGGED_TIMELINE);
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("lab-flag-26-0")).toHaveTextContent(
+      "Hb 8.2 · below usual range",
+    );
+    expect(screen.getByTestId("lab-flag-26-1")).toHaveTextContent(
+      "WBC 12.1 · above usual range",
+    );
+    expect(screen.getByTestId("snapshot-flagged")).toHaveTextContent(
+      "1 flagged",
+    );
+  });
+
+  it("summarizes flagged rows in the desktop rail footnote", async () => {
+    resolveWith(FLAGGED_TIMELINE);
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const rail = screen.getByTestId("record-rail");
+    expect(within(rail).getByTestId("record-rail-flag-footnote")) //
+      .toHaveTextContent("2 values outside your usual range");
+  });
+});
+
+describe("RecordPage PROTO-3.1 zones", () => {
+  it("stacks the health snapshot and who-accessed cards under the mobile feed", async () => {
+    renderWithShell(<RecordPage />);
+    await screen.findByTestId("access-history-list");
+
+    const mobile = screen.getByTestId("record-privacy-mobile");
+    await within(mobile).findByTestId("health-snapshot");
+    expect(within(mobile).getByTestId("access-history")).toBeInTheDocument();
+    // The consent-log entry point sits outside the accordion's <details>, so it
+    // is visible in the default (closed) state (prototype posture).
+    const mobileLink = within(mobile).getByTestId("access-consent-log-link");
+    expect(mobileLink).toHaveAttribute("href", "/patient/record/consent-log");
+    expect(mobile.querySelector("details")).not.toContainElement(mobileLink);
+  });
+
+  it("mirrors the summary, health snapshot and who-accessed list in the rail", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+    await screen.findByTestId("access-history-rail-list");
+
+    const rail = screen.getByTestId("record-rail");
+    expect(within(rail).getByTestId("record-rail-summary")).toBeInTheDocument();
+    await within(rail).findByTestId("health-snapshot");
+    const railLink = within(rail).getByTestId("access-consent-log-link-rail");
+    expect(railLink).toHaveAttribute("href", "/patient/record/consent-log");
+    expect(rail.querySelector("details")).not.toContainElement(railLink);
+    // The rail carries its own access list testid set (same data, newest first).
+    expect(
+      within(rail).getByTestId("access-history-rail-list"),
+    ).toBeInTheDocument();
+    expect(within(rail).getByTestId("access-entry-rail-0")).toHaveTextContent(
+      "Dr A Kumar",
+    );
+  });
+
+  it("renders only the latest five rows with the full-count badge", async () => {
+    const many = Array.from({ length: 7 }, (_, i) =>
+      accessEntry({
+        actor_id: i + 10,
+        actor_type: "doctor",
+        accessed_at: `2026-08-${String(i + 1).padStart(2, "0")}T09:00:00Z`,
+      }),
+    );
+    resolveAccessWith(many);
+    renderWithShell(<RecordPage />);
+    await screen.findByTestId("access-history-list");
+
+    const mobile = screen.getByTestId("record-privacy-mobile");
+    const list = within(mobile).getByTestId("access-history-list");
+    expect(list.querySelectorAll("li")).toHaveLength(5);
+    // The badge reports the full audit count, not the five rendered rows.
+    expect(within(mobile).getByTestId("access-history")).toHaveTextContent("7");
+    // The consent-log entry point stays visible in the collapsed state.
+    const mobileLink = within(mobile).getByTestId("access-consent-log-link");
+    expect(mobile.querySelector("details")).not.toContainElement(mobileLink);
+  });
+
+  it("summarizes payload counts in the at-a-glance rail card", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const summary = screen.getByTestId("record-rail-summary");
+    expect(within(summary).getByText("Consultations")).toBeInTheDocument();
+    // One entry per consultation/lab/metric; two prescriptions.
+    expect(within(summary).getAllByText("1")).toHaveLength(3);
+    expect(within(summary).getByText("2")).toBeInTheDocument();
+  });
+});
+
+describe("RecordPage PROTO-3.1 professional prescription cards (#515)", () => {
+  function resolveRx(payload: Record<string, unknown>) {
+    resolveWith({
+      ...TIMELINE,
+      entries: [
+        entry({
+          entry_id: 50,
+          entry_type: "prescription",
+          payload,
+          occurred_at: "2026-08-19T09:00:00Z",
+        }),
+        entry({
+          entry_id: 49,
+          entry_type: "consultation",
+          payload: {},
+          occurred_at: "2026-08-18T10:00:00Z",
+        }),
+      ],
+    });
+  }
+
+  it("renders an enriched issued prescription titled by record type with the medicine in the subtitle", async () => {
+    resolveRx({
+      prescription_id: 12,
+      status: "issued",
+      items: [
+        {
+          name: "Amlodipine",
+          dose: "5 mg",
+          frequency: "once daily",
+          duration: "30 tablets",
+        },
+      ],
+      attributed_doctor_name: "Dr. A. Kumar",
+    });
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const card = screen.getByTestId("entry-50");
+    expect(card).toHaveTextContent(STRINGS.en.record.badge.prescription);
+    expect(card).toHaveTextContent("Amlodipine");
+    expect(card).toHaveTextContent("5 mg · once daily · 30 tablets");
+    expect(card).toHaveTextContent("issued by Dr. A. Kumar");
+    expect(card).toHaveTextContent(STRINGS.en.record.badge.active);
+  });
+
+  it("renders the chemist line on a delivered enriched prescription", async () => {
+    resolveRx({
+      prescription_id: 9,
+      status: "delivered",
+      items: [{ name: "Amlodipine", dose: "5 mg" }],
+      attributed_doctor_name: "Dr. A. Kumar",
+      chemist_name: "Ramesh Medical Store",
+    });
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const card = screen.getByTestId("entry-50");
+    expect(card).toHaveTextContent("Ramesh Medical Store");
+    expect(card).toHaveTextContent(STRINGS.en.record.badge.delivered);
+  });
+
+  it("shows a +N more indicator on a multi-item prescription", async () => {
+    resolveRx({
+      prescription_id: 12,
+      status: "issued",
+      items: [
+        { name: "Amlodipine", dose: "5 mg", frequency: "once daily" },
+        { name: "Atorvastatin", dose: "10 mg", frequency: "at night" },
+      ],
+      attributed_doctor_name: "Dr. A. Kumar",
+    });
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    expect(screen.getByTestId("entry-50")).toHaveTextContent(
+      STRINGS.en.record.moreItems(1),
+    );
+  });
+
+  it("falls back to neutral attribution copy when no doctor name is present", async () => {
+    resolveRx({
+      prescription_id: 12,
+      status: "issued",
+      items: [{ name: "Amlodipine", dose: "5 mg", frequency: "once daily" }],
+      attributed_doctor_name: null,
+    });
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const card = screen.getByTestId("entry-50");
+    expect(card).toHaveTextContent("Amlodipine");
+    expect(card).toHaveTextContent(STRINGS.en.record.issuedByNeutral);
+    expect(card).not.toHaveTextContent(/issued by Dr/);
+  });
+
+  it("keeps the lean Rx form for a legacy prescription without items", async () => {
+    renderWithShell(<RecordPage />);
+    await waitForTimeline();
+
+    const card = screen.getByTestId("entry-30");
+    expect(card).toHaveTextContent("Prescription");
+    expect(card).toHaveTextContent("Rx #12 · 19 Aug 2026");
+  });
+});

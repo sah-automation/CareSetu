@@ -1,0 +1,342 @@
+"""MOD-005: config-driven EXT-002 gateway builder + circuit breaker (PHASE-7).
+
+This module hosts the config-driven gateway builder (T04 #381):
+``build_ai_gateway`` resolves the ``AiGateway`` port from ``Settings`` - mock
+(unchanged default, unwrapped) or, for a real provider, an
+``OpenAiCompatibleAdapter`` (T02 #379) wrapped in the circuit breaker, composed
+into a primary + secondary ``FallbackAiGateway`` chain (T03 #380) when the
+all-or-none fallback set is configured.
+
+``CircuitBreakerAiGateway`` provides the in-process circuit breaker: while the
+provider is down every call fast-fails without a retry burst
+(third-party-integration-standards §1). It is reserved for the real-provider
+path and never wraps the mock. Outage failures from the wire adapter
+(``Ext002CallError(retries_exhausted=True)``, after network / timeout / 429 /
+5xx exhaust the retry budget) are the only events that trip it; a 4xx contract
+rejection or a malformed payload is a non-retryable ``Ext002CallError(
+retries_exhausted=False)`` that never trips it (error-handling-observability §1).
+
+Only the intake context embedded in each request (``AiEgressContext`` plus the
+transcript/audio being processed) is ever forwarded - never name, phone, or the
+full record (NFR-SEC-006). ``Settings.__post_init__`` gates a real provider key
+to staging/production (fail-closed), so the real EXT-002 path can never run
+against a dev credential unless ``AI_ALLOW_DEV_PROVIDER`` overrides the gate.
+
+The ``@observe`` annotations on the breaker wrapper (which is part of the AI
+boundary) keep the pre-commit AI-tracing gate (ai-engineering-standards A7)
+green.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
+
+from langfuse import observe
+
+from app.config import Settings, get_settings
+from modules.intake.adapters.ai_gateway import (
+    AiGateway,
+    DraftRxRequest,
+    DraftRxResult,
+    EvaluateRequest,
+    EvaluateResult,
+    Ext002CallError,
+    StructureRequest,
+    StructureResult,
+    TranscribeRequest,
+    TranscribeResult,
+)
+from modules.intake.adapters.ai_provider_fallback import AiGatewayMeta, FallbackAiGateway
+from modules.intake.adapters.ai_provider_mock import build_mock_ai_gateway
+from modules.intake.adapters.ai_provider_openai_compatible import OpenAiCompatibleAdapter
+from observability.langfuse_span import set_span_metadata
+
+logger = logging.getLogger(__name__)
+
+
+_R = TypeVar("_R")
+
+
+class CircuitBreakerAiGateway:
+    """Wraps the real provider: fast-fails every call while it is down.
+
+    An in-process circuit breaker so a provider outage never hammers EXT-002
+    with a retry burst (third-party-integration-standards §1). While open, calls
+    are refused until the cooldown elapses; the first call after the cooldown is
+    the recovery probe - success closes the breaker, failure opens it again.
+    Only genuine outage failures (``Ext002CallError(retries_exhausted=True)``)
+    trip it - a contract rejection is the caller's problem and is never counted
+    (error-handling-observability §1). The mock is never wrapped - this class
+    exists only on the real provider path.
+    """
+
+    def __init__(
+        self,
+        adapter: AiGateway,
+        *,
+        threshold: int,
+        cooldown_seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+        enabled: bool = True,
+    ) -> None:
+        self._adapter = adapter
+        self._threshold = threshold
+        self._cooldown_seconds = cooldown_seconds
+        self._clock = clock
+        self._enabled = enabled
+        self._open = False
+        self._consecutive_failures = 0
+        self._opened_at: float | None = None
+
+    @property
+    def effective_provider(self) -> str | None:
+        """Delegate the wrapped adapter's serving provider to the pipeline."""
+        return self._adapter.effective_provider
+
+    @property
+    def effective_model(self) -> str | None:
+        """Delegate the wrapped adapter's serving model to the pipeline."""
+        return self._adapter.effective_model
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def _allow(self) -> bool:
+        if not self._enabled:
+            return True
+        if self._open and self._opened_at is not None:
+            if self._clock() - self._opened_at >= self._cooldown_seconds:
+                self._open = False
+                return True
+            return False
+        return True
+
+    def _record(self, ok: bool) -> None:
+        if not self._enabled:
+            return
+        if ok:
+            self._consecutive_failures = 0
+            self._open = False
+            return
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._threshold:
+            self._open = True
+            self._opened_at = self._clock()
+            logger.warning(
+                "EXT-002 circuit breaker opened after %d consecutive outage failures",
+                self._consecutive_failures,
+            )
+
+    async def _run_with_breaker(self, name: str, fn: Awaitable[_R]) -> _R:
+        if not self._allow():
+            self._record_span(name, status="failed")
+            raise Ext002CallError(
+                "EXT-002 circuit breaker is open; call refused without the provider",
+                retries_exhausted=True,
+            )
+        try:
+            result = await fn
+        except Ext002CallError as exc:
+            if exc.retries_exhausted:
+                self._record(ok=False)
+                self._record_span(name, status="failed")
+            raise
+        self._record(ok=True)
+        self._record_span(name, status="success")
+        return result
+
+    def _record_span(self, task_type: str, *, status: str) -> None:
+        """Best-effort attach the allow-listed span metadata (PHASE-14A B2, #700).
+
+        Runs inside the public ``@observe`` method's span (``_run_with_breaker``
+        is called from it), so a breaker fast-fail or an outage is visible on
+        the span as ``status=failed``. Never raises; a no-op when Langfuse is off.
+        """
+        set_span_metadata(
+            task_type=task_type,
+            provider=self.effective_provider,
+            model=self.effective_model,
+            status=status,
+        )
+
+    @observe(name="ai_transcribe", capture_input=False, capture_output=False)
+    async def transcribe(self, request: TranscribeRequest) -> TranscribeResult:
+        return await self._run_with_breaker("transcribe", self._adapter.transcribe(request))
+
+    @observe(name="ai_structure", capture_input=False, capture_output=False)
+    async def structure(self, request: StructureRequest) -> StructureResult:
+        return await self._run_with_breaker("structure", self._adapter.structure(request))
+
+    @observe(name="ai_draft_rx", capture_input=False, capture_output=False)
+    async def draft_rx(self, request: DraftRxRequest) -> DraftRxResult:
+        return await self._run_with_breaker("draft_rx", self._adapter.draft_rx(request))
+
+    @observe(name="ai_evaluate", capture_input=False, capture_output=False)
+    async def evaluate(self, request: EvaluateRequest) -> EvaluateResult:
+        return await self._run_with_breaker("evaluate", self._adapter.evaluate(request))
+
+
+def build_ai_gateway(
+    settings: Any = None,
+    override_source: Any = None,
+    *,
+    resolver: Any = None,
+    ai_config: Any = None,
+    overrides: Any = None,
+    override: Any = None,
+    source: Any = None,
+    db_overrides: Any = None,
+    **kwargs: Any,
+) -> AiGateway:
+    """Resolve the EXT-002 gateway from config; mock is the fail-closed default.
+
+    ``Settings.__post_init__`` has already refused a real provider in dev/test
+    (unless demo mode forced the mock or ``AI_ALLOW_DEV_PROVIDER`` overrode the
+    gate), so reaching the provider branch here means a staging/production
+    environment with a configured key (or an explicit dev override). The registry
+    is keyed on ``ai_provider`` in ``{"mock", "openai_compatible"}``:
+
+    - ``mock`` -> the mock adapter, unchanged and NEVER wrapped in a breaker or
+      fallback chain (its canned clean confidence would look like real structure).
+    - ``openai_compatible`` -> an ``OpenAiCompatibleAdapter`` wrapped in the
+      circuit breaker; when the all-or-none fallback set is configured, the
+      breaker-wrapped primary and secondary are composed into a
+      ``FallbackAiGateway`` that engages the secondary only on genuine outages.
+    """
+    from modules.intake.ai_config import AiConfigResolver
+
+    if settings is not None and not isinstance(settings, Settings) and override_source is None:
+        override_source = settings
+        settings = None
+    if settings is None:
+        settings = get_settings()
+    if ai_config is None:
+        if resolver is not None and hasattr(resolver, "resolve"):
+            ai_config = resolver.resolve()
+        else:
+            src = (
+                override_source
+                if override_source is not None
+                else (
+                    overrides
+                    if overrides is not None
+                    else (
+                        override
+                        if override is not None
+                        else (source if source is not None else db_overrides)
+                    )
+                )
+            )
+            ai_config = AiConfigResolver(settings, override_source=src, **kwargs).resolve()
+
+    provider = (
+        str(
+            getattr(ai_config, "provider", None)
+            or getattr(ai_config, "ai_provider", settings.ai_provider)
+        )
+        .strip()
+        .lower()
+    )
+    degraded_mode = bool(getattr(ai_config, "degraded_mode", settings.degraded_mode))
+    api_key = getattr(ai_config, "api_key", None)
+    if api_key is None:
+        api_key = getattr(ai_config, "ai_api_key", settings.ai_api_key)
+    base_url = getattr(ai_config, "base_url", None)
+    if base_url is None:
+        base_url = getattr(ai_config, "ai_base_url", settings.ai_base_url)
+    model = getattr(ai_config, "model", None)
+    if not model:
+        model = getattr(ai_config, "ai_model", settings.ai_model)
+    asr_model = getattr(ai_config, "asr_model", None)
+    if not asr_model:
+        asr_model = getattr(ai_config, "ai_asr_model", settings.ai_asr_model)
+    timeout_seconds = getattr(ai_config, "timeout_seconds", None)
+    if timeout_seconds is None:
+        timeout_seconds = getattr(ai_config, "ai_timeout_seconds", settings.ai_timeout_seconds)
+    max_retries = getattr(ai_config, "max_retries", None)
+    if max_retries is None:
+        max_retries = getattr(ai_config, "ai_max_retries", settings.ai_max_retries)
+    fallback_provider = (
+        str(
+            getattr(ai_config, "fallback_provider", None)
+            or getattr(ai_config, "ai_fallback_provider", settings.ai_fallback_provider)
+        )
+        .strip()
+        .lower()
+    )
+    fallback_model = getattr(ai_config, "fallback_model", None)
+    if not fallback_model:
+        fallback_model = getattr(ai_config, "ai_fallback_model", settings.ai_fallback_model)
+    fallback_api_key = getattr(ai_config, "fallback_api_key", None)
+    if fallback_api_key is None:
+        fallback_api_key = getattr(ai_config, "ai_fallback_api_key", settings.ai_fallback_api_key)
+    fallback_base_url = getattr(ai_config, "fallback_base_url", None)
+    if fallback_base_url is None:
+        fallback_base_url = getattr(
+            ai_config, "ai_fallback_base_url", settings.ai_fallback_base_url
+        )
+    cb_threshold = getattr(
+        ai_config, "circuit_breaker_threshold", settings.ai_circuit_breaker_threshold
+    )
+    cb_cooldown = getattr(
+        ai_config, "circuit_breaker_cooldown_seconds", settings.ai_circuit_breaker_cooldown_seconds
+    )
+    cb_enabled = getattr(ai_config, "circuit_breaker_enabled", settings.circuit_breaker_enabled)
+
+    if degraded_mode:
+        logger.warning("degraded mode enabled; forcing AI gateway to mock provider")
+        return build_mock_ai_gateway()
+    if provider == "mock":
+        return build_mock_ai_gateway()
+    primary = CircuitBreakerAiGateway(
+        OpenAiCompatibleAdapter(
+            api_key=str(api_key),
+            base_url=str(base_url),
+            model=str(model),
+            asr_model=str(asr_model),
+            timeout_seconds=float(timeout_seconds or 30.0),
+            max_retries=int(max_retries or 1),
+        ),
+        threshold=cb_threshold,
+        cooldown_seconds=cb_cooldown,
+        enabled=cb_enabled,
+    )
+    if fallback_provider.strip():
+        # Only build secondary if fallback configured.
+        secondary = CircuitBreakerAiGateway(
+            OpenAiCompatibleAdapter(
+                api_key=str(fallback_api_key),
+                base_url=str(fallback_base_url),
+                model=str(fallback_model),
+                asr_model=str(asr_model),
+                timeout_seconds=float(timeout_seconds or 30.0),
+                max_retries=int(max_retries or 1),
+            ),
+            threshold=cb_threshold,
+            cooldown_seconds=cb_cooldown,
+            enabled=cb_enabled,
+        )
+        return FallbackAiGateway(
+            primary=primary,
+            primary_meta=AiGatewayMeta(
+                provider=provider,
+                model=str(model),
+            ),
+            secondary=secondary,
+            secondary_meta=AiGatewayMeta(
+                provider=fallback_provider,
+                model=str(fallback_model),
+            ),
+        )
+    return primary
+
+
+__all__ = [
+    "CircuitBreakerAiGateway",
+    "Ext002CallError",
+    "build_ai_gateway",
+]

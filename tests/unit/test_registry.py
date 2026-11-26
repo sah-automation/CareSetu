@@ -51,7 +51,7 @@ def test_event_types_route_independently() -> None:
 def test_register_rejects_non_domain_action_event_type() -> None:
     registry = HandlerRegistry()
 
-    for invalid in ("no_dot", "Domain.action", "domain.Action", "9dom.action"):
+    for invalid in ("domain", "9dom_x", "Domain.action", "domain.Action", "9dom.action"):
         with pytest.raises(ValueError):
             registry.register(invalid, _handler_a)
 
@@ -91,7 +91,7 @@ def test_register_payload_model_rejects_non_domain_action_event_type() -> None:
     registry = HandlerRegistry()
 
     with pytest.raises(ValueError):
-        registry.register_payload_model("no_dot", SamplePayload)
+        registry.register_payload_model("domain", SamplePayload)
 
 
 def test_register_payload_model_twice_for_one_event_type_is_rejected() -> None:

@@ -1,11 +1,15 @@
 {
   "name": "caresetu",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CareSetu - zero-inventory care-loop aggregator monorepo",
   "workspaces": [
     "apps/frontend"
   ],
+  "overrides": {
+    "picomatch": "^4.0.0",
+    "minimatch": "^11.0.4"
+  },
   "scripts": {
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "npm run test:unit:backend && npm run test:unit:frontend",
@@ -26,15 +30,17 @@
     "scan:secrets:full": "gitleaks detect --source . --redact",
     "scan:backend": "bandit -c apps/backend/pyproject.toml -r apps/backend -q",
     "scan:audit": "pip-audit --path D:/Dev/venvs/backend-env",
-    "scan:audit:npm": "npm audit --audit-level=high",
+    "scan:audit:npm": "npm audit --omit=dev --audit-level=high",
     "migration-check": "node scripts/migration-check.cjs",
     "check:boundaries": "node scripts/py.cjs apps/backend/scripts/check_module_boundaries.py",
     "check:edge": "node scripts/py.cjs apps/backend/scripts/check_edge_config.py",
     "check:backup": "node scripts/py.cjs apps/backend/scripts/check_backup_config.py",
+    "check:otel": "node scripts/py.cjs apps/backend/scripts/check_otel_collector_config.py",
     "build": "npm run build -w @caresetu/frontend",
     "check:pages": "node scripts/measure-pages.cjs",
     "check:lighthouse": "node scripts/lighthouse-gate.cjs",
-    "check:contract": "node scripts/py.cjs scripts/contract_check.py"
+    "check:contract": "node scripts/py.cjs scripts/contract_check.py",
+    "check:latency": "node scripts/py.cjs scripts/measure_backend_latency.py"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

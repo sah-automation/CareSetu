@@ -20,8 +20,11 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Annotated
 
 import pytest
+from fastapi import Depends
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import Response
@@ -29,7 +32,7 @@ from starlette.responses import Response
 from app.config import Settings, get_settings
 from app.gateway.principal import Principal
 from app.gateway.rate_limit import _MAX_TRACKED_BUCKETS, RateLimitMiddleware
-from app.gateway.rbac import resolve_scope_roles
+from app.gateway.rbac import require_admin, require_patient, resolve_scope_roles
 from app.main import create_app
 from modules.iam.domain.jwt import issue_token
 from modules.iam.facade import RegisterPatientResult, VerifyOtpResult
@@ -52,11 +55,13 @@ _RESULT = RegisterPatientResult(
 
 
 class StubFacade:
-    """Facade stand-in so auth routes answer without a database.
+    """Facade stand-in so auth routes and ``/v1/me`` answer without a database.
 
     ``access_denials`` records the identities whose 403 the gateway asked the
     facade to audit (PHASE-2 REM T7, #87), so tests can pin the emission and
-    its absence.
+    its absence. ``identity_phone`` answers the protected route's one-column
+    phone lookup with the registered fixture identity's number (PHASE-2.6
+    T05, #196).
     """
 
     def __init__(self) -> None:
@@ -70,6 +75,9 @@ class StubFacade:
 
     async def emit_access_denied(self, identity_id: int) -> None:
         self.access_denials.append(identity_id)
+
+    async def identity_phone(self, identity_id: int) -> str:
+        return _RESULT.phone_e164
 
 
 class FailingEmitFacade(StubFacade):
@@ -85,6 +93,7 @@ def _issue_access_token(
     scope: str = "patient",
     now: datetime | None = None,
     key: str = _SIGNING_KEY,
+    tier: str | None = None,
 ) -> str:
     """A valid HS256 access JWT minted exactly like ``issue_session`` does."""
     return issue_token(
@@ -93,6 +102,7 @@ def _issue_access_token(
         scope=scope,
         signing_key=key,
         now=now or datetime.now(UTC),
+        tier=tier,
     )
 
 
@@ -149,16 +159,59 @@ def _protected_client(
 ) -> TestClient:
     """The real app: the ``/v1/me`` protected route proves admit/deny.
 
-    ``facade`` (when given) replaces ``app.state.iam_facade`` after the app is
-    built so the 403 path answers without a database; the middleware's
-    ``validate_token`` is stateless (signature + expiry only) and keeps working
-    off the real facade it was bound to at build time.
+    ``app.state.iam_facade`` is replaced after the app is built - with
+    ``facade`` when given, else a fresh ``StubFacade`` - so every route answer
+    resolves without a database: the 403 path's access-denial emission
+    (PHASE-2 REM T7, #87) and the admitted ``/v1/me`` phone lookup (PHASE-2.6
+    T05, #196) both go through that seam. The middleware's ``validate_token``
+    is stateless (signature + expiry only) and keeps working off the real
+    facade it was bound to at build time.
     """
     if settings is None:
         settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
     app = create_app(settings=settings)
-    if facade is not None:
-        app.state.iam_facade = facade
+    app.state.iam_facade = facade if facade is not None else StubFacade()
+    return TestClient(app)
+
+
+def _patient_only_client(
+    settings: Settings | None = None, facade: StubFacade | None = None
+) -> TestClient:
+    """App with a patient-only probe route for 403 access-denial testing.
+
+    ``/v1/me`` now admits any authenticated principal, so the 403 audit-emit
+    coverage moves here - a patient-only route that still raises
+    ``InsufficientScopeError`` for a ``superadmin`` token.
+    """
+    if settings is None:
+        settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
+    app = create_app(settings=settings)
+    app.state.iam_facade = facade if facade is not None else StubFacade()
+
+    @app.get("/v1/probe/patient")
+    async def patient_probe(
+        request: Request, principal: Annotated[Principal, Depends(require_patient)]
+    ) -> dict[str, str]:
+        return {"subject_id": principal.subject_id}
+
+    return TestClient(app)
+
+
+def _admin_only_client(
+    settings: Settings | None = None, facade: StubFacade | None = None
+) -> TestClient:
+    """App with an admin-only probe route (spec #761 tier guard)."""
+    if settings is None:
+        settings = Settings(gateway_jwt_verify_enabled=True, gateway_jwt_signing_key=_SIGNING_KEY)
+    app = create_app(settings=settings)
+    app.state.iam_facade = facade if facade is not None else StubFacade()
+
+    @app.get("/v1/probe/admin")
+    async def admin_probe(
+        request: Request, principal: Annotated[Principal, Depends(require_admin)]
+    ) -> dict[str, object]:
+        return {"subject_id": principal.subject_id, "tier": principal.tier}
+
     return TestClient(app)
 
 
@@ -178,20 +231,23 @@ def _assert_gateway_rejection_logged(caplog: pytest.LogCaptureFixture, trace_id:
     )
 
 
-def _auth_request(client_ip: str) -> Request:
-    """A crafted ``/v1/auth`` scope presenting ``client_ip`` as the caller's host.
+def _dispatch_request(
+    client_ip: str, *, path: str = "/v1/auth/register", method: str = "POST"
+) -> Request:
+    """A crafted HTTP scope presenting ``client_ip`` as the caller's host.
 
-    ``TestClient`` hardcodes a single client IP, so the per-IP isolation test
-    (B4) builds its own scopes and drives ``RateLimitMiddleware.dispatch``
-    directly instead of going through the app.
+    ``TestClient`` hardcodes a single client IP, so the per-IP isolation tests
+    (B4) build their own scopes and drive ``RateLimitMiddleware.dispatch``
+    directly instead of going through the app. ``path``/``method`` are
+    overridable so the intake-surface scope tests reuse the same harness.
     """
     return Request(
         scope={
             "type": "http",
-            "method": "POST",
+            "method": method,
             "scheme": "http",
-            "path": "/v1/auth/register",
-            "raw_path": b"/v1/auth/register",
+            "path": path,
+            "raw_path": path.encode(),
             "query_string": b"",
             "root_path": "",
             "headers": [],
@@ -199,6 +255,11 @@ def _auth_request(client_ip: str) -> Request:
             "server": ("testserver", 80),
         }
     )
+
+
+def _auth_request(client_ip: str) -> Request:
+    """A crafted ``/v1/auth`` scope presenting ``client_ip`` as the caller's host."""
+    return _dispatch_request(client_ip)
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +321,7 @@ def test_jwt_verify_denies_presented_malformed_token(
 
 def test_jwt_verify_denies_expired_token() -> None:
     client = _protected_client()
-    expired = _issue_access_token(now=datetime.now(UTC) - timedelta(hours=1))
+    expired = _issue_access_token(now=datetime.now(UTC) - timedelta(hours=3))
 
     response = client.get("/v1/me", headers=_bearer(expired))
 
@@ -342,13 +403,43 @@ def test_blank_request_id_falls_back_to_minted_trace_id(
 
 
 def test_request_id_guard_rejects_log_unsafe_tokens() -> None:
-    from app.gateway.trace import _is_safe_trace_id
+    """#757: the client id is honoured only when it is an identifier we can store.
 
-    assert _is_safe_trace_id("abc-123._:/~")
-    assert not _is_safe_trace_id("")
-    assert not _is_safe_trace_id("a b")
-    assert not _is_safe_trace_id("a\nb")
-    assert not _is_safe_trace_id("a" * 129)
+    The rule is the platform's own (see ``observability.trace_ids``): printable
+    ASCII, no whitespace, no URL separator, at most the column's width. A value
+    outside it is not echoed - a minted id is used instead.
+    """
+    from observability.trace_ids import is_safe_trace_id
+
+    assert is_safe_trace_id("abc-123._")
+    assert not is_safe_trace_id("")
+    assert not is_safe_trace_id("a b")
+    assert not is_safe_trace_id("a\nb")
+    assert not is_safe_trace_id("a" * 65)
+    # A separator a URL would have to escape is not an identifier.
+    assert not is_safe_trace_id("abc/123")
+    assert not is_safe_trace_id("abc:123")
+    assert not is_safe_trace_id("abc'123")
+
+
+def test_a_client_trace_id_that_is_not_storable_is_replaced_by_a_minted_one() -> None:
+    """#757: an over-long id would wedge the product ledger's write.
+
+    ``observability_product_events.trace_id`` and ``session_key`` are
+    ``VARCHAR(64)``, and the product event writer does not clamp - so an id
+    longer than that reaches an insert that raises on length, and the row for
+    that step is never written. The gateway therefore refuses the id rather
+    than storing one it cannot write.
+    """
+    client = _protected_client()
+
+    response = client.get("/v1/me", headers={"X-Request-Id": "t" * 200})
+
+    assert response.status_code == 401
+    trace_id = response.json()["trace_id"]
+    assert trace_id
+    assert trace_id != "t" * 200
+    assert len(trace_id) <= 64
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +453,98 @@ def test_valid_patient_token_admitted_to_protected_route() -> None:
     response = client.get("/v1/me", headers=_bearer(_issue_access_token(subject_id=7)))
 
     assert response.status_code == 200
-    assert response.json() == {"subject_id": "7", "roles": ["patient"]}
+    assert response.json() == {
+        "subject_id": "7",
+        "roles": ["patient"],
+        "phone": "+919876543210",
+        "tier": None,
+    }
+
+
+def test_valid_operator_token_admitted_to_v1_me() -> None:
+    client = _protected_client()
+
+    response = client.get(
+        "/v1/me", headers=_bearer(_issue_access_token(subject_id=12, scope="operator"))
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "subject_id": "12",
+        "roles": ["operator"],
+        "phone": "+919876543210",
+        "tier": None,
+    }
+
+
+def test_valid_partner_token_admitted_to_v1_me() -> None:
+    client = _protected_client()
+
+    response = client.get(
+        "/v1/me", headers=_bearer(_issue_access_token(subject_id=9, scope="partner"))
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "subject_id": "9",
+        "roles": ["partner"],
+        "phone": "+919876543210",
+        "tier": None,
+    }
+
+
+def test_operator_me_response_carries_the_token_tier() -> None:
+    client = _protected_client()
+
+    response = client.get(
+        "/v1/me",
+        headers=_bearer(_issue_access_token(subject_id=12, scope="operator", tier="admin")),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "subject_id": "12",
+        "roles": ["operator"],
+        "phone": "+919876543210",
+        "tier": "admin",
+    }
+
+
+def test_admin_guard_admits_an_admin_tier_operator() -> None:
+    client = _admin_only_client()
+
+    response = client.get(
+        "/v1/probe/admin",
+        headers=_bearer(_issue_access_token(subject_id=12, scope="operator", tier="admin")),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"subject_id": "12", "tier": "admin"}
+
+
+@pytest.mark.parametrize(
+    ("scope", "tier", "label"),
+    [
+        ("operator", "operator", "operator-tier"),
+        ("operator", None, "missing-tier"),
+        ("operator", "superadmin", "unknown-tier"),
+        ("patient", "admin", "non-operator"),
+    ],
+)
+def test_admin_guard_denies_with_the_shared_403_envelope(
+    scope: str, tier: str | None, label: str
+) -> None:
+    client = _admin_only_client()
+
+    response = client.get(
+        "/v1/probe/admin",
+        headers=_bearer(_issue_access_token(subject_id=12, scope=scope, tier=tier)),
+    )
+
+    assert response.status_code == 403, label
+    body = response.json()
+    assert body["code"] == "AUTH_INSUFFICIENT_SCOPE"
+    assert body["details"] == {}
 
 
 def test_authenticated_caller_without_patient_scope_denied_403(
@@ -370,10 +552,10 @@ def test_authenticated_caller_without_patient_scope_denied_403(
 ) -> None:
     caplog.set_level(logging.WARNING)
     facade = StubFacade()
-    client = _protected_client(facade=facade)
+    client = _patient_only_client(facade=facade)
     token = _issue_access_token(scope="superadmin")
 
-    response = client.get("/v1/me", headers=_with_trace(_bearer(token)))
+    response = client.get("/v1/probe/patient", headers=_with_trace(_bearer(token)))
 
     assert response.status_code == 403
     body = response.json()
@@ -385,9 +567,11 @@ def test_authenticated_caller_without_patient_scope_denied_403(
 
 def test_authenticated_403_emits_access_denial_audit_for_the_named_identity() -> None:
     facade = StubFacade()
-    client = _protected_client(facade=facade)
+    client = _patient_only_client(facade=facade)
 
-    response = client.get("/v1/me", headers=_bearer(_issue_access_token(scope="superadmin")))
+    response = client.get(
+        "/v1/probe/patient", headers=_bearer(_issue_access_token(scope="superadmin"))
+    )
 
     assert response.status_code == 403
     # The gateway passes the authenticated principal's subject - the same
@@ -428,9 +612,11 @@ def test_403_survives_an_access_denial_emit_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR)
-    client = _protected_client(facade=FailingEmitFacade())
+    client = _patient_only_client(facade=FailingEmitFacade())
 
-    response = client.get("/v1/me", headers=_bearer(_issue_access_token(scope="superadmin")))
+    response = client.get(
+        "/v1/probe/patient", headers=_bearer(_issue_access_token(scope="superadmin"))
+    )
 
     assert response.status_code == 403
     assert response.json()["code"] == "AUTH_INSUFFICIENT_SCOPE"
@@ -587,6 +773,8 @@ def test_valid_auth_flows_pass_under_rate_cap() -> None:
     assert client.get("/v1/me", headers=_bearer(_issue_access_token(subject_id=7))).json() == {
         "subject_id": "7",
         "roles": ["patient"],
+        "phone": "+919876543210",
+        "tier": None,
     }
 
 
@@ -627,6 +815,153 @@ async def test_rate_limit_keys_buckets_per_client_ip() -> None:
     assert (await middleware.dispatch(ip_b, stub_call_next)).status_code == 429
 
     assert (await middleware.dispatch(ip_a, stub_call_next)).status_code == 429
+
+
+async def test_rate_limit_counts_intake_write_surface_only() -> None:
+    """PS-05 AC1: the intake media-and-row-writing surfaces count toward their own cap.
+
+    The widened scope covers exactly the media-and-row-writing surfaces -
+    ``upload-media`` (patient), the doctor-scoped ``upload-doctor-media``
+    (#481), ``submit``, the ``{intake_id}/pick-doctor`` shape (#443), and the
+    ``{intake_id}/re-record`` shape - each counted into the intake surface's
+    own per-IP bucket. Reading an intake back (detail, pre-summary, clip
+    playback) is never counted and never capped.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=5, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    for path in (
+        "/v1/intake/submit",
+        "/v1/intake/upload-media",
+        "/v1/intake/upload-doctor-media",
+        "/v1/intake/42/pick-doctor",
+        "/v1/intake/42/re-record",
+    ):
+        assert (
+            await middleware.dispatch(_dispatch_request("9.9.9.9", path=path), stub_call_next)
+        ).status_code == 200
+
+    response = await middleware.dispatch(
+        _dispatch_request("9.9.9.9", path="/v1/intake/submit"), stub_call_next
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+
+    for path in (
+        "/v1/intake/42",
+        "/v1/intake/42/pick-doctor-some-other-get",
+        "/v1/intake/42/pre-summary",
+        "/v1/intake/42/media/11",
+        "/probe",
+    ):
+        assert (
+            await middleware.dispatch(
+                _dispatch_request("9.9.9.9", path=path, method="GET"), stub_call_next
+            )
+        ).status_code == 200
+
+
+async def test_rate_limit_counts_profile_photo_uploads_only() -> None:
+    """US-20: both profile-photo UPLOAD routes count on the media-write tier.
+
+    ``PUT /v1/me/photo`` and ``PUT /v1/doctor/profile/photo`` each push a
+    multi-MB binary body into object storage - the same abuse target as the
+    intake uploads, so they share that tier. The photo ``GET`` (a read, on the
+    very same path) and the DELETE (a stored-key write, not a media body) stay
+    uncapped, exactly like the intake read shapes.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=3, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    for path in (
+        "/v1/me/photo",
+        "/v1/doctor/profile/photo",
+        "/v1/me/photo",
+    ):
+        assert (
+            await middleware.dispatch(
+                _dispatch_request("8.8.8.8", path=path, method="PUT"), stub_call_next
+            )
+        ).status_code == 200
+
+    for path in ("/v1/me/photo", "/v1/doctor/profile/photo"):
+        response = await middleware.dispatch(
+            _dispatch_request("8.8.8.8", path=path, method="PUT"), stub_call_next
+        )
+        assert response.status_code == 429
+        assert response.headers["Retry-After"] == "60"
+
+    # A fresh caller still has its own budget, and the read/remove shapes on the
+    # same paths are never counted.
+    for method, path in (
+        ("GET", "/v1/me/photo"),
+        ("DELETE", "/v1/me/photo"),
+        ("GET", "/v1/doctor/profile/photo"),
+        ("DELETE", "/v1/doctor/profile/photo"),
+    ):
+        for _ in range(5):
+            assert (
+                await middleware.dispatch(
+                    _dispatch_request("7.7.7.7", path=path, method=method), stub_call_next
+                )
+            ).status_code == 200
+
+
+async def test_rate_limit_intake_and_auth_are_independent_tiers() -> None:
+    """PS-05: the intake surface keeps its OWN strict tier, independent of auth.
+
+    Each surface owns a separate per-IP bucket, so exhausting the intake tier
+    leaves the auth tier untouched (and vice versa) - ``"auth-only limiting
+    semantics still hold"``: a patient's upload burst can never lock them out
+    of their own OTP/verify flow.
+    """
+    middleware = RateLimitMiddleware(app=None, enabled=True, max_requests=2, window_seconds=60)
+
+    async def stub_call_next(request: Request) -> Response:
+        return Response(status_code=200)
+
+    ip = "1.2.3.4"
+    auth_path = "/v1/auth/register"
+
+    # Exhaust the auth tier: the third auth request 429s...
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=auth_path), stub_call_next)
+    ).status_code == 429
+
+    # ...but the intake tier is still fresh, so an intake write answers 200.
+    response = await middleware.dispatch(
+        _dispatch_request(ip, path="/v1/intake/submit"), stub_call_next
+    )
+    assert response.status_code == 200
+
+    # Exhaust the intake tier independently; the auth tier stays unchanged.
+    intake_probe = "/v1/intake/upload-media"
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=intake_probe), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(_dispatch_request(ip, path=intake_probe), stub_call_next)
+    ).status_code == 429
+
+    # A separate caller still has both tiers at their own budgets.
+    assert (
+        await middleware.dispatch(_dispatch_request("5.6.7.8", path=auth_path), stub_call_next)
+    ).status_code == 200
+    assert (
+        await middleware.dispatch(
+            _dispatch_request("5.6.7.8", path="/v1/intake/submit"), stub_call_next
+        )
+    ).status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +1030,448 @@ def test_settings_guard_refuses_non_positive_rate_limit_settings() -> None:
         Settings(gateway_rate_limit_auth_max_requests=0)
     with pytest.raises(ValueError, match="gateway_rate_limit_auth_window_seconds must be positive"):
         Settings(gateway_rate_limit_auth_window_seconds=0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 directory config knobs (#324): DIRECTORY_MAX_RESULTS is new and
+# operator-discoverable at boot; REDIS_DIRECTORY_TTL_SECONDS is documented.
+# ---------------------------------------------------------------------------
+
+_ENV_EXAMPLE = Path(__file__).resolve().parents[2] / ".env.example"
+
+
+def test_settings_directory_max_results_defaults_to_50() -> None:
+    assert Settings().directory_max_results == 50
+
+
+def test_settings_directory_max_results_parses_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DIRECTORY_MAX_RESULTS", "100")
+
+    settings = get_settings()
+
+    assert settings.directory_max_results == 100
+
+
+def test_settings_directory_max_results_refuses_non_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIRECTORY_MAX_RESULTS", "0")
+
+    with pytest.raises(ValueError, match="directory_max_results must be positive"):
+        get_settings()
+
+
+def test_settings_directory_max_results_refuses_invalid_int(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIRECTORY_MAX_RESULTS", "not-a-number")
+
+    with pytest.raises(ValueError):
+        get_settings()
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 intake-media Supabase backend config (ticket #385)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_intake_media_backend_defaults_to_local() -> None:
+    settings = Settings()
+
+    assert settings.intake_media_backend == "local"
+    assert settings.supabase_url == ""
+    assert settings.supabase_service_role_key == ""
+
+
+def test_settings_intake_media_backend_reads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://abc.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb-test-key")
+
+    settings = get_settings()
+
+    assert settings.intake_media_backend == "supabase"
+    assert settings.supabase_url == "https://abc.supabase.co"
+    assert settings.supabase_service_role_key == "sb-test-key"
+
+
+def test_settings_supabase_backend_requires_url_and_service_role_key() -> None:
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        Settings(intake_media_backend="supabase")
+    with pytest.raises(ValueError, match="SUPABASE_SERVICE_ROLE_KEY"):
+        Settings(
+            intake_media_backend="supabase",
+            supabase_url="https://abc.supabase.co",
+        )
+
+
+def test_settings_rejects_unknown_intake_media_backend() -> None:
+    with pytest.raises(ValueError, match="unsupported intake_media_backend"):
+        Settings(intake_media_backend="s3")
+
+
+def test_settings_supabase_backend_needs_url_env_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "supabase")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        get_settings()
+
+
+def test_settings_dispatcher_in_process_defaults_off() -> None:
+    settings = Settings()
+
+    assert settings.dispatcher_in_process_enabled is False
+
+
+def test_settings_dispatcher_in_process_reads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DISPATCHER_MODE", "inprocess")
+    monkeypatch.setenv("DISPATCHER_IN_PROCESS_ENABLED", "true")
+
+    settings = get_settings()
+
+    assert settings.dispatcher_in_process_enabled is True
+
+
+def test_settings_dispatcher_in_process_alias_forces_inprocess_mode() -> None:
+    settings = Settings(dispatcher_in_process_enabled=True)
+
+    assert settings.dispatcher_mode == "inprocess"
+    assert settings.dispatcher_runs_in_process is True
+
+
+def test_settings_dispatcher_in_process_alias_rejects_explicit_conflict() -> None:
+    with pytest.raises(ValueError, match="DISPATCHER_IN_PROCESS_ENABLED"):
+        Settings(dispatcher_in_process_enabled=True, dispatcher_mode="coordinated")
+
+
+def test_settings_ai_async_flags_default_off() -> None:
+    settings = Settings()
+
+    assert settings.ai_async_enabled is False
+    assert settings.ai_queue_worker_enabled is False
+
+
+def test_settings_ai_async_requires_standalone_or_coordinated_mode() -> None:
+    with pytest.raises(ValueError, match="AI_ASYNC_ENABLED"):
+        Settings(ai_async_enabled=True, dispatcher_mode="inprocess")
+
+
+def test_settings_ai_async_requires_mode_standalone_or_coordinated() -> None:
+    with pytest.raises(ValueError, match="DISPATCHER_MODE"):
+        Settings(ai_async_enabled=True, dispatcher_mode="inprocess")
+
+
+def test_settings_ai_async_requires_inprocess_dispatcher_off() -> None:
+    with pytest.raises(ValueError, match="DISPATCHER_IN_PROCESS_ENABLED"):
+        Settings(
+            ai_async_enabled=True,
+            dispatcher_mode="standalone",
+            dispatcher_in_process_enabled=True,
+        )
+
+
+def test_settings_ai_queue_worker_requires_ai_async() -> None:
+    with pytest.raises(ValueError, match="AI_QUEUE_WORKER_ENABLED"):
+        Settings(ai_queue_worker_enabled=True)
+
+
+def test_settings_ai_async_valid_combinations() -> None:
+    settings = Settings(
+        ai_async_enabled=True,
+        dispatcher_mode="standalone",
+        dispatcher_in_process_enabled=False,
+    )
+    assert settings.ai_async_enabled is True
+
+    settings = Settings(
+        ai_async_enabled=True,
+        dispatcher_mode="coordinated",
+        dispatcher_in_process_enabled=False,
+        ai_queue_worker_enabled=True,
+    )
+    assert settings.ai_queue_worker_enabled is True
+
+
+def test_settings_ai_async_flags_read_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DISPATCHER_MODE", "standalone")
+    monkeypatch.setenv("DISPATCHER_IN_PROCESS_ENABLED", "false")
+    monkeypatch.setenv("AI_ASYNC_ENABLED", "true")
+    monkeypatch.setenv("AI_QUEUE_WORKER_ENABLED", "true")
+
+    settings = get_settings()
+
+    assert settings.ai_async_enabled is True
+    assert settings.ai_queue_worker_enabled is True
+
+
+def test_settings_local_backend_needs_no_supabase_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+    settings = Settings(intake_media_backend="local")
+
+    assert settings.intake_media_backend == "local"
+
+
+# ---------------------------------------------------------------------------
+# profile-media config (profiles batch #529, ADR-0020, ticket #532)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_profile_media_backend_defaults_to_local() -> None:
+    settings = Settings()
+
+    assert settings.profile_media_backend == "local"
+    assert settings.profile_media_root == "var/profile-media"
+    assert settings.profile_media_key == ""
+    assert settings.profile_media_max_attempts == 3
+    assert settings.profile_media_backoff_seconds == 0.5
+    assert settings.profile_media_jitter_fraction == 0.25
+    assert settings.profile_media_circuit_breaker_threshold == 5
+    assert settings.profile_media_circuit_breaker_cooldown_seconds == 30.0
+    assert settings.profile_media_timeout_seconds == 30.0
+    assert settings.profile_media_max_upload_bytes == 5 * 1024 * 1024
+
+
+def test_settings_profile_media_backend_reads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROFILE_MEDIA_BACKEND", "supabase")
+    monkeypatch.setenv("PROFILE_MEDIA_ROOT", "var/uploaded-photos")
+    monkeypatch.setenv("PROFILE_MEDIA_KEY", "cGFzc3dvcmQ=")
+    monkeypatch.setenv("PROFILE_MEDIA_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("PROFILE_MEDIA_BACKOFF_SECONDS", "0.75")
+    monkeypatch.setenv("PROFILE_MEDIA_JITTER_FRACTION", "0.4")
+    monkeypatch.setenv("PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD", "6")
+    monkeypatch.setenv("PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "45.5")
+    monkeypatch.setenv("PROFILE_MEDIA_TIMEOUT_SECONDS", "12.5")
+    monkeypatch.setenv("PROFILE_MEDIA_MAX_UPLOAD_BYTES", "4194304")
+    monkeypatch.setenv("SUPABASE_URL", "https://abc.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb-test-key")
+
+    settings = get_settings()
+
+    assert settings.profile_media_backend == "supabase"
+    assert settings.profile_media_root == "var/uploaded-photos"
+    assert settings.profile_media_key == "cGFzc3dvcmQ="
+    assert settings.profile_media_max_attempts == 4
+    assert settings.profile_media_backoff_seconds == 0.75
+    assert settings.profile_media_jitter_fraction == 0.4
+    assert settings.profile_media_circuit_breaker_threshold == 6
+    assert settings.profile_media_circuit_breaker_cooldown_seconds == 45.5
+    assert settings.profile_media_timeout_seconds == 12.5
+    assert settings.profile_media_max_upload_bytes == 4194304
+    assert settings.supabase_url == "https://abc.supabase.co"
+    assert settings.supabase_service_role_key == "sb-test-key"
+
+
+def test_settings_profile_media_supabase_requires_url_and_service_role_key() -> None:
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        Settings(profile_media_backend="supabase")
+    with pytest.raises(ValueError, match="SUPABASE_SERVICE_ROLE_KEY"):
+        Settings(
+            profile_media_backend="supabase",
+            supabase_url="https://abc.supabase.co",
+        )
+
+
+def test_settings_rejects_unknown_profile_media_backend() -> None:
+    with pytest.raises(ValueError, match="unsupported profile_media_backend"):
+        Settings(profile_media_backend="s3")
+
+
+def test_settings_profile_media_supabase_needs_url_env_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTAKE_MEDIA_BACKEND", "local")
+    monkeypatch.setenv("PROFILE_MEDIA_BACKEND", "supabase")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
+        get_settings()
+
+
+def test_settings_profile_media_local_backend_needs_no_supabase_env() -> None:
+    settings = Settings(profile_media_backend="local")
+
+    assert settings.profile_media_backend == "local"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("profile_media_max_attempts", 0, "profile_media_max_attempts must be positive"),
+        (
+            "profile_media_backoff_seconds",
+            0.0,
+            "profile_media_backoff_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_backoff_seconds",
+            float("nan"),
+            "profile_media_backoff_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_jitter_fraction",
+            1.0,
+            "profile_media_jitter_fraction must be finite and between 0 inclusive and 1 exclusive",
+        ),
+        (
+            "profile_media_circuit_breaker_threshold",
+            0,
+            "profile_media_circuit_breaker_threshold must be positive",
+        ),
+        (
+            "profile_media_circuit_breaker_cooldown_seconds",
+            0.0,
+            "profile_media_circuit_breaker_cooldown_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_circuit_breaker_cooldown_seconds",
+            float("inf"),
+            "profile_media_circuit_breaker_cooldown_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_timeout_seconds",
+            0.0,
+            "profile_media_timeout_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_timeout_seconds",
+            float("nan"),
+            "profile_media_timeout_seconds must be finite and positive",
+        ),
+        (
+            "profile_media_max_upload_bytes",
+            0,
+            "profile_media_max_upload_bytes must be positive",
+        ),
+    ],
+)
+def test_settings_rejects_invalid_profile_media_retry_policy(
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings(**{field: value})
+
+
+def _env_example_text() -> str:
+    return _ENV_EXAMPLE.read_text(encoding="utf-8")
+
+
+def test_env_example_documents_every_phase6_directory_variable() -> None:
+    text = _env_example_text()
+    # Every Phase 6 settings variable must be discoverable at boot: the two
+    # directory knobs (#324) and the credential-expiry sweep cadence (#315).
+    assert "DIRECTORY_MAX_RESULTS=50" in text
+    assert "REDIS_DIRECTORY_TTL_SECONDS=300" in text
+    assert "PARTNER_CREDENTIAL_SWEEP_CRON=" in text
+
+
+def test_env_example_documents_intake_media_supabase_switch() -> None:
+    text = _env_example_text()
+    # The intake-media backend switch (#385) must be documented with both
+    # backends and the three new env vars so the config is discoverable at boot.
+    assert "INTAKE_MEDIA_BACKEND=" in text
+    assert "SUPABASE_URL=" in text
+    assert "SUPABASE_SERVICE_ROLE_KEY=" in text
+
+
+def test_env_example_documents_profile_media_supabase_switch() -> None:
+    text = _env_example_text()
+    # The profile-media backend switch (ADR-0020, #532) must be documented with
+    # both backends and the three env vars so the config is discoverable at boot.
+    assert "PROFILE_MEDIA_BACKEND=" in text
+    assert "PROFILE_MEDIA_ROOT=" in text
+    assert "PROFILE_MEDIA_KEY=" in text
+    assert "PROFILE_MEDIA_MAX_ATTEMPTS=" in text
+    assert "PROFILE_MEDIA_BACKOFF_SECONDS=" in text
+    assert "PROFILE_MEDIA_JITTER_FRACTION=" in text
+    assert "PROFILE_MEDIA_CIRCUIT_BREAKER_THRESHOLD=" in text
+    assert "PROFILE_MEDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS=" in text
+    assert "PROFILE_MEDIA_TIMEOUT_SECONDS=" in text
+    assert "PROFILE_MEDIA_MAX_UPLOAD_BYTES=" in text
+
+
+def test_env_example_redis_directory_ttl_comments_the_default() -> None:
+    text = _env_example_text()
+    # The 300 default must be called out in a comment so the knob is discoverable.
+    assert "default 300" in text
+
+
+# ---------------------------------------------------------------------------
+# Deploy manifest media wiring (#555): the committed ``render.yaml`` must point
+# the profile-media store at the durable private bucket and must declare both
+# media encryption keys as dashboard-managed secrets.
+# ---------------------------------------------------------------------------
+
+_RENDER_MANIFEST = Path(__file__).resolve().parents[2] / "render.yaml"
+
+
+def _render_env_var_entry(key: str) -> str:
+    """Return the ``envVars`` entry declaring ``key`` in the committed manifest.
+
+    Only the entry's own deeper-indented lines are collected, so a comment block
+    written at the list indent for the *next* entry cannot leak into this one.
+    The manifest declares a single service, so the first matching entry is the
+    deployed web service's own.
+    """
+    lines = _RENDER_MANIFEST.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != f"- key: {key}":
+            continue
+        key_indent = len(line) - len(line.lstrip())
+        entry = [line]
+        for follower in lines[index + 1 :]:
+            indent = len(follower) - len(follower.lstrip())
+            if not follower.strip() or indent <= key_indent:
+                break
+            entry.append(follower)
+        return "\n".join(entry)
+    raise AssertionError(f"{key} is not declared in {_RENDER_MANIFEST.name}")
+
+
+@pytest.mark.parametrize("key", ["INTAKE_MEDIA_BACKEND", "PROFILE_MEDIA_BACKEND"])
+def test_render_manifest_points_media_stores_at_the_durable_backing(key: str) -> None:
+    """#555: both media stores must be wired to the private Supabase bucket.
+
+    The stores default to local disk, so on the deployed service every upload
+    wrote ciphertext to Render's ephemeral disk and was wiped on redeploy while
+    the profile row still claimed a photo existed. Both entries are asserted
+    identically because they are the same declaration: a blueprint-managed
+    ``value`` (not a dashboard secret), and never a half-wired ``sync: false``.
+    """
+    entry = _render_env_var_entry(key)
+    assert "value: supabase" in entry
+    assert "sync:" not in entry
+
+
+@pytest.mark.parametrize("key", ["PROFILE_MEDIA_KEY", "INTAKE_MEDIA_KEY"])
+def test_render_manifest_declares_media_keys_as_unsynced_secrets(key: str) -> None:
+    """#555: both media encryption keys must be declared as unsynced secrets.
+
+    With no key set, BOTH stores derive an ephemeral per-process AES key, so
+    every restart mints a new one and all previously stored ciphertext becomes
+    permanently undecryptable - silently, with no error anywhere. Declaring each
+    key ``sync: false`` (never a value in the repo) is what forces an operator
+    to set it on the deployed service.
+    """
+    entry = _render_env_var_entry(key)
+    assert "sync: false" in entry
+    assert "value:" not in entry
 
 
 # ---------------------------------------------------------------------------

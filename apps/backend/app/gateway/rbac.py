@@ -21,6 +21,9 @@ from app.gateway.principal import Principal
 # widening access.
 KNOWN_SCOPE_ROLES = ("patient", "partner", "operator")
 
+#: The operator authority tier that admits admin-only routes (spec #761).
+ADMIN_TIER = "admin"
+
 
 def resolve_scope_roles(scope: str) -> tuple[str, ...]:
     """Map a token's ``scope`` claim to the ``Principal`` roles.
@@ -33,6 +36,22 @@ def resolve_scope_roles(scope: str) -> tuple[str, ...]:
     if scope in KNOWN_SCOPE_ROLES:
         return (scope,)
     return ()
+
+
+async def require_authenticated(request: Request) -> Principal:
+    """FastAPI dependency: admit any authenticated principal.
+
+    Reads the ``Principal`` the gateway's ``jwt_verify`` middleware attached to
+    the request state. Anonymous or missing principals are refused with 401;
+    any authenticated caller (patient, operator, partner, or unknown scope) is
+    admitted with 200 and its resolved roles.  Role-specific guards
+    (``require_patient`` / ``require_operator`` / ``require_partner``) stay on
+    their own routes and continue to enforce scope.
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        raise AuthenticationRequiredError("no valid session on a protected route")
+    return principal
 
 
 async def require_patient(request: Request) -> Principal:
@@ -48,4 +67,54 @@ async def require_patient(request: Request) -> Principal:
         raise AuthenticationRequiredError("no valid session on a protected route")
     if "patient" not in principal.roles:
         raise InsufficientScopeError("the patient role is required for this route")
+    return principal
+
+
+async def require_operator(request: Request) -> Principal:
+    """FastAPI dependency: admit only an authenticated operator-scoped caller.
+
+    Reads the ``Principal`` the gateway's ``jwt_verify`` middleware attached to
+    the request state. Anonymous or missing principals are refused with 401;
+    an authenticated caller without the operator role is refused with 403
+    (api-standards A6, NFR-SEC-003: operator = all records).
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        raise AuthenticationRequiredError("no valid session on a protected route")
+    if "operator" not in principal.roles:
+        raise InsufficientScopeError("the operator role is required for this route")
+    return principal
+
+
+async def require_partner(request: Request) -> Principal:
+    """FastAPI dependency: admit only an authenticated partner-scoped caller.
+
+    Reads the ``Principal`` the gateway's ``jwt_verify`` middleware attached to
+    the request state. Anonymous or missing principals are refused with 401;
+    an authenticated caller without the partner role is refused with 403
+    (api-standards §6: partner = scoped record access via consent).
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        raise AuthenticationRequiredError("no valid session on a protected route")
+    if "partner" not in principal.roles:
+        raise InsufficientScopeError("the partner role is required for this route")
+    return principal
+
+
+async def require_admin(request: Request) -> Principal:
+    """FastAPI dependency: admit only an authenticated admin-tier operator.
+
+    Admin-only routes require the operator role AND the ``admin`` tier. An
+    anonymous caller is refused 401; an authenticated operator on the non-admin
+    tier, a patient/partner caller, and a token whose tier is missing or unknown
+    are all refused 403 through the shared error envelope (spec #761: missing or
+    unknown tiers fail admin routes closed). Existing operator reads and alert
+    acknowledgements stay on ``require_operator``.
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    if principal is None or not principal.is_authenticated:
+        raise AuthenticationRequiredError("no valid session on a protected route")
+    if "operator" not in principal.roles or principal.tier != ADMIN_TIER:
+        raise InsufficientScopeError("the admin tier is required for this route")
     return principal

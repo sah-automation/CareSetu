@@ -1,7 +1,43 @@
 const { spawnSync, spawn } = require('node:child_process');
 const net = require('node:net');
 
-const CHANNELS = ['/patient', '/partner', '/operator'];
+// PHASE-2.6 T09 (#200): the homepage joins the measured routes; T10 (#201)
+// adds /staff/login so every shipped public/entry surface stays under the
+// NFR-003 budget. #614 adds /doctor/profile - the first doctor console surface
+// under this gate, measured in the same change as the shadcn primitives it
+// adopts so the reported total already carries them.
+// #709 adds the four operator Observability panel routes. They are listed
+// separately from /operator because the chart runtime (recharts, via the
+// shared components/ui/chart primitive) is code-split into the panel routes
+// only: measuring /operator alone would report a total that carries none of
+// it, which is exactly the number this gate exists to prevent someone
+// quoting.
+const CHANNELS = [
+  '/',
+  '/staff/login',
+  '/patient',
+  '/partner',
+  '/operator',
+  '/operator/observability',
+  '/operator/observability/cost',
+  '/operator/observability/usage',
+  '/operator/observability/quality',
+  '/operator/observability/health',
+  // #737: the Business lens page. It shares the chart runtime with the four
+  // panels above, so it is measured for the same reason: a lens page that
+  // imported `recharts` directly instead of through components/ui/chart would
+  // carry a SECOND copy of the chart runtime, and this gate is what reports it.
+  '/operator/observability/business',
+  // #738: the Reliability lens page. Same reason as the Business lens above:
+  // a chart route that imported `recharts` directly instead of through
+  // components/ui/chart would carry a second copy of the chart runtime, and
+  // this gate is what reports it.
+  '/operator/observability/reliability',
+  // #743: the Product lens page, on the same terms again - one chart runtime
+  // shared through components/ui/chart, never a second copy imported directly.
+  '/operator/observability/product',
+  '/doctor/profile',
+];
 const WORKSPACE = '@caresetu/frontend';
 const BUDGET_BYTES = 1.5 * 1024 * 1024;
 const BUDGET_LABEL = `1.5 MB (${BUDGET_BYTES} bytes)`;
@@ -67,7 +103,13 @@ function killTree(child) {
 }
 
 async function fetchBuffer(url) {
-  const response = await fetch(url, { headers: { 'Accept-Encoding': 'identity' } });
+  const response = await fetch(url, {
+    headers: {
+      'Accept-Encoding': 'identity',
+      // Route-guard bypass cookie - must track HINT_COOKIE in apps/frontend/src/lib/auth/session.ts (ADR-0007).
+      'Cookie': 'caresetu_authed=1',
+    },
+  });
   if (!response.ok) {
     throw new Error(`GET ${url} -> ${response.status} ${response.statusText}`);
   }

@@ -1,0 +1,1361 @@
+"""PHASE-4 T4: audit.event consumer handler (ticket #239, FEAT-020/NFR-D01).
+
+Pins the MOD-011 consumer contract without a database: the pure decision and
+row build (derived act type, regulated-act filter, deterministic int->UUID,
+hash-chained row), plus the handler wiring (ledger-first idempotency, replay
+skip, regulated append, operational skip). Prior art: the pure-logic
+parametrized suites (test_audit_chain, test_regulated_acts) and the mocked-
+connection handler tests (test_record_access_events).
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import NAMESPACE_DNS, uuid4, uuid5
+
+import pytest
+from pydantic import BaseModel, ValidationError
+
+from bus.envelope import Envelope
+from bus.events import (
+    EVENT_AUDIT_EVENT,
+    EVENT_AUDIT_TAMPER_DETECTED,
+    EVENT_CREDENTIAL_INVALIDATED,
+    EVENT_PARTNER_ACTIVATED,
+    EVENT_PARTNER_CREDENTIAL_REVIEWED,
+    EVENT_PARTNER_REGISTERED,
+    EVENT_PARTNER_REJECTED,
+    EVENT_RECORD_ACCESSED,
+    EVENT_RECORD_DENIED,
+)
+from bus.registry import HandlerRegistry
+from modules.audit.adapters import register_handlers
+from modules.audit.domain.chain import GENESIS_HASH, compute_audit_hash
+from modules.audit.domain.consumer import (
+    AuditEventPayload,
+    CredentialInvalidatedPayload,
+    CredentialReviewedPayload,
+    PartnerDecisionPayload,
+    PartnerRegisteredPayload,
+    RecordAccessAuditPayload,
+    TamperDetectedPayload,
+    audit_act_type,
+    build_audit_row,
+    build_credential_invalidated_row,
+    build_credential_reviewed_row,
+    build_partner_decision_row,
+    build_partner_registered_row,
+    build_record_access_row,
+    is_appended_act,
+)
+from modules.audit.facade import (
+    AUDIT_SCHEMA,
+    append_audit_event,
+    append_credential_invalidated_event,
+    append_credential_reviewed_event,
+    append_partner_decision_event,
+    append_partner_registered_event,
+    append_record_access_event,
+    compute_event_hash,
+)
+
+_NOW = datetime(2026, 8, 27, 10, 30, 0, tzinfo=UTC)
+_AUDIT_NS = uuid5(NAMESPACE_DNS, "caresetu.audit")
+
+
+def _audit_payload(
+    action: str = "granted",
+    actor_patient_id: int = 7,
+    consent_id: int = 1,
+    version: int = 1,
+) -> AuditEventPayload:
+    return AuditEventPayload(
+        action=action,  # type: ignore[arg-type]
+        actor_patient_id=actor_patient_id,
+        consent_id=consent_id,
+        lineage_ref="C-2026-001",
+        record_scope="consultations",
+        version=version,
+    )
+
+
+def _envelope(
+    payload: AuditEventPayload,
+    producer: str = "consent",
+    event_id=None,
+) -> Envelope[AuditEventPayload]:
+    return Envelope[AuditEventPayload](
+        event_id=event_id or uuid4(),
+        event_type=EVENT_AUDIT_EVENT,
+        producer=producer,
+        payload=payload,
+    )
+
+
+def test_audit_act_type_derives_consent_domain_name() -> None:
+    for action, expected in (
+        ("requested", "consent.requested"),
+        ("granted", "consent.granted"),
+        ("revoked", "consent.revoked"),
+        ("declined", "consent.declined"),
+    ):
+        assert audit_act_type(action) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["requested", "granted", "revoked"],
+)
+def test_is_appended_act_true_for_regulated_consent_acts(action: str) -> None:
+    assert is_appended_act(_audit_payload(action=action))
+
+
+def test_is_appended_act_false_for_declined() -> None:
+    # A decline is a null grant: no consent.* bus event, not a regulated act.
+    assert not is_appended_act(_audit_payload(action="declined"))
+
+
+def test_build_audit_row_populates_every_column() -> None:
+    row = build_audit_row(_audit_payload(), "consent", _NOW, GENESIS_HASH)
+
+    assert row.event_type == "consent.granted"
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:7"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "consent:1"))
+    assert row.scope == "consultations"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {
+        "producer": "consent",
+        "consent_id": 1,
+        "lineage_ref": "C-2026-001",
+        "version": 1,
+    }
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_audit_row_chains_from_provided_prev_hash() -> None:
+    head = build_audit_row(_audit_payload(version=1), "consent", _NOW, GENESIS_HASH)
+    second = build_audit_row(
+        _audit_payload(actor_patient_id=9, consent_id=2), "consent", _NOW, head.hash
+    )
+
+    assert second.prev_hash == head.hash
+    assert second.hash != head.hash
+
+
+def test_build_audit_row_maps_int_ids_deterministically() -> None:
+    kwargs = {"actor_patient_id": 7, "consent_id": 1}
+    first = build_audit_row(_audit_payload(**kwargs), "consent", _NOW, GENESIS_HASH)
+    second = build_audit_row(_audit_payload(**kwargs), "consent", _NOW, GENESIS_HASH)
+
+    assert first.actor_id == second.actor_id
+    assert first.target_id == second.target_id
+
+
+def test_build_audit_row_keeps_no_phi_out_of_metadata() -> None:
+    row = build_audit_row(_audit_payload(), "consent", _NOW, GENESIS_HASH)
+    # Only lineage facts ride the chain - never clinical content.
+    assert "record_scope" not in row.metadata
+    assert "action" not in row.metadata
+
+
+def _registered_handler() -> tuple[HandlerRegistry, object]:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handlers = registry.handlers_for(EVENT_AUDIT_EVENT)
+    assert len(handlers) == 1
+    return registry, handlers[0]
+
+
+def _insert_values(statement) -> dict[str, object]:
+    """Extract the literal values of an ``insert(...).values(...)`` statement.
+
+    SQLAlchemy wraps each value in a ``BindParameter``; ``.value`` unwraps it
+    so the test asserts against the concrete row values, not the wrapper.
+    """
+    return {key: parameter.value for key, parameter in statement._values.items()}
+
+
+def _fake_engine():
+    engine = MagicMock()
+    connection = AsyncMock()
+    engine.begin.return_value.__aenter__ = AsyncMock(return_value=connection)
+    engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    engine.dispose = AsyncMock()
+    return engine, connection
+
+
+async def test_handler_records_ledger_then_appends_regulated_act() -> None:
+    _, handler = _registered_handler()
+    envelope = _envelope(_audit_payload(action="granted"))
+    engine, connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_audit_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    # Ledger written first, then the append - same transaction/connection.
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    assert record_consumed.await_args.args[2].event_id == envelope.event_id
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1].action == "granted"
+    assert append.await_args.args[2] == "consent"
+    assert append.await_args.args[3] == envelope.occurred_at
+
+
+async def test_handler_skips_replay_when_ledger_already_has_event_id() -> None:
+    _, handler = _registered_handler()
+    fixed_event_id = uuid4()
+    envelope = _envelope(_audit_payload(action="granted"), event_id=fixed_event_id)
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_audit_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    # delivered=False -> the append never runs: one event_id = one audit row.
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_handler_skips_operational_act_without_appending() -> None:
+    _, handler = _registered_handler()
+    envelope = _envelope(_audit_payload(action="declined"))
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.audit.adapters.append_audit_event", new_callable=AsyncMock) as append,
+    ):
+        await handler(envelope)
+
+    # The event was consumed (ledger row) but the operational act is silent.
+    append.assert_not_awaited()
+
+
+async def test_append_audit_event_reads_latest_hash_and_inserts_every_column() -> None:
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _audit_payload(action="revoked")
+
+    row = await append_audit_event(connection, payload, "consent", _NOW)
+
+    # First row chains from genesis.
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == "consent.revoked"
+    assert values["actor_id"] == row.actor_id
+    assert values["target_id"] == row.target_id
+    assert values["scope"] == "consultations"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+async def test_append_audit_event_chains_from_nonempty_ledger_head() -> None:
+    connection = AsyncMock()
+    head_hash = "a" * 64
+    connection.scalar = AsyncMock(return_value=head_hash)
+
+    await append_audit_event(connection, _audit_payload(), "consent", _NOW)
+
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["prev_hash"] == head_hash
+
+
+def test_audit_payload_is_a_pydantic_model() -> None:
+    assert issubclass(AuditEventPayload, BaseModel)
+
+
+def test_compute_event_hash_helper_links_to_prev_hash() -> None:
+    """The facade's hash helper mirrors a chained row build (internal seam)."""
+    first = compute_event_hash(
+        "consent.granted",
+        str(uuid5(_AUDIT_NS, "actor:7")),
+        str(uuid5(_AUDIT_NS, "consent:1")),
+        "consultations",
+        {"producer": "consent"},
+        _NOW,
+        GENESIS_HASH,
+    )
+    second = compute_event_hash(
+        "consent.granted",
+        str(uuid5(_AUDIT_NS, "actor:7")),
+        str(uuid5(_AUDIT_NS, "consent:1")),
+        "consultations",
+        {"producer": "consent"},
+        _NOW,
+        first,
+    )
+
+    assert len(first) == 64
+    assert second != first
+    assert (
+        compute_event_hash(
+            "consent.granted",
+            str(uuid5(_AUDIT_NS, "actor:7")),
+            str(uuid5(_AUDIT_NS, "consent:1")),
+            "consultations",
+            {"producer": "consent"},
+            _NOW,
+            GENESIS_HASH,
+        )
+        == first
+    )
+
+
+def _record_payload(denied: bool = False) -> RecordAccessAuditPayload:
+    """A MOD-003 record-access payload as MOD-011's mirror sees it."""
+    return RecordAccessAuditPayload(
+        record_id=42,
+        actor_id=7,
+        actor_type="patient",
+        scope="full_record",
+        accessed_at=_NOW,
+        metadata={"denied": True, "denial_reason": "consent check failed"} if denied else {},
+    )
+
+
+def _record_envelope(
+    event_type: str,
+    payload: RecordAccessAuditPayload,
+    producer: str = "health",
+    event_id=None,
+) -> Envelope[RecordAccessAuditPayload]:
+    return Envelope[RecordAccessAuditPayload](
+        event_id=event_id or uuid4(),
+        event_type=event_type,  # type: ignore[arg-type]
+        producer=producer,
+        payload=payload,
+    )
+
+
+def _registered_record_handler(event_type: str) -> tuple[HandlerRegistry, object]:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    # MOD-011 owns the payload mirror for the record-access events (consumer
+    # owns the model, cf. audit.event), and both event types share one handler.
+    assert registry.payload_model_for(event_type) is RecordAccessAuditPayload
+    handlers = registry.handlers_for(event_type)  # type: ignore[arg-type]
+    assert len(handlers) == 1
+    return registry, handlers[0]
+
+
+def test_build_record_access_row_populates_every_column() -> None:
+    row = build_record_access_row(EVENT_RECORD_ACCESSED, _record_payload(), "health", GENESIS_HASH)
+
+    assert row.event_type == "record.accessed"
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:7"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "record:42"))
+    assert row.scope == "full_record"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {"producer": "health", "actor_type": "patient"}
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_record_access_row_for_denied_keeps_the_reason() -> None:
+    row = build_record_access_row(
+        EVENT_RECORD_DENIED, _record_payload(denied=True), "health", GENESIS_HASH
+    )
+
+    assert row.event_type == "record.denied"
+    # The denial facts ride the chain metadata exactly as the outbox carried them.
+    assert row.metadata == {
+        "producer": "health",
+        "actor_type": "patient",
+        "denied": True,
+        "denial_reason": "consent check failed",
+    }
+
+
+def test_record_access_row_uses_payload_time_for_ledger_consistency() -> None:
+    """The chain timestamp mirrors health's accessed_at, so both views agree."""
+    row = build_record_access_row(EVENT_RECORD_ACCESSED, _record_payload(), "health", GENESIS_HASH)
+    assert row.timestamp == _NOW
+
+
+async def test_record_access_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_record_handler(EVENT_RECORD_ACCESSED)
+    envelope = _record_envelope(EVENT_RECORD_ACCESSED, _record_payload())
+    engine, connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_record_access_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1] == EVENT_RECORD_ACCESSED
+    assert append.await_args.args[2].record_id == 42
+    assert append.await_args.args[3] == "health"
+
+
+async def test_record_access_handler_skips_when_ledger_already_has_event_id() -> None:
+    _, handler = _registered_record_handler(EVENT_RECORD_DENIED)
+    envelope = _record_envelope(EVENT_RECORD_DENIED, _record_payload(denied=True))
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_record_access_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    # delivered=False -> the append never runs: one event_id = one audit row.
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_append_record_access_event_reads_latest_hash_and_inserts_every_column() -> None:
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _record_payload()
+
+    row = await append_record_access_event(connection, EVENT_RECORD_ACCESSED, payload, "health")
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == "record.accessed"
+    assert values["actor_id"] == str(uuid5(_AUDIT_NS, "actor:7"))
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "record:42"))
+    assert values["scope"] == "full_record"
+    assert values["metadata"] == {"producer": "health", "actor_type": "patient"}
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+def test_record_access_payload_is_a_pydantic_model() -> None:
+    assert issubclass(RecordAccessAuditPayload, BaseModel)
+    assert issubclass(TamperDetectedPayload, BaseModel)
+
+
+def _partner_decision_payload(
+    event_type: str,
+    *,
+    partner_id: int = 5,
+    identity_id: int = 11,
+    decision_by: int | None = 3,
+    reason: str | None = None,
+    round_number: int | None = None,
+) -> PartnerDecisionPayload:
+    return PartnerDecisionPayload(
+        partner_id=partner_id,
+        identity_id=identity_id,
+        decision_by=decision_by,
+        reason=reason,
+        round=round_number,
+    )
+
+
+def _credential_reviewed_payload(
+    partner_id: int = 5, actor_id: int = 3
+) -> CredentialReviewedPayload:
+    return CredentialReviewedPayload(partner_id=partner_id, actor_id=actor_id)
+
+
+def _partner_registered_payload(
+    partner_id: int = 5, identity_id: int = 11, partner_type: str = "lab"
+) -> PartnerRegisteredPayload:
+    return PartnerRegisteredPayload(
+        partner_id=partner_id, identity_id=identity_id, partner_type=partner_type
+    )
+
+
+def _credential_invalidated_payload(
+    partner_id: int = 5,
+    identity_id: int = 11,
+    credential_id: int | None = None,
+    reason: str = "grace_lapse",
+) -> CredentialInvalidatedPayload:
+    return CredentialInvalidatedPayload(
+        partner_id=partner_id,
+        identity_id=identity_id,
+        credential_id=credential_id,
+        reason=reason,
+    )
+
+
+def _partner_envelope(
+    event_type: str,
+    payload: (
+        PartnerDecisionPayload
+        | CredentialReviewedPayload
+        | PartnerRegisteredPayload
+        | CredentialInvalidatedPayload
+    ),
+    producer: str = "partner",
+    event_id=None,
+) -> Envelope:
+    return Envelope(
+        event_id=event_id or uuid4(),
+        event_type=event_type,  # type: ignore[arg-type]
+        producer=producer,
+        payload=payload,
+    )
+
+
+def _registered_partner_handler(event_type: str) -> tuple[HandlerRegistry, object]:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    # MOD-011 owns the payload mirrors for the partner events.
+    handlers = registry.handlers_for(event_type)  # type: ignore[arg-type]
+    assert len(handlers) == 1
+    return registry, handlers[0]
+
+
+def test_build_partner_decision_row_populates_every_column_activated() -> None:
+    payload = _partner_decision_payload(EVENT_PARTNER_ACTIVATED)
+    row = build_partner_decision_row(
+        EVENT_PARTNER_ACTIVATED, payload, "partner", _NOW, GENESIS_HASH
+    )
+
+    assert row.event_type == EVENT_PARTNER_ACTIVATED
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.scope == "partner_decision"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+    }
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_partner_decision_row_for_rejected_keeps_reason_and_round() -> None:
+    payload = _partner_decision_payload(
+        EVENT_PARTNER_REJECTED,
+        reason="documents did not match the recorded identity",
+        round_number=2,
+    )
+    row = build_partner_decision_row(EVENT_PARTNER_REJECTED, payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.event_type == EVENT_PARTNER_REJECTED
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "reason": "documents did not match the recorded identity",
+        "round": 2,
+    }
+
+
+def test_build_partner_decision_row_without_operator_dropped_actor_scope() -> None:
+    # A Step-1 auto-fail (never queued) has no deciding operator; the actor is
+    # None but the decision still enters the chain attributed to the partner.
+    payload = _partner_decision_payload(
+        EVENT_PARTNER_REJECTED, decision_by=None, reason="step1_fail", round_number=1
+    )
+    row = build_partner_decision_row(EVENT_PARTNER_REJECTED, payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.actor_id is None
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "reason": "step1_fail",
+        "round": 1,
+    }
+    assert row.scope == "partner_decision"
+
+
+def test_build_credential_reviewed_row_attributed_with_actor_partner_timestamp() -> None:
+    payload = _credential_reviewed_payload(partner_id=5, actor_id=3)
+    row = build_credential_reviewed_row(payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.event_type == EVENT_PARTNER_CREDENTIAL_REVIEWED
+    assert row.actor_id == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.scope == "partner_credentials"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {"producer": "partner"}
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_credential_reviewed_row_maps_ids_deterministically() -> None:
+    first = build_credential_reviewed_row(
+        _credential_reviewed_payload(partner_id=5, actor_id=3), "partner", _NOW, GENESIS_HASH
+    )
+    second = build_credential_reviewed_row(
+        _credential_reviewed_payload(partner_id=5, actor_id=3), "partner", _NOW, GENESIS_HASH
+    )
+
+    assert first.actor_id == second.actor_id
+    assert first.target_id == second.target_id
+
+
+async def test_partner_decision_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_ACTIVATED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_ACTIVATED, _partner_decision_payload(EVENT_PARTNER_ACTIVATED)
+    )
+    engine, connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_decision_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1] == EVENT_PARTNER_ACTIVATED
+    assert append.await_args.args[2].partner_id == 5
+    assert append.await_args.args[2].decision_by == 3
+    assert append.await_args.args[3] == "partner"
+    assert append.await_args.args[4] == envelope.occurred_at
+
+
+async def test_partner_rejected_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_REJECTED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_REJECTED,
+        _partner_decision_payload(
+            EVENT_PARTNER_REJECTED, reason="identity mismatch", round_number=1
+        ),
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_decision_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_awaited_once()
+    assert append.await_args.args[1] == EVENT_PARTNER_REJECTED
+    assert append.await_args.args[2].reason == "identity mismatch"
+
+
+async def test_partner_decision_handler_skips_replay_when_already_delivered() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_ACTIVATED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_ACTIVATED, _partner_decision_payload(EVENT_PARTNER_ACTIVATED)
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_decision_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_credential_reviewed_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_CREDENTIAL_REVIEWED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_CREDENTIAL_REVIEWED, _credential_reviewed_payload(partner_id=5, actor_id=3)
+    )
+    engine, connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_credential_reviewed_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1].actor_id == 3
+    assert append.await_args.args[1].partner_id == 5
+    assert append.await_args.args[2] == "partner"
+    assert append.await_args.args[3] == envelope.occurred_at
+
+
+async def test_credential_reviewed_handler_skips_replay_when_already_delivered() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_CREDENTIAL_REVIEWED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_CREDENTIAL_REVIEWED, _credential_reviewed_payload(partner_id=5, actor_id=3)
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_credential_reviewed_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_append_partner_decision_event_reads_latest_hash_and_inserts_every_column() -> None:
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _partner_decision_payload(EVENT_PARTNER_ACTIVATED)
+
+    row = await append_partner_decision_event(
+        connection, EVENT_PARTNER_ACTIVATED, payload, "partner", _NOW
+    )
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == EVENT_PARTNER_ACTIVATED
+    assert values["actor_id"] == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert values["scope"] == "partner_decision"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+async def test_append_partner_decision_event_chains_from_nonempty_ledger_head() -> None:
+    connection = AsyncMock()
+    head_hash = "b" * 64
+    connection.scalar = AsyncMock(return_value=head_hash)
+
+    await append_partner_decision_event(
+        connection,
+        EVENT_PARTNER_REJECTED,
+        _partner_decision_payload(EVENT_PARTNER_REJECTED),
+        "partner",
+        _NOW,
+    )
+
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["prev_hash"] == head_hash
+
+
+async def test_append_credential_reviewed_event_reads_latest_hash_and_inserts_every_column() -> (
+    None
+):
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _credential_reviewed_payload(partner_id=5, actor_id=3)
+
+    row = await append_credential_reviewed_event(connection, payload, "partner", _NOW)
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == EVENT_PARTNER_CREDENTIAL_REVIEWED
+    assert values["actor_id"] == str(uuid5(_AUDIT_NS, "actor:3"))
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert values["scope"] == "partner_credentials"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+async def test_append_partner_registered_event_reads_latest_hash_and_inserts_every_column() -> None:
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _partner_registered_payload(partner_id=5, identity_id=11, partner_type="lab")
+
+    row = await append_partner_registered_event(connection, payload, "partner", _NOW)
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == EVENT_PARTNER_REGISTERED
+    assert values["actor_id"] is None
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert values["scope"] == "partner_registration"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+async def test_append_credential_invalidated_event_reads_latest_hash_and_inserts_every_column() -> (
+    None
+):
+    connection = AsyncMock()
+    connection.scalar = AsyncMock(return_value=None)
+    payload = _credential_invalidated_payload(
+        partner_id=5, identity_id=11, credential_id=7, reason="grace_lapse"
+    )
+
+    row = await append_credential_invalidated_event(connection, payload, "partner", _NOW)
+
+    connection.scalar.assert_awaited_once()
+    assert row.prev_hash == GENESIS_HASH
+    connection.execute.assert_awaited_once()
+    values = _insert_values(connection.execute.await_args.args[0])
+    assert values["event_type"] == EVENT_CREDENTIAL_INVALIDATED
+    assert values["actor_id"] is None
+    assert values["target_id"] == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert values["scope"] == "partner_credentials"
+    assert values["metadata"] == row.metadata
+    assert values["timestamp"] == _NOW
+    assert values["prev_hash"] == GENESIS_HASH
+    assert values["hash"] == row.hash
+
+
+def test_partner_payloads_are_pydantic_models() -> None:
+    assert issubclass(PartnerDecisionPayload, BaseModel)
+    assert issubclass(CredentialReviewedPayload, BaseModel)
+    assert issubclass(PartnerRegisteredPayload, BaseModel)
+    assert issubclass(CredentialInvalidatedPayload, BaseModel)
+
+
+def test_tamper_event_registers_model_and_a_single_consumer() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    assert registry.payload_model_for(EVENT_AUDIT_TAMPER_DETECTED) is TamperDetectedPayload
+    handlers = registry.handlers_for(EVENT_AUDIT_TAMPER_DETECTED)
+    assert len(handlers) == 1
+
+
+async def test_tamper_handler_consumes_and_never_appends_to_chain() -> None:
+    """audit.tamper_detected is telemetry: consumed, logged, never chained."""
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_AUDIT_TAMPER_DETECTED)[0]
+    payload = TamperDetectedPayload(
+        attempted_operation="UPDATE",
+        target_event_id=str(uuid4()),
+        details={"old_data": {}, "user": "caresetu"},
+        attempted_at=_NOW,
+    )
+    envelope = Envelope[TamperDetectedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_AUDIT_TAMPER_DETECTED,
+        producer="audit",
+        payload=payload,
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("modules.audit.adapters.append_audit_event", new_callable=AsyncMock) as append_audit,
+        patch(
+            "modules.audit.adapters.append_record_access_event",
+            new_callable=AsyncMock,
+        ) as append_record,
+    ):
+        await handler(envelope)
+
+    append_audit.assert_not_awaited()
+    append_record.assert_not_awaited()
+
+
+async def test_tamper_handler_logs_the_attempt(caplog) -> None:
+    """The deferred-alert minimal delivery is a structured log line."""
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_AUDIT_TAMPER_DETECTED)[0]
+    payload = TamperDetectedPayload(
+        attempted_operation="DELETE",
+        target_event_id=str(uuid4()),
+        details={"user": "caresetu"},
+        attempted_at=_NOW,
+    )
+    envelope = Envelope[TamperDetectedPayload](
+        event_id=uuid4(),
+        event_type=EVENT_AUDIT_TAMPER_DETECTED,
+        producer="audit",
+        payload=payload,
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        caplog.at_level(logging.WARNING, logger="modules.audit.adapters"),
+    ):
+        await handler(envelope)
+
+    assert any("tamper attempt blocked and recorded" in record.message for record in caplog.records)
+
+
+def test_build_partner_registered_row_populates_every_column() -> None:
+    payload = _partner_registered_payload(partner_id=5, identity_id=11, partner_type="lab")
+    row = build_partner_registered_row(payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.event_type == EVENT_PARTNER_REGISTERED
+    assert row.actor_id is None
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.scope == "partner_registration"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "partner_type": "lab",
+    }
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_credential_invalidated_row_populates_every_column() -> None:
+    payload = _credential_invalidated_payload(
+        partner_id=5, identity_id=11, credential_id=7, reason="re_verification_failed"
+    )
+    row = build_credential_invalidated_row(payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.event_type == EVENT_CREDENTIAL_INVALIDATED
+    assert row.actor_id is None
+    assert row.target_id == str(uuid5(_AUDIT_NS, "partner:5"))
+    assert row.scope == "partner_credentials"
+    assert row.timestamp == _NOW
+    assert row.prev_hash == GENESIS_HASH
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "credential_id": 7,
+        "reason": "re_verification_failed",
+    }
+    expected = compute_audit_hash(
+        row.event_type,
+        row.actor_id,
+        row.target_id,
+        row.scope,
+        row.metadata,
+        row.timestamp,
+        row.prev_hash,
+    )
+    assert row.hash == expected
+    assert len(row.hash) == 64
+
+
+def test_build_credential_invalidated_row_without_credential_id_drops_key() -> None:
+    payload = _credential_invalidated_payload(partner_id=5, identity_id=11, reason="grace_lapse")
+    row = build_credential_invalidated_row(payload, "partner", _NOW, GENESIS_HASH)
+
+    assert row.metadata == {
+        "producer": "partner",
+        "identity_id": 11,
+        "reason": "grace_lapse",
+    }
+
+
+async def test_partner_registered_handler_records_ledger_then_appends() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_REGISTERED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_REGISTERED, _partner_registered_payload(partner_id=5, identity_id=11)
+    )
+    engine, connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_registered_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1].partner_id == 5
+    assert append.await_args.args[1].identity_id == 11
+    assert append.await_args.args[2] == "partner"
+    assert append.await_args.args[3] == envelope.occurred_at
+
+
+async def test_partner_registered_handler_skips_replay_when_already_delivered() -> None:
+    _, handler = _registered_partner_handler(EVENT_PARTNER_REGISTERED)
+    envelope = _partner_envelope(
+        EVENT_PARTNER_REGISTERED, _partner_registered_payload(partner_id=5, identity_id=11)
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_partner_registered_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+async def test_credential_invalidated_handler_records_ledger_then_appends() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_CREDENTIAL_INVALIDATED)[0]
+    envelope = _partner_envelope(
+        EVENT_CREDENTIAL_INVALIDATED,
+        _credential_invalidated_payload(partner_id=5, identity_id=11),
+    )
+    engine, connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_credential_invalidated_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    assert record_consumed.await_args.args[1] == AUDIT_SCHEMA
+    append.assert_awaited_once()
+    assert append.await_args.args[0] is connection
+    assert append.await_args.args[1].partner_id == 5
+    assert append.await_args.args[1].identity_id == 11
+    assert append.await_args.args[2] == "partner"
+    assert append.await_args.args[3] == envelope.occurred_at
+
+
+async def test_credential_invalidated_handler_skips_replay_when_already_delivered() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_CREDENTIAL_INVALIDATED)[0]
+    envelope = _partner_envelope(
+        EVENT_CREDENTIAL_INVALIDATED,
+        _credential_invalidated_payload(partner_id=5, identity_id=11),
+    )
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_credential_invalidated_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()
+
+
+def test_registered_and_invalidated_payload_models_are_registered_correctly() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    # MOD-011 owns the model for partner.registered (sole consumer, MOD-002 sole producer).
+    assert registry.payload_model_for(EVENT_PARTNER_REGISTERED) is PartnerRegisteredPayload
+    # MOD-001 already owns the registry model for credential.invalidated, so MOD-011
+    # must NOT register a duplicate - the handler re-validates via its local mirror.
+    assert registry.payload_model_for(EVENT_CREDENTIAL_INVALIDATED) is not (
+        CredentialInvalidatedPayload
+    ), "MOD-011 must not register a duplicate model"
+    assert len(registry.handlers_for(EVENT_PARTNER_REGISTERED)) == 1
+    assert len(registry.handlers_for(EVENT_CREDENTIAL_INVALIDATED)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Widened carrier: ops variants (issue #945)
+# ---------------------------------------------------------------------------
+
+
+def _ops_setting_payload(**overrides: object) -> AuditEventPayload:
+    fields: dict[str, object] = {
+        "action": "setting.write",
+        "setting_key": "ai.timeout_seconds",
+        "old_value": "10",
+        "new_value": "15",
+        "version": 2,
+        "updated_by": 7,
+    }
+    fields.update(overrides)
+    return AuditEventPayload(**fields)  # type: ignore[arg-type]
+
+
+def _ops_flag_payload(**overrides: object) -> AuditEventPayload:
+    fields: dict[str, object] = {
+        "action": "feature_flag.write",
+        "flag_key": "evals.page",
+        "old_enabled": False,
+        "new_enabled": True,
+        "flag_kind": "runtime",
+        "version": 3,
+        "updated_by": 7,
+    }
+    fields.update(overrides)
+    return AuditEventPayload(**fields)  # type: ignore[arg-type]
+
+
+def test_ops_setting_write_carrier_validates() -> None:
+    payload = _ops_setting_payload()
+    assert payload.setting_key == "ai.timeout_seconds"
+    assert payload.new_value == "15"
+    assert payload.version == 2
+    assert payload.updated_by == 7
+
+
+def test_ops_feature_flag_write_carrier_validates() -> None:
+    payload = _ops_flag_payload()
+    assert payload.flag_key == "evals.page"
+    assert payload.new_enabled is True
+    assert payload.flag_kind == "runtime"
+    assert payload.version == 3
+
+
+def test_ops_carriers_reconstruct_from_a_dispatcher_row() -> None:
+    # The dispatcher reconstructs a claimed row via model_validate on the
+    # stored JSONB - both ops variants must round-trip that path (issue #945).
+    setting = AuditEventPayload.model_validate(_ops_setting_payload().model_dump())
+    assert setting == _ops_setting_payload()
+    flag = AuditEventPayload.model_validate(_ops_flag_payload().model_dump())
+    assert flag == _ops_flag_payload()
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["setting.write", "feature_flag.write"],
+)
+def test_is_appended_act_false_for_ops_carriers(action: str) -> None:
+    # Ops configuration writes are operational by default: consumed and
+    # drained, never appended to the hash chain (issue #945).
+    payload = (
+        _ops_setting_payload(action=action)
+        if action == "setting.write"
+        else _ops_flag_payload(action=action)
+    )
+    assert not is_appended_act(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["actor_patient_id", "consent_id", "lineage_ref", "record_scope", "version"],
+)
+def test_consent_carrier_missing_required_field_is_rejected(field: str) -> None:
+    fields: dict[str, object] = {
+        "action": "granted",
+        "actor_patient_id": 7,
+        "consent_id": 1,
+        "lineage_ref": "C-2026-001",
+        "record_scope": "consultations",
+        "version": 1,
+    }
+    del fields[field]
+    with pytest.raises(ValidationError, match=field):
+        AuditEventPayload(**fields)  # type: ignore[arg-type]
+
+
+def test_unknown_action_is_rejected() -> None:
+    with pytest.raises(ValidationError, match=r"unknown audit.event carrier action"):
+        AuditEventPayload.model_validate({"action": "mystery.write"})
+
+
+def test_ops_setting_carrier_missing_setting_key_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="setting_key"):
+        AuditEventPayload.model_validate({"action": "setting.write", "version": 1})
+
+
+def test_ops_flag_carrier_missing_flag_kind_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="flag_kind"):
+        AuditEventPayload.model_validate(
+            {"action": "feature_flag.write", "flag_key": "k", "new_enabled": True, "version": 1}
+        )
+
+
+def test_build_audit_row_rejects_ops_carrier() -> None:
+    # build_audit_row's contract is "only after is_appended_act returned True",
+    # so it only ever sees the consent variant; an ops carrier is a caller bug.
+    with pytest.raises(ValueError, match="consent carrier variant"):
+        build_audit_row(_ops_setting_payload(), "ops", _NOW, GENESIS_HASH)
+
+
+async def test_ops_carrier_consumed_without_append_through_handler() -> None:
+    registry = HandlerRegistry()
+    register_handlers(registry)
+    handler = registry.handlers_for(EVENT_AUDIT_EVENT)[0]
+    envelope = _envelope(_ops_setting_payload(), producer="ops")
+    engine, _connection = _fake_engine()
+
+    with (
+        patch("bus.handler_harness._delivery_engine", return_value=engine),
+        patch(
+            "bus.handler_harness.record_consumed_event",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_consumed,
+        patch(
+            "modules.audit.adapters.append_audit_event",
+            new_callable=AsyncMock,
+        ) as append,
+    ):
+        await handler(envelope)
+
+    record_consumed.assert_awaited_once()
+    append.assert_not_awaited()

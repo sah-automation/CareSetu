@@ -8,12 +8,14 @@ later module migrations (Phase 2+) materialize identical tables.
 
 Outbox row contract (issue #16): ``id`` (UUID PK), ``event_id``,
 ``event_type``, ``payload`` (JSONB), ``occurred_at``, ``status``, ``attempts``,
-``next_attempt_at``. The status machine is ``pending -> inflight``; only the
-dispatcher moves a row out of ``pending``. A row whose fan-out fully succeeds is
-deleted - delete-on-success per ADR-0002, no tombstone, the subscriber's
-``consumed_events`` ledger is the delivery record. A partial fan-out returns the
-row to ``pending`` on an exponential-backoff schedule and, once ``attempts``
-reaches the cap, ``dead_letter`` is terminal.
+``next_attempt_at``, ``traceparent`` (nullable - the W3C ``traceparent`` of the
+originating API request, when one existed, so the dispatcher's log/trace context
+links back to it; PHASE-14A A2, #695). The status machine is ``pending ->
+inflight``; only the dispatcher moves a row out of ``pending``. A row whose
+fan-out fully succeeds is deleted - delete-on-success per ADR-0002, no tombstone,
+the subscriber's ``consumed_events`` ledger is the delivery record. A partial
+fan-out returns the row to ``pending`` on an exponential-backoff schedule and,
+once ``attempts`` reaches the cap, ``dead_letter`` is terminal.
 
 Ledger contract: ``event_id`` (UUID PK), ``event_type``, ``processed_at``,
 ``handler_result``. It lives with the subscriber in its own schema, never
@@ -72,6 +74,7 @@ def outbox_table(table_name: str, schema: str, metadata: MetaData | None = None)
         Column("status", String(20), nullable=False, server_default=OUTBOX_STATUS_PENDING),
         Column("attempts", Integer, nullable=False, server_default=text("0")),
         Column("next_attempt_at", DateTime(timezone=True), nullable=True),
+        Column("traceparent", String(64), nullable=True),
         CheckConstraint(
             f"status IN ({_OUTBOX_STATUS_LIST})",
             name=f"ck_{table_name}_status",

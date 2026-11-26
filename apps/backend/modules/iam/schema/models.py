@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -41,12 +42,71 @@ iam_identities = Table(
         server_default=text("0"),
     ),
     Column("lockout_until", DateTime(timezone=True), nullable=True),
+    Column("phone_verified", Boolean, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     UniqueConstraint("phone_e164", name="uq_iam_identities_phone_e164"),
     CheckConstraint(
         "status IN ('Unverified', 'Active', 'Suspended')",
         name="ck_iam_identities_status",
+    ),
+)
+
+iam_operator_mfa = Table(
+    "iam_operator_mfa",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "identity_id",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_operator_mfa_identity"),
+        nullable=False,
+    ),
+    # Encrypted TOTP secret (never plaintext); only operators enroll.
+    Column("secret", String(256), nullable=False),
+    Column("mfa_enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("enrolled_at", DateTime(timezone=True), nullable=True),
+    Column("last_verified_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("identity_id", name="uq_iam_operator_mfa_identity"),
+)
+
+iam_operator_profiles = Table(
+    "iam_operator_profiles",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "identity_id",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_operator_profiles_identity"),
+        nullable=False,
+    ),
+    # Operator authority tier: admin holds sensitive writes, operator reads the
+    # console. New profiles default to the non-admin tier (spec #761).
+    Column("tier", String(20), nullable=False, server_default=text("'operator'")),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("mfa_failed_attempts", Integer, nullable=False, server_default=text("0")),
+    Column("name", String(200), nullable=True),
+    Column("photo_ref", String(255), nullable=True),
+    Column("mfa_locked_until", DateTime(timezone=True), nullable=True),
+    Column(
+        "created_by",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_operator_profiles_created_by"),
+        nullable=True,
+    ),
+    Column(
+        "updated_by",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_operator_profiles_updated_by"),
+        nullable=True,
+    ),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("identity_id", name="uq_iam_operator_profiles_identity"),
+    CheckConstraint("tier IN ('admin', 'operator')", name="ck_iam_operator_profiles_tier"),
+    CheckConstraint(
+        "mfa_failed_attempts >= 0", name="ck_iam_operator_profiles_mfa_failed_attempts"
     ),
 )
 
@@ -110,6 +170,30 @@ iam_role_grants = Table(
     Column("revoked_at", DateTime(timezone=True), nullable=True),
     CheckConstraint("role IN ('patient', 'partner', 'operator')", name="ck_iam_role_grants_role"),
     CheckConstraint("status IN ('Active', 'Suspended')", name="ck_iam_role_grants_status"),
+)
+
+iam_patient_profiles = Table(
+    "iam_patient_profiles",
+    MODULE_METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column(
+        "identity_id",
+        BigInteger,
+        ForeignKey("iam_identities.id", name="fk_iam_patient_profiles_identity"),
+        nullable=False,
+    ),
+    Column("name", String(200), nullable=False),
+    Column("age", Integer, nullable=False),
+    Column("gender", String(20), nullable=False),
+    Column("preferred_language", String(20), nullable=False),
+    # Optional, self-reported profile-completion fields (FEAT-008, #482/#488):
+    # photo/area/emergency-contact are nullable and unsettable.
+    Column("area", String(255), nullable=True),
+    Column("emergency_contact", String(32), nullable=True),
+    Column("photo_ref", String(255), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("identity_id", name="uq_iam_patient_profiles_identity"),
 )
 
 iam_outbox = outbox_table("iam_outbox", "iam", MODULE_METADATA)

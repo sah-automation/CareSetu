@@ -478,3 +478,68 @@ async def test_invalid_phone_is_rejected_without_db_writes(
     assert await _query(database_url, "SELECT id FROM iam.iam_identities") == []
     assert await _query(database_url, "SELECT id FROM iam.iam_otp_challenges") == []
     assert await _query(database_url, "SELECT id FROM iam.iam_outbox") == []
+
+
+async def test_register_existing_and_resend_share_identical_cooldown_decisions(
+    database_url: str, clean_iam: Any
+) -> None:
+    """WI-4 (#335): both flows run the same re-issue primitive, so a cooldown
+    refusal must be byte-identical - the existing-number register branch is not
+    a bypass for the resend cooldown."""
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade, _code = await _register(database_url, sms, clock)
+
+    clock.set(_T0 + timedelta(seconds=59))
+    login = await facade.register_patient("9876543210")
+    resend = await facade.resend_otp("9876543210")
+
+    assert login.outcome == "cooldown"
+    assert resend.outcome == "cooldown"
+    assert login.cooldown_remaining_seconds == resend.cooldown_remaining_seconds
+    assert sms.sent_count(_PHONE) == 1
+
+
+async def test_register_existing_and_resend_share_identical_lockout_decisions(
+    database_url: str, clean_iam: Any
+) -> None:
+    """WI-4 (#335): a locked phone is refused identically by the existing-number
+    register branch and resend - neither issues a fresh challenge."""
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade, _ = await _register(database_url, sms, clock)
+    await _exhaust_and_relock(facade, clock, sms)
+
+    login = await facade.register_patient("9876543210")
+    resend = await facade.resend_otp("9876543210")
+
+    assert login.outcome == "locked"
+    assert resend.outcome == "locked"
+    assert login.lockout_remaining_seconds == resend.lockout_remaining_seconds
+    assert sms.sent_count(_PHONE) == 2
+
+
+async def test_register_existing_and_resend_share_identical_suspended_decisions(
+    database_url: str, clean_iam: Any
+) -> None:
+    """WI-4 (#335): a Suspended identity is refused identically by the
+    existing-number register branch and resend - operator suspension stops both."""
+    clock = MutableClock(_T0)
+    sms = MockSmsAdapter()
+    facade, _ = await _register(database_url, sms, clock)
+
+    engine: AsyncEngine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("UPDATE iam.iam_identities SET status = 'Suspended'"))
+    finally:
+        await engine.dispose()
+
+    login = await facade.register_patient("9876543210")
+    resend = await facade.resend_otp("9876543210")
+
+    assert login.outcome == "suspended"
+    assert resend.outcome == "suspended"
+    assert sms.sent_count(_PHONE) == 1
+    identities = await _query(database_url, "SELECT status FROM iam.iam_identities")
+    assert identities == [{"status": "Suspended"}]

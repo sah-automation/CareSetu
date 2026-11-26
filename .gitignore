@@ -40,6 +40,16 @@ Thumbs.db
 # Local tooling
 .actrc
 
+# Local agent tooling install, per developer (never repo content)
+/.opencode/
+
+# Disposable prototype UI views (gitignored by design; deleted at project end)
+/prototype/
+
+# Runtime local storage (media store scratch, local artifacts)
+/apps/backend/var/
+/var/
+
 # Phase 0 raw audio dump (external source; committed corpus lives in phase0/corpus/)
 /audio/
 /gcm-diagnose.log

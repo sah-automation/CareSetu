@@ -1,0 +1,1035 @@
+"""MOD-002: HTTP adapters for the partner module (PHASE-5 T05, ticket #249).
+
+Endpoints are thin adapters (api-standards §1): parse the typed request, call
+the module facade, return the typed result. This ticket opens the partner
+self-service registration route - a doctor, lab, or chemist registers openly
+with their phone + partner type + basic profile (practice location/geo
+mandatory, service area optional). It is unauthenticated like the iam auth
+surface, sitting behind the gateway middleware stack in ``app.main`` (rate
+limited by that stack). Every expected failure answers the shared error
+envelope at the top level (api-standards §2); ``register_error_handlers`` maps
+partner domain errors to that envelope. An ``InvalidPhoneError`` raised by the
+iam seam is handled by the iam module's own registered handler (PHONE_INVALID
+422) - the same cross-module error-handling pattern the health<->consent seams
+use; this module never imports another module's domain types. The route carries
+no business logic - duplicate-phone resolution and the sync account creation
+(ADR-0010) live in the facade.
+"""
+
+from __future__ import annotations
+
+import base64
+from typing import Annotated, cast
+
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.gateway.errors import emit_access_denial, error_response
+from app.gateway.idempotency import run_idempotent
+from app.gateway.plain_text import normalize_optional_plain_text, normalize_plain_text
+from app.gateway.principal import Principal
+from app.gateway.rbac import require_operator, require_partner
+from modules.partner.domain.credentials import CredentialType
+from modules.partner.domain.events import PartnerType
+from modules.partner.domain.exceptions import (
+    AppealAlreadyUsedError,
+    ConsultationFeeNotAllowedError,
+    DoctorProfileNotAllowedError,
+    DoctorProfilePhotoNotFoundError,
+    DoctorProfilePhotoStoreUnavailableError,
+    DoctorProfilePhotoTransferError,
+    DoctorProfilePhotoValidationError,
+    IllegalPartnerTransitionError,
+    InvalidConsultingDayError,
+    InvalidConsultLanguageError,
+    InvalidNotificationKeyError,
+    InvalidQueueSortError,
+    InvalidQueueStatusError,
+    InvalidSpecialtyError,
+    PartnerError,
+    PartnerNotActiveError,
+    PartnerNotRejectedError,
+    PartnerSuspendedError,
+    PracticePinUnresolvedError,
+    ProviderProfileNotFoundError,
+    RejectionReasonRequiredError,
+    ReSubmissionThrottledError,
+    ServiceAreaNotFoundError,
+)
+from modules.partner.domain.vocabularies import Specialty
+from modules.partner.facade import (
+    CredentialSubmission,
+    CredentialSubmissionResult,
+    DirectorySearchView,
+    PartnerFacade,
+    PartnerMeView,
+    PartnerQueue,
+    PartnerVerificationDetail,
+    PartnerVerificationStatusView,
+    PartnerView,
+    ProviderProfileView,
+    RegisterPartnerResult,
+    RejectionReasonView,
+)
+
+router = APIRouter(prefix="/v1/partner", tags=["partner"])
+
+# The public directory search surface (PHASE-6 T02a #313): a NEW unauthenticated
+# router under ``/v1/directory`` - patients browse the directory without logging
+# in (FEAT-004), so no auth dependency rides these routes. The gateway still
+# rate-limits them at the edge like the other public surfaces (api-standards).
+directory_router = APIRouter(prefix="/v1/directory", tags=["directory"])
+
+
+@directory_router.get(
+    "/search",
+    response_model=DirectorySearchView,
+    status_code=status.HTTP_200_OK,
+    summary="Search the public provider directory (open, no login required)",
+)
+async def public_directory_search(
+    request: Request,
+    q: Annotated[str | None, Query(max_length=120)] = None,
+    partner_type: Annotated[PartnerType | None, Query()] = None,
+    specialty: Annotated[Specialty | None, Query()] = None,
+    lat: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    lng: Annotated[float | None, Query(ge=-180, le=180)] = None,
+) -> DirectorySearchView:
+    """Public provider directory search (FEAT-004, PHASE-6 T02a #313).
+
+    Thin unauthenticated adapter over the ``MOD-002`` search facade: patients
+    search ``[Active]`` partners with valid credentials, nearest-first from
+    their geo point. ``q`` is free-text over the practice name; ``partner_type``
+    and ``specialty`` (doctors only, closed pick-list) filter results; ``lat``/
+    ``lng`` anchor the distance sort. The facade owns the missing-geo default
+    (the Daltonganj centre, REQ-008) - the adapter stays geography-agnostic.
+    When nothing matches within the peri-urban scope the facade relaxes only
+    the location constraint and flags the view with ``fell_back`` so the client
+    labels the results "outside your area". No business logic here - filters,
+    ordering, the wider-area fallback, and the ``directory.search`` analytics
+    event all live in the facade.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.search_directory(
+        query=q,
+        partner_type=partner_type,
+        specialty=specialty.value if specialty is not None else None,
+        latitude=lat,
+        longitude=lng,
+    )
+
+
+@directory_router.get(
+    "/providers/{partner_id}",
+    response_model=ProviderProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Public provider profile (open, no login required)",
+)
+async def public_provider_profile(
+    request: Request,
+    partner_id: int,
+) -> ProviderProfileView:
+    """Public provider profile (FEAT-005, PHASE-6 T03 #309, widened by #613).
+
+    Thin unauthenticated adapter over the ``MOD-002`` profile facade: patients
+    view a provider's verified credentials (type + status labels, expiry date)
+    and a truthful ``verified`` indicator, alongside the practice details the
+    doctor declared (clinic, specialties, languages, consulting days and hours,
+    about, experience, structured address parts, and the declared locality as
+    ``area``). Which of those fields a patient may believe is told by the field
+    itself, not by a flag - ``verified`` covers the credential band only.
+    ``partner_id`` is the path parameter. The facade owns the visibility gate:
+    not ``[Active]``, no index row, no credentials or any invalid credential
+    raises :class:`ProviderProfileNotFoundError` mapped to the 404 envelope. The
+    route carries no business logic - visibility derivation, credential display
+    and the declared-field projections live in the facade.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_provider_profile(partner_id)
+
+
+class PartnerSelectRequest(BaseModel):
+    """Body of ``POST /v1/directory/select``: one directory pick (FEAT-004).
+
+    Client-initiated product analytics, not a regulated act: carries only the
+    pick facts - the picked partner and the source surface - never PHI or
+    credential data. The public route is unauthenticated, so no actor is
+    recorded; the facade writes the anonymous ``partner.selected`` outbox row.
+    ``partner_type`` is the closed doctor/lab/chemist enum when the client
+    knows it; ``source`` names the surface the pick came from (e.g. a search
+    card or a provider profile).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    partner_id: int = Field(gt=0, description="The picked partner's identity id")
+    partner_type: PartnerType | None = Field(
+        default=None,
+        description="The picked partner's type: doctor, lab, or chemist",
+    )
+    source: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Source surface of the pick (e.g. search card, profile page)",
+    )
+
+    @field_validator("source")
+    @classmethod
+    def _normalize_source(cls, source: str | None) -> str | None:
+        """Normalize the client-reported free-text source at the write boundary."""
+        return normalize_optional_plain_text(source, max_length=80)
+
+
+@directory_router.post(
+    "/select",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Record a directory pick (open, no login required; anonymous analytics)",
+)
+async def public_directory_select(
+    request: Request,
+    body: PartnerSelectRequest,
+) -> None:
+    """Record one anonymous ``partner.selected`` pick event (FEAT-004).
+
+    Thin unauthenticated adapter over the ``MOD-002`` pick facade: the patient
+    chose a provider from the directory (a search card or a provider profile)
+    and the client reports the pick for product analytics. No business logic
+    here - the facade writes the ``partner.selected`` outbox row in its own
+    transaction, and the gateway treats this route exactly like the other
+    ``/v1/directory/*`` surfaces (no login, same rate-limit surface).
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    await facade.record_partner_selected(
+        partner_id=body.partner_id,
+        partner_type=body.partner_type,
+        source=body.source,
+    )
+
+
+class RegisterPartnerRequest(BaseModel):
+    """Body of ``POST /v1/partner/register``: open registration (FEAT-014).
+
+    ``phone`` is the same 10-digit Indian mobile (or +91-prefixed) form the iam
+    auth surface accepts - normalized server-side to +91 E.164, never trusted
+    from the client. Practice location/geo is mandatory for every partner type;
+    ``service_area_id`` is optional, defaulting to Daltonganj (the Phase-5
+    launch geography, REQ-008) at the application layer. An unknown id is
+    rejected (the facade maps ``SERVICE_AREA_NOT_FOUND`` to a 422).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    partner_type: PartnerType
+    practice_name: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Optional public-facing practice name (max 120 chars)",
+    )
+    practice_address: str = Field(min_length=1, description="Practice location address (mandatory)")
+    practice_latitude: float = Field(ge=-90, le=90)
+    practice_longitude: float = Field(ge=-180, le=180)
+    service_area_id: int | None = None
+
+    @field_validator("practice_name")
+    @classmethod
+    def _normalize_practice_name(cls, practice_name: str | None) -> str | None:
+        """Normalize the partner's free-text practice name at the write boundary."""
+        return normalize_optional_plain_text(practice_name, max_length=120)
+
+    @field_validator("practice_address")
+    @classmethod
+    def _normalize_practice_address(cls, practice_address: str) -> str:
+        """Normalize the partner's free-text address at the write boundary."""
+        return normalize_plain_text(practice_address)
+
+
+class CredentialDocumentRequest(BaseModel):
+    """One professional credential a partner submits (ADR-0008, T06).
+
+    ``credential_type`` is the closed per-partner-type type; ``artifacts`` are the
+    base64-encoded document bytes the route decodes and hands to the facade to
+    AES-encrypt into the ``partner/`` object-storage prefix. Refs, never bytes,
+    are what gets persisted; the pre-filter rejects a submission with no
+    artifacts (``missing_artifacts``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential_type: CredentialType
+    artifacts: list[str] = Field(
+        default_factory=list,
+        description="Base64-encoded document bytes to encrypt and file",
+    )
+
+
+class CredentialSubmissionRequest(BaseModel):
+    """Body of ``POST /v1/partner/credentials``: the Step-1 submission body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    credentials: list[CredentialDocumentRequest] = Field(
+        min_length=1, description="At least one credential document to submit"
+    )
+
+
+@router.post(
+    "/register",
+    response_model=RegisterPartnerResult,
+    status_code=status.HTTP_200_OK,
+    summary="Open partner registration (open, no invite required)",
+)
+async def open_partner_registration(
+    request: Request,
+    body: RegisterPartnerRequest,
+) -> RegisterPartnerResult:
+    """Open a partner registration: create the sync account + open profile.
+
+    Creates the iam credential account synchronously (ADR-0010) so the partner
+    can log in the moment they register, opens a ``[Registered]`` profile, and
+    emits ``partner.registered``. A duplicate phone resolves to the existing
+    partner profile (never a second row) and returns its current onboarding
+    status.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.register(
+        phone=body.phone,
+        partner_type=body.partner_type,
+        practice_name=body.practice_name,
+        practice_address=body.practice_address,
+        practice_latitude=body.practice_latitude,
+        practice_longitude=body.practice_longitude,
+        service_area_id=body.service_area_id,
+    )
+
+
+@router.post(
+    "/credentials",
+    response_model=CredentialSubmissionResult,
+    status_code=status.HTTP_200_OK,
+    summary="Submit professional credentials (Step-1 pre-filter run here)",
+)
+async def open_credential_submission(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: CredentialSubmissionRequest,
+) -> CredentialSubmissionResult:
+    """Submit professional credentials and run the Step-1 automated pre-filter.
+
+    The automatic first half of the two-step gate (ADR-0008): the pre-filter
+    validates format (credential type appropriate for this partner type,
+    documents uploaded) and duplicates, then either opens a verification round
+    (``[Under Verification]``, ``partner.verification_started``) or auto-fails
+    straight to ``[Rejected]`` with a specific reason - never queued. The route
+    is a thin adapter: it decodes the base64 document bytes and hands the typed
+    submission to the facade, which encrypts them into ``partner/``. The partner
+    acts only on their own identity - the authenticated principal's ``subject_id``
+    is resolved to the partner profile, so no cross-partner submission.
+    Idempotent (api-standards 5): a duplicate ``Idempotency-Key`` replays the
+    stored result without re-executing the facade call. The authenticated
+    principal is also passed to the facade so the suspension gate closes the
+    route for a suspended identity (F014-T06 #466, 403 ``PARTNER_SUSPENDED``).
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+
+    async def _call() -> CredentialSubmissionResult:
+        partner = await facade.resolve_partner(int(account.subject_id))
+        credentials = [
+            CredentialSubmission(
+                credential_type=doc.credential_type,
+                artifacts=[_decode_artifact(b64) for b64 in doc.artifacts],
+            )
+            for doc in body.credentials
+        ]
+        return await facade.submit_credentials(
+            partner.partner_id,
+            identity_id=int(account.subject_id),
+            credentials=credentials,
+        )
+
+    return await run_idempotent(request, _call)
+
+
+@router.get(
+    "/rejection-reason",
+    response_model=RejectionReasonView,
+    status_code=status.HTTP_200_OK,
+    summary="View the specific rejection reason (partner only, rejected only)",
+)
+async def rejection_reason(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> RejectionReasonView:
+    """A ``[Rejected]`` partner reads the reason their application failed.
+
+    A thin partner-scoped adapter (PHASE-5 T09): resolves the authenticated
+    partner principal to their profile and reads back the latest rejection
+    reason so they can re-apply with corrected credentials. The facade raises
+    :class:`PartnerNotRejectedError` for any non-``[Rejected]`` partner, which
+    the module error handler maps to a 422, and :class:`PartnerSuspendedError`
+    for a suspended identity (403 ``PARTNER_SUSPENDED``, F014-T06 #466).
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    partner = await facade.resolve_partner(int(account.subject_id))
+    return await facade.get_rejection_reason(
+        partner.partner_id,
+        identity_id=int(account.subject_id),
+    )
+
+
+@router.get(
+    "/me",
+    response_model=PartnerMeView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the partner's own onboarding status (partner only, US-6)",
+)
+async def partner_me(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> PartnerMeView:
+    """A partner reads their own onboarding status (US-6, P2 #271).
+
+    A thin partner-scoped adapter: resolves the authenticated partner principal
+    to their profile and returns status/type/round/registration time so they can
+    check where they stand pre-activation. Only the caller's own record is
+    returned - no cross-partner or patient-facing data (restricted scope).
+    A suspended identity is refused with a 403 ``PARTNER_SUSPENDED``
+    (F014-T06 #466): the self-service surface is contact-support-only then.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_my_status(int(account.subject_id))
+
+
+@router.get(
+    "/me/verification",
+    response_model=PartnerVerificationStatusView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the partner's own credential review status (partner only, US-7)",
+)
+async def partner_me_verification(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> PartnerVerificationStatusView:
+    """A partner reads their current credential review status (US-7, P3 #271).
+
+    A thin partner-scoped adapter resolving the authenticated partner principal
+    to their profile and returning the current verification round's review
+    state (under review, or approved/rejected with the decision). Only the
+    caller's own record is returned - the operator's artifact refs and audit
+    chain stay out of the partner scope (restricted scope). A suspended identity
+    is refused with a 403 ``PARTNER_SUSPENDED`` (F014-T06 #466).
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_my_verification(int(account.subject_id))
+
+
+@router.post(
+    "/appeal",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="File a one-time appeal that re-enters the operator queue (partner only)",
+)
+async def partner_appeal(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+) -> PartnerView:
+    """A ``[Rejected]`` partner contests a decision once via a one-time appeal.
+
+    A thin partner-scoped adapter (PHASE-5 T09): resolves the partner principal
+    and files the appeal, which re-enters the operator queue (Step 2) and emits
+    ``partner.verification_started``. The ``appeal_used`` flag is consumed on
+    first use; a second appeal maps to an ``APPEAL_ALREADY_USED`` 422, and a
+    suspended identity is refused with a 403 ``PARTNER_SUSPENDED`` (F014-T06 #466).
+    Idempotent (api-standards 5): a duplicate ``Idempotency-Key`` replays the
+    stored result without re-executing the facade call.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+
+    async def _call() -> PartnerView:
+        partner = await facade.resolve_partner(int(account.subject_id))
+        return await facade.appeal(partner.partner_id, identity_id=int(account.subject_id))
+
+    return await run_idempotent(request, _call)
+
+
+@router.get(
+    "/verification-queue",
+    response_model=PartnerQueue,
+    status_code=status.HTTP_200_OK,
+    summary="List the operator verification queue (operator only)",
+)
+async def list_verification_queue(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    partner_type: Annotated[PartnerType | None, Query()] = None,
+    status: Annotated[str | None, Query()] = "Under Verification",
+    sort_by: Annotated[str, Query()] = "registration_age",
+) -> PartnerQueue:
+    """List the engagement queue an operator gates (FEAT-015, user story 16).
+
+    Operator-scoped (MFA attested - ``require_operator``): a partner/patient/
+    anonymous caller is refused 403/401 at the edge. Defaults to the
+    ``[Under Verification]`` queue, filterable by ``partner_type`` and
+    ``status`` (the status filter also opens the ``[Active]``/``[Rejected]``
+    activation-cycle KPI view; an unknown value raises a 422, not an empty
+    queue), and sortable by ``registration_age`` (default,
+    oldest first for the <= 48 h KPI-004 median), ``partner_type`` or
+    ``status``. No bulk actions - the queue only lists; decisions go through the
+    per-partner decision route.
+    """
+    del operator
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.list_verification_queue(
+        partner_type=partner_type,
+        status=status,
+        sort_by=sort_by,
+    )
+
+
+@router.get(
+    "/verification/{partner_id}",
+    response_model=PartnerVerificationDetail,
+    status_code=status.HTTP_200_OK,
+    summary="Open a queue item: profile + credentials + verification history (operator only)",
+)
+async def verification_detail(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    partner_id: int,
+) -> PartnerVerificationDetail:
+    """Open a partner's queue item for review (FEAT-015, user story 17).
+
+    Returns the profile, all submitted credentials, and the per-round
+    verification history. Every view of the credentials emits
+    ``partner.credential_reviewed`` (actor + partner) - the "who saw this
+    document" trail (operator audit depth); audit consumption is a later ticket.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.get_verification_detail(int(partner_id), actor_id=int(operator.subject_id))
+
+
+@router.post(
+    "/verification/{partner_id}/decision",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="Approve or reject a partner queue item (operator only, reason required on reject)",
+)
+async def operator_decision(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    partner_id: int,
+    body: OperatorDecisionRequest,
+) -> PartnerView:
+    """The Step-2 manual activation gate (FEAT-015, user stories 18-19).
+
+    Approve -> the partner becomes ``[Active]`` and ``partner.activated`` fires
+    (the iam consumer grants the ``partner`` role, T03 chain). Reject -> a
+    reason is REQUIRED (facade raises 422 when absent) and the partner becomes
+    ``[Rejected]`` with ``partner.rejected`` carrying the reason (role denied).
+    Individually attributed to the operator principal - there is no bulk path.
+    Idempotent (api-standards 5): a duplicate ``Idempotency-Key`` replays the
+    stored result without re-executing the facade call.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+
+    async def _call() -> PartnerView:
+        return await facade.operator_decision(
+            int(partner_id),
+            decision_by=int(operator.subject_id),
+            approve=body.approve,
+            reason=body.reason,
+        )
+
+    return await run_idempotent(request, _call)
+
+
+class OperatorDecisionRequest(BaseModel):
+    """Body of ``POST /v1/partner/verification/{id}/decision`` (FEAT-015).
+
+    ``approve`` is a single, individually-attributed action - no bulk path.
+    ``reason`` is REQUIRED on reject (422 when missing/blank) and optional on
+    approve; it is recorded on the verification round and carried into the
+    ``partner.rejected`` payload so the partner learns the specific failure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    approve: bool
+    reason: str | None = Field(
+        default=None,
+        description="Required on reject; the specific failure surfaced to the partner",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _normalize_reason(cls, reason: str | None) -> str | None:
+        """Normalize the operator's free-text reason at the write boundary."""
+        return normalize_optional_plain_text(reason)
+
+
+@router.post(
+    "/verification/{partner_id}/grace-lapse",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="Drop an Active partner to Under Verification on grace-window lapse (operator only)",
+)
+async def grace_window_lapse(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    partner_id: int,
+) -> PartnerView:
+    """Apply the 7-day grace-window lapse (ticket #254, event-driven reverify path).
+
+    An ``[Active]`` partner who re-submitted credentials (a re-verification
+    round opened) stays ``[Active]`` through the 7-day grace window. When that
+    deadline runs out without an operator decision, THIS endpoint drops them to
+    ``[Under Verification]`` so they re-enter the operator gate - WITHOUT
+    deactivating them (no ``credential.invalidated`` fires for a mere lapse, as
+    opposed to an operator reject of the re-verification). It is not a
+    scheduled scanner (that is Phase 6); it is the explicit, event-driven
+    reverify-deadline path. Operator-scoped so only a verified operator can
+    trigger it (the timeline seam for the Phase-6 deadline flow). A
+    non-``[Active]`` partner - or an ``[Active]`` partner without an open,
+    undecided reverification round - is refused with an
+    ``ILLEGAL_PARTNER_TRANSITION`` 422.
+    """
+    del operator
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    return await facade.grace_lapse(int(partner_id))
+
+
+class ConsultationFeeRequest(BaseModel):
+    """Body of ``PATCH /v1/partner/consultation-fee`` (PHASE-8.1 T06, #444).
+
+    ``fee_paise`` is the doctor's consultation fee in integer paise
+    (api-standards §3), REQUIRED but nullable: a non-null value sets the fee,
+    ``null`` clears it back to unset. The fee is NOT PHI and needs no credential
+    gate - an unset fee never blocks a pick (the client renders "fee not set").
+    The doctor-only rule (a lab/chemist partner may not set a fee) is enforced
+    in the facade, not this adapter.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fee_paise: int | None = Field(
+        ge=0,
+        description="Consultation fee in integer paise; null clears it back to unset",
+    )
+
+
+@router.patch(
+    "/consultation-fee",
+    response_model=PartnerView,
+    status_code=status.HTTP_200_OK,
+    summary="Set or clear the doctor's own consultation fee (partner only, doctor only)",
+)
+async def update_consultation_fee(
+    request: Request,
+    account: Annotated[Principal, Depends(require_partner)],
+    body: ConsultationFeeRequest,
+) -> PartnerView:
+    """A doctor sets (or clears) their own consultation fee (PHASE-8.1, #444).
+
+    A thin partner-scoped adapter: resolves the authenticated partner principal
+    to their own profile and writes the nullable fee. The facade refuses any
+    non-doctor partner with :class:`ConsultationFeeNotAllowedError` (mapped to
+    the 403 ``CONSULTATION_FEE_NOT_ALLOWED`` envelope) - a lab or chemist cannot
+    carry a consultation fee - and any not-yet-``[Active]`` (or deactivated)
+    doctor with :class:`PartnerNotActiveError` (mapped to the 403
+    ``PARTNER_NOT_ACTIVE`` envelope, F014-T06 #466); a suspended identity is
+    refused first with ``PARTNER_SUSPENDED``. Only the caller's own record is
+    touched - no cross-partner mutation (restricted scope). Idempotent
+    (api-standards 5): a duplicate ``Idempotency-Key`` replays the stored result
+    without re-executing the facade call.
+    """
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+
+    async def _call() -> PartnerView:
+        return await facade.update_consultation_fee(
+            int(account.subject_id),
+            fee_paise=body.fee_paise,
+        )
+
+    return await run_idempotent(request, _call)
+
+
+def _decode_artifact(b64: str) -> bytes:
+    """Decode a base64 artifact, rejecting malformed input (never stored raw)."""
+    try:
+        return base64.b64decode(b64, validate=True)
+    except ValueError as exc:
+        raise ValueError("artifact is not valid base64") from exc
+
+
+def register_error_handlers(app: FastAPI) -> None:
+    """Attach the MOD-002 error envelope to every expected partner failure.
+
+    Only the partner module's own domain errors are mapped here. Validation
+    errors (missing/invalid fields) and the iam ``InvalidPhoneError`` raised
+    by the sync account seam are handled by the iam module's app-wide
+    registered handlers (VALIDATION_ERROR / PHONE_INVALID 422) - the shared
+    pattern across modules; registering a second RequestValidationError
+    handler here would override iam's app-wide one.
+    """
+
+    async def _partner_failed(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "PARTNER_INTERNAL",
+            "Internal partner error",
+            log_tag="partner_rejection",
+            request=request,
+        )
+
+    async def _rejection_reason_required(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "REJECTION_REASON_REQUIRED",
+            "a reason is required when rejecting a partner",
+            log_tag="partner_rejection",
+            request=request,
+        )
+
+    async def _invalid_queue_sort(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "INVALID_QUEUE_SORT",
+            "unknown verification queue sort key",
+            log_tag="partner_rejection",
+            request=request,
+        )
+
+    async def _invalid_queue_status(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "INVALID_QUEUE_STATUS",
+            "unknown verification queue status",
+            log_tag="partner_rejection",
+            request=request,
+        )
+
+    async def _service_area_not_found(request: Request, exc: Exception) -> JSONResponse:
+        service_area_not_found = cast(ServiceAreaNotFoundError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "SERVICE_AREA_NOT_FOUND",
+            "no service area exists with the declared id",
+            log_tag="partner_rejection",
+            request=request,
+            details={"service_area_id": service_area_not_found.service_area_id},
+        )
+
+    async def _not_rejected(request: Request, exc: Exception) -> JSONResponse:
+        partner_not_rejected = cast(PartnerNotRejectedError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "PARTNER_NOT_REJECTED",
+            "partner must be Rejected for this recovery action",
+            log_tag="partner_rejection",
+            request=request,
+            details={
+                "partner_id": partner_not_rejected.partner_id,
+                "current_status": partner_not_rejected.status,
+            },
+        )
+
+    async def _appeal_already_used(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "APPEAL_ALREADY_USED",
+            "the one-time appeal has already been consumed",
+            log_tag="partner_rejection",
+            request=request,
+        )
+
+    async def _re_submission_throttled(request: Request, exc: Exception) -> JSONResponse:
+        throttled = cast(ReSubmissionThrottledError, exc)
+        response = error_response(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "RE_SUBMISSION_THROTTLED",
+            "re-submission limit reached; try again after the cooldown",
+            log_tag="partner_rejection",
+            request=request,
+            details={"retry_at": throttled.retry_at} if throttled.retry_at else {},
+        )
+        # api-standards §6: a 429 carries Retry-After so the client knows the
+        # cooldown deadline without re-calling.
+        if throttled.retry_at:
+            response.headers["Retry-After"] = throttled.retry_at
+        return response
+
+    async def _illegal_transition(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "ILLEGAL_PARTNER_TRANSITION",
+            "the requested lifecycle action is illegal in the partner's current state",
+            log_tag="partner_rejection",
+            request=request,
+        )
+
+    async def _consultation_fee_not_allowed(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "CONSULTATION_FEE_NOT_ALLOWED",
+            "only a doctor partner can set a consultation fee",
+            log_tag="partner_fee",
+            request=request,
+        )
+
+    async def _partner_not_active(request: Request, exc: Exception) -> JSONResponse:
+        partner_not_active = cast(PartnerNotActiveError, exc)
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "PARTNER_NOT_ACTIVE",
+            "consultation fee is only available to an active partner",
+            log_tag="partner_fee",
+            request=request,
+            details={
+                "partner_id": partner_not_active.partner_id,
+                "current_status": partner_not_active.status,
+            },
+        )
+
+    async def _partner_suspended(request: Request, exc: Exception) -> JSONResponse:
+        partner_suspended = cast(PartnerSuspendedError, exc)
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "PARTNER_SUSPENDED",
+            "this partner's access is suspended; contact support",
+            log_tag="partner_suspended",
+            request=request,
+            details={"identity_id": partner_suspended.identity_id},
+        )
+
+    async def _doctor_profile_not_allowed(request: Request, exc: Exception) -> JSONResponse:
+        await emit_access_denial(request)
+        denied = cast(DoctorProfileNotAllowedError, exc)
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "DOCTOR_PROFILE_NOT_ALLOWED",
+            "the private doctor profile requires an active doctor",
+            log_tag="doctor_profile",
+            request=request,
+            details={
+                "partner_id": denied.partner_id,
+                "partner_type": denied.partner_type,
+                "current_status": denied.status,
+            },
+        )
+
+    async def _doctor_profile_photo_not_found(request: Request, exc: Exception) -> JSONResponse:
+        missing = cast(DoctorProfilePhotoNotFoundError, exc)
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "DOCTOR_PROFILE_PHOTO_NOT_FOUND",
+            "no profile photo exists for this doctor",
+            log_tag="doctor_profile_photo",
+            request=request,
+            details={"partner_id": missing.partner_id},
+        )
+
+    async def _doctor_profile_photo_invalid(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(DoctorProfilePhotoValidationError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "DOCTOR_PROFILE_PHOTO_INVALID",
+            "profile photo must be JPEG, PNG, or WebP and within the configured size limit",
+            log_tag="doctor_profile_photo",
+            request=request,
+            details={"errors": [{"path": "file", "reason": str(invalid)}]},
+        )
+
+    async def _doctor_profile_photo_transfer_failed(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "DOCTOR_PROFILE_PHOTO_TRANSFER_FAILED",
+            "profile photo storage is temporarily unavailable",
+            log_tag="doctor_profile_photo",
+            request=request,
+        )
+
+    async def _doctor_profile_photo_store_unavailable(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "DOCTOR_PROFILE_PHOTO_STORE_UNAVAILABLE",
+            "profile photo storage is unavailable",
+            log_tag="doctor_profile_photo",
+            request=request,
+        )
+
+    # A specialty outside the closed pick-list is an expected 4xx, not a 500:
+    # the field is never free-form, so an unknown value can never persist and be
+    # unfilterable later. ``InvalidSpecialtyError`` escapes the request model's
+    # validator on purpose - a ``ValueError`` there would be swallowed into
+    # Pydantic's generic 422 and lose this envelope - and the handler below is
+    # what turns it into the standard field-level ``details.errors`` shape.
+    #
+    # ``path`` is the wire name of the field the doctor submitted, which is the
+    # practice card's multi-valued ``specialties`` (#608). The single-valued
+    # ``require_specialty`` entry point raises the same error but has no HTTP
+    # surface today; if one lands it registers its own handler rather than having
+    # this one report a field the request never carried.
+    def _field_rejection(
+        request: Request,
+        exc: Exception,
+        *,
+        code: str,
+        message: str,
+        path: str,
+    ) -> JSONResponse:
+        """Encode a domain pre-condition refusal as a FIELD-level validation error.
+
+        The one shape every closed-list refusal on this router takes: 422, the
+        domain's own code, and ``details.errors[0].path`` naming the field so the
+        doctor's card can point at the input that was refused. Four closed lists
+        are pinned here (#602's specialties, languages and days, plus #610's
+        notification keys) and each needs its own ``code`` and ``path``, which is why
+        they stay four registrations - but the encoding is written once, so a fifth
+        list cannot arrive with a subtly different envelope.
+        """
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code,
+            message,
+            log_tag="doctor_profile",
+            request=request,
+            details={"errors": [{"path": path, "reason": str(exc)}]},
+        )
+
+    async def _invalid_specialty(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidSpecialtyError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            # Namespaced by module (api-standards: every code is ``SCREAMING_SNAKE``
+            # namespaced by module), matching the ``DOCTOR_PROFILE_*`` prefix the
+            # two refusals above already carry. A bare ``INVALID_SPECIALTY`` reads
+            # as a property of the vocabulary rather than of this console, and would
+            # collide the moment a second surface rejects a specialty.
+            "DOCTOR_PROFILE_INVALID_SPECIALTY",
+            "specialty must be a value from the closed specialty pick-list, "
+            "and must not repeat within the selection",
+            log_tag="doctor_profile",
+            request=request,
+            details={"errors": [{"path": "specialties", "reason": str(invalid)}]},
+        )
+
+    async def _practice_pin_unresolved(request: Request, exc: Exception) -> JSONResponse:
+        unresolved = cast(PracticePinUnresolvedError, exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "DOCTOR_PROFILE_ADDRESS_PIN_UNRESOLVED",
+            "the declared PIN code does not resolve to a practice position",
+            log_tag="doctor_profile",
+            request=request,
+            # ``path`` is the wire name of the PIN field, and it is the reason this
+            # handler exists in the shape it does: the client renders the detail
+            # under that input rather than guessing which one failed. The detail is
+            # exactly ``path`` + ``reason`` like the specialty and photo refusals -
+            # no second machine key - because ``PinResolutionReason`` states that
+            # both refusals get the same actionable message anyway; what differs
+            # between them is only which sentence that message is.
+            #
+            # ``str(unresolved)`` never quotes the submitted code back.
+            details={"errors": [{"path": "pin_code", "reason": str(unresolved)}]},
+        )
+
+    # The two closed lists the About card draws on (#610), plus the notification
+    # keys. All three are the ``_invalid_specialty`` argument above applied three
+    # more times: the domain raises a typed error out of the request model's
+    # validator, and the handler is what turns it into the standard field-level
+    # ``details.errors`` shape instead of Pydantic swallowing it into a generic
+    # 422 the client cannot render under the offending input.
+    #
+    # Three handlers rather than one, because the three ``path`` values are the
+    # whole point: the client renders the detail under the language chips, under
+    # the day chips, or under the notification switches, and a shared handler
+    # reporting one field for all of them would put two of the three errors in the
+    # wrong place. The messages are user-safe and carry no PHI - a language or a
+    # day is a pick-list value, and a notification key is a machine identifier.
+    async def _invalid_consult_language(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidConsultLanguageError, exc)
+        return _field_rejection(
+            request,
+            invalid,
+            code="DOCTOR_PROFILE_INVALID_CONSULT_LANGUAGE",
+            message="each language must be a value from the scheduled-languages list, "
+            "and must not repeat within the selection",
+            path="languages",
+        )
+
+    async def _invalid_consulting_day(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidConsultingDayError, exc)
+        return _field_rejection(
+            request,
+            invalid,
+            code="DOCTOR_PROFILE_INVALID_CONSULTING_DAY",
+            message="each consulting day must be a value from the seven-day list, "
+            "and must not repeat within the selection",
+            path="consulting_days",
+        )
+
+    async def _invalid_notification_key(request: Request, exc: Exception) -> JSONResponse:
+        invalid = cast(InvalidNotificationKeyError, exc)
+        # No "must not repeat" clause, unlike the three pick-lists: a JSON object
+        # cannot hold the same key twice, so repeating is not a mistake this field
+        # can express.
+        return _field_rejection(
+            request,
+            invalid,
+            code="DOCTOR_PROFILE_INVALID_NOTIFICATION_KEY",
+            message="each notification preference must be one of the keys this console offers",
+            path="notification_preferences",
+        )
+
+    async def _provider_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "PROVIDER_PROFILE_NOT_FOUND",
+            "no public provider profile exists for this id",
+            log_tag="partner_profile",
+            request=request,
+        )
+
+    app.add_exception_handler(RejectionReasonRequiredError, _rejection_reason_required)
+    app.add_exception_handler(InvalidQueueSortError, _invalid_queue_sort)
+    app.add_exception_handler(InvalidQueueStatusError, _invalid_queue_status)
+    app.add_exception_handler(ServiceAreaNotFoundError, _service_area_not_found)
+    app.add_exception_handler(PartnerNotRejectedError, _not_rejected)
+    app.add_exception_handler(AppealAlreadyUsedError, _appeal_already_used)
+    app.add_exception_handler(ReSubmissionThrottledError, _re_submission_throttled)
+    app.add_exception_handler(IllegalPartnerTransitionError, _illegal_transition)
+    app.add_exception_handler(ConsultationFeeNotAllowedError, _consultation_fee_not_allowed)
+    app.add_exception_handler(PartnerNotActiveError, _partner_not_active)
+    app.add_exception_handler(PartnerSuspendedError, _partner_suspended)
+    app.add_exception_handler(DoctorProfileNotAllowedError, _doctor_profile_not_allowed)
+    app.add_exception_handler(DoctorProfilePhotoNotFoundError, _doctor_profile_photo_not_found)
+    app.add_exception_handler(DoctorProfilePhotoValidationError, _doctor_profile_photo_invalid)
+    app.add_exception_handler(
+        DoctorProfilePhotoTransferError, _doctor_profile_photo_transfer_failed
+    )
+    app.add_exception_handler(
+        DoctorProfilePhotoStoreUnavailableError,
+        _doctor_profile_photo_store_unavailable,
+    )
+    app.add_exception_handler(InvalidSpecialtyError, _invalid_specialty)
+    app.add_exception_handler(InvalidConsultLanguageError, _invalid_consult_language)
+    app.add_exception_handler(InvalidConsultingDayError, _invalid_consulting_day)
+    app.add_exception_handler(InvalidNotificationKeyError, _invalid_notification_key)
+    app.add_exception_handler(PracticePinUnresolvedError, _practice_pin_unresolved)
+    app.add_exception_handler(ProviderProfileNotFoundError, _provider_profile_not_found)
+    app.add_exception_handler(PartnerError, _partner_failed)

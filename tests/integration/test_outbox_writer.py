@@ -22,6 +22,7 @@ from sqlalchemy.pool import NullPool
 from bus.envelope import Envelope
 from bus.outbox_ddl import materialize_outbox
 from bus.outbox_writer import write_outbox
+from observability.logging import reset_trace_id, set_trace_id, trace_id_from_traceparent
 
 THROWAWAY_OUTBOX = "t2a_throwaway_outbox"
 
@@ -70,7 +71,7 @@ async def _outbox_rows(database_url: str, schema: str) -> list[dict[str, Any]]:
             result = await connection.execute(
                 text(
                     f"SELECT id, event_id, event_type, payload, occurred_at, status, "
-                    f"attempts, next_attempt_at "
+                    f"attempts, next_attempt_at, traceparent "
                     f'FROM "{schema}"."{THROWAWAY_OUTBOX}"'
                 )
             )
@@ -106,6 +107,33 @@ def test_publish_writes_one_pending_outbox_row(
     assert row["status"] == "pending"
     assert row["attempts"] == 0
     assert row["next_attempt_at"] is None
+    assert row["traceparent"] is None
+
+
+def test_publish_writes_the_current_request_traceparent(
+    database_url: str, reachable_db: None, throwaway_schema: str
+) -> None:
+    asyncio.run(_materialize(database_url, throwaway_schema))
+
+    envelope = Envelope[RoundTripPayload](
+        event_id=uuid4(),
+        event_type="phase1.round_trip",
+        producer="phase1",
+        payload=RoundTripPayload(round_trip_id=uuid4()),
+    )
+
+    trace_id = "7" * 32
+    token = set_trace_id(trace_id)
+    try:
+        asyncio.run(_publish_and_commit(database_url, throwaway_schema, envelope))
+    finally:
+        reset_trace_id(token)
+
+    rows = asyncio.run(_outbox_rows(database_url, throwaway_schema))
+    assert len(rows) == 1
+    traceparent = rows[0]["traceparent"]
+    assert traceparent is not None
+    assert trace_id_from_traceparent(traceparent) == trace_id
 
 
 def test_publish_is_atomic_with_caller_transaction(

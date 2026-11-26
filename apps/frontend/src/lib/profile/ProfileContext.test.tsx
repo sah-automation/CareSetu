@@ -1,0 +1,462 @@
+// PHASE-8.1 T2 (#488): provider suite for patient profile hydration +
+// persistence. The profile client is mocked at the module boundary, so these
+// tests pin the ordering the ticket demands: hydrate from GET /v1/me/profile
+// before local-draft fallback, a saved profile short-circuits the completion
+// gate, Finish persists through PUT with optional fields unsettable, and two
+// identities on one browser never share a draft view.
+
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { ProfileProvider, useProfile } from "./ProfileContext";
+import type { ProfileReadResult, StoredPatientProfile } from "./api";
+import { initialDraft, saveDraft } from "./profileState";
+import { ProfileGate } from "@/components/patient/profile/ProfileGate";
+import { __resetLangForTests } from "@/lib/i18n/LangContext";
+import { makeTestQueryClient } from "@/test/query-client";
+
+const state = vi.hoisted<{
+  getProfile: ReturnType<typeof vi.fn>;
+  saveProfile: ReturnType<typeof vi.fn>;
+  user: { id: number; phone: string; roles: string[] } | null;
+}>(() => ({
+  getProfile: vi.fn(),
+  saveProfile: vi.fn(),
+  user: { id: 7, phone: "+91 98765 43210", roles: ["patient"] },
+}));
+
+vi.mock("@/lib/profile/api", () => ({
+  getProfile: state.getProfile,
+  saveProfile: state.saveProfile,
+}));
+
+vi.mock("@/lib/auth/AuthContext", () => ({
+  useAuth: () => ({
+    user: state.user,
+    selectedRole: null,
+    switchRole: vi.fn(),
+    logout: vi.fn(),
+    isAuthenticated: state.user !== null,
+    isLoading: false,
+  }),
+}));
+
+const savedProfile: StoredPatientProfile = {
+  name: "Asha Devi",
+  age: 30,
+  gender: "female",
+  preferred_language: "en",
+  area: "Bishrampur",
+  emergency_contact: null,
+  photo_ref: null,
+};
+
+function Probe() {
+  const {
+    hydrated,
+    savedProfile: saved,
+    draft,
+    saveStatus,
+    updateDraft,
+    finishProfile,
+    syncPhotoRef,
+  } = useProfile();
+  const basics = {
+    name: "Asha Devi",
+    age: "30",
+    gender: "female",
+  } as const;
+  return (
+    <div>
+      <span data-testid="probe-hydrated">{String(hydrated)}</span>
+      <span data-testid="probe-saved">{String(saved !== null)}</span>
+      <span data-testid="probe-name">{draft.name}</span>
+      <span data-testid="probe-status">{saveStatus}</span>
+      <span data-testid="probe-photo-ref">{draft.photoFileName}</span>
+      <span data-testid="probe-saved-photo-ref">{saved?.photo_ref ?? ""}</span>
+      <button
+        data-testid="probe-set-draft"
+        onClick={() => updateDraft({ ...draft, ...basics })}
+      >
+        set
+      </button>
+      <button
+        data-testid="probe-finish"
+        onClick={() => {
+          void finishProfile();
+        }}
+      >
+        finish
+      </button>
+      <button
+        data-testid="probe-sync-photo"
+        onClick={() => syncPhotoRef("patient/7/photo-1.enc")}
+      >
+        sync photo
+      </button>
+      <button
+        data-testid="probe-clear-photo"
+        onClick={() => syncPhotoRef(null)}
+      >
+        clear photo
+      </button>
+    </div>
+  );
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  __resetLangForTests();
+  state.getProfile.mockReset();
+  state.saveProfile.mockReset();
+  state.user = { id: 7, phone: "+91 98765 43210", roles: ["patient"] };
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
+
+async function renderProvider(ui: React.ReactNode) {
+  const view = render(
+    <QueryClientProvider client={makeTestQueryClient()}>
+      <ProfileProvider>{ui}</ProfileProvider>
+    </QueryClientProvider>,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("probe-hydrated").textContent).toBe("true"),
+  );
+  return view;
+}
+
+describe("ProfileProvider hydration (#488 AC 2)", () => {
+  it("keeps in-progress edits when a slower GET answers set=true", async () => {
+    let settle: (value: ProfileReadResult) => void = () => {};
+    state.getProfile.mockImplementation(
+      () =>
+        new Promise<ProfileReadResult>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    render(
+      <ProfileProvider>
+        <div>
+          <Probe />
+        </div>
+      </ProfileProvider>,
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={makeTestQueryClient()}>
+            {children}
+          </QueryClientProvider>
+        ),
+      },
+    );
+
+    // The patient types before the GET settles; the reference-guard in the
+    // provider must not let the server seed clobber their in-progress input.
+    fireEvent.click(screen.getByTestId("probe-set-draft"));
+    settle({
+      set: true,
+      profile: { ...savedProfile, name: "Server Name" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-hydrated").textContent).toBe("true"),
+    );
+    expect(screen.getByTestId("probe-name").textContent).toBe("Asha Devi");
+    expect(screen.getByTestId("probe-saved").textContent).toBe("true");
+  });
+
+  it("seeds the buffer from a saved profile and short-circuits the gate", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    await renderProvider(
+      <div>
+        <Probe />
+        <ProfileGate action="intake">
+          <button data-testid="action-btn">Go</button>
+        </ProfileGate>
+      </div>,
+    );
+
+    expect(screen.getByTestId("probe-saved").textContent).toBe("true");
+    expect(screen.getByTestId("probe-name").textContent).toBe("Asha Devi");
+    expect(screen.getByTestId("action-btn")).toBeInTheDocument();
+    expect(screen.queryByTestId("gate-trigger-intake")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the identity-scoped local draft when GET answers not-set", async () => {
+    saveDraft({ ...initialDraft(), name: "Local Name" }, state.user!.id);
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    await renderProvider(
+      <div>
+        <Probe />
+        <ProfileGate action="intake">
+          <button data-testid="action-btn">Go</button>
+        </ProfileGate>
+      </div>,
+    );
+
+    expect(screen.getByTestId("probe-saved").textContent).toBe("false");
+    expect(screen.getByTestId("probe-name").textContent).toBe("Local Name");
+    // Not saved server-side, so the basics gate still fires.
+    expect(screen.getByTestId("gate-trigger-intake")).toBeInTheDocument();
+  });
+
+  it("falls back to the local draft when hydration itself fails", async () => {
+    saveDraft({ ...initialDraft(), name: "Offline Name" }, state.user!.id);
+    state.getProfile.mockRejectedValue(new Error("network down"));
+    await renderProvider(
+      <div>
+        <Probe />
+      </div>,
+    );
+
+    expect(screen.getByTestId("probe-saved").textContent).toBe("false");
+    expect(screen.getByTestId("probe-name").textContent).toBe("Offline Name");
+  });
+});
+
+describe("ProfileProvider persist on Finish (#488 AC 1/4)", () => {
+  it("puts the draft with optional fields unsettable and reports saved", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    state.saveProfile.mockResolvedValue(savedProfile);
+    await renderProvider(
+      <div>
+        <Probe />
+      </div>,
+    );
+
+    fireEvent.click(screen.getByTestId("probe-set-draft"));
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(state.saveProfile).toHaveBeenCalledWith({
+        name: "Asha Devi",
+        age: 30,
+        gender: "female",
+        preferred_language: "en",
+        area: null,
+        emergency_contact: null,
+        photo_ref: null,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("saved"),
+    );
+  });
+
+  it("reports an error when the write fails and never fakes a saved profile", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    state.saveProfile.mockRejectedValue(new Error("network down"));
+    await renderProvider(
+      <div>
+        <Probe />
+      </div>,
+    );
+
+    fireEvent.click(screen.getByTestId("probe-set-draft"));
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("error"),
+    );
+    expect(screen.getByTestId("probe-saved").textContent).toBe("false");
+  });
+});
+
+describe("ProfileProvider never-silent Finish (#496)", () => {
+  // The pass conditions are the externally-visible outcomes the surfaces
+  // render from: saveStatus drives the bilingual save-error notice, and the
+  // write is either attempted or not.
+
+  it("surfaces an error, never silence, when identity is unresolved", async () => {
+    state.user = null;
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    // Identity undefined skips hydration, so render without the hydrated gate.
+    render(
+      <ProfileProvider>
+        <Probe />
+      </ProfileProvider>,
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={makeTestQueryClient()}>
+            {children}
+          </QueryClientProvider>
+        ),
+      },
+    );
+
+    fireEvent.click(screen.getByTestId("probe-set-draft"));
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("error"),
+    );
+    expect(state.saveProfile).not.toHaveBeenCalled();
+    expect(screen.getByTestId("probe-saved").textContent).toBe("false");
+  });
+
+  it("surfaces an error, never silence, when required basics are incomplete", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    await renderProvider(
+      <div>
+        <Probe />
+      </div>,
+    );
+
+    // Finish straight from an empty draft (incomplete basics).
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("error"),
+    );
+    expect(state.saveProfile).not.toHaveBeenCalled();
+  });
+
+  it("recovers from a refused finish in the same session without reloading", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    state.saveProfile.mockResolvedValue(savedProfile);
+    await renderProvider(
+      <div>
+        <Probe />
+      </div>,
+    );
+
+    // Refusal: incomplete basics -> explicit error.
+    fireEvent.click(screen.getByTestId("probe-finish"));
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("error"),
+    );
+    expect(state.saveProfile).not.toHaveBeenCalled();
+
+    // The patient fixes what was missing (no reload, same provider instance)
+    // and retries - the very next Finish persists.
+    fireEvent.click(screen.getByTestId("probe-set-draft"));
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(state.saveProfile).toHaveBeenCalledWith({
+        name: "Asha Devi",
+        age: 30,
+        gender: "female",
+        preferred_language: "en",
+        area: null,
+        emergency_contact: null,
+        photo_ref: null,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("saved"),
+    );
+  });
+});
+
+describe("ProfileProvider identity isolation (#488 AC 5)", () => {
+  it("refetches and reseeds the buffer when the identity changes", async () => {
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+    const { rerender } = await renderProvider(
+      <div>
+        <Probe />
+      </div>,
+    );
+
+    fireEvent.click(screen.getByTestId("probe-set-draft"));
+    expect(
+      window.localStorage.getItem("caresetu.profile.draft.7"),
+    ).not.toBeNull();
+
+    // Second identity on the same browser: no shared draft, fresh refetch.
+    state.user = { id: 8, phone: "+91 11111 11111", roles: ["patient"] };
+    state.getProfile.mockClear();
+    state.getProfile.mockResolvedValue({ set: false, profile: null });
+
+    const tree = (
+      <QueryClientProvider client={makeTestQueryClient()}>
+        <ProfileProvider>
+          <div>
+            <Probe />
+          </div>
+        </ProfileProvider>
+      </QueryClientProvider>
+    );
+    rerender(tree);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-hydrated").textContent).toBe("true"),
+    );
+    expect(screen.getByTestId("probe-name").textContent).toBe("");
+    expect(state.getProfile).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem("caresetu.profile.draft.8")).toBeNull();
+  });
+});
+
+// #548: the photo endpoint owns the stored ref, so the provider needs one way
+// to adopt that answer. The invariant it protects: the edit buffer's photo
+// field must always track the stored ref, or the next identity save would PUT
+// a stale ref back and silently detach an uploaded photo.
+describe("ProfileProvider.syncPhotoRef (#548)", () => {
+  it("adopts an uploaded ref into both the buffer and the saved profile", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    await renderProvider(<Probe />);
+
+    expect(screen.getByTestId("probe-photo-ref").textContent).toBe("");
+
+    fireEvent.click(screen.getByTestId("probe-sync-photo"));
+
+    expect(screen.getByTestId("probe-photo-ref").textContent).toBe(
+      "patient/7/photo-1.enc",
+    );
+    expect(screen.getByTestId("probe-saved-photo-ref").textContent).toBe(
+      "patient/7/photo-1.enc",
+    );
+    // Persisted, so a reload keeps the ref rather than re-asking for a photo.
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("caresetu.profile.draft.7") ?? "{}",
+      ).photoFileName,
+    ).toBe("patient/7/photo-1.enc");
+  });
+
+  it("sends the adopted ref on the next save, so a save cannot detach it", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    state.saveProfile.mockResolvedValue(savedProfile);
+    await renderProvider(<Probe />);
+
+    fireEvent.click(screen.getByTestId("probe-sync-photo"));
+    fireEvent.click(screen.getByTestId("probe-finish"));
+
+    await waitFor(() =>
+      expect(state.saveProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ photo_ref: "patient/7/photo-1.enc" }),
+      ),
+    );
+  });
+
+  it("clears the ref on removal and leaves the save status alone", async () => {
+    state.getProfile.mockResolvedValue({ set: true, profile: savedProfile });
+    state.saveProfile.mockResolvedValue(savedProfile);
+    await renderProvider(<Probe />);
+
+    fireEvent.click(screen.getByTestId("probe-sync-photo"));
+    // A save that lands, then the photo is removed: the removal is its own
+    // committed write, so it must not blank a "Profile saved" notice.
+    fireEvent.click(screen.getByTestId("probe-finish"));
+    await waitFor(() =>
+      expect(screen.getByTestId("probe-status").textContent).toBe("saved"),
+    );
+
+    // removePhoto answers with a null ref; the caller passes it straight on.
+    fireEvent.click(screen.getByTestId("probe-clear-photo"));
+    expect(screen.getByTestId("probe-photo-ref").textContent).toBe("");
+    expect(screen.getByTestId("probe-saved-photo-ref").textContent).toBe("");
+    expect(screen.getByTestId("probe-status").textContent).toBe("saved");
+  });
+});

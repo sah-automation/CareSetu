@@ -13,21 +13,55 @@ flight finishes - inflight claims already under delivery drain - before the loop
 returns and the process exits. The dispatcher is pure transport (ADR-0002 §2):
 the worker authors no events and its SQL touches outbox plumbing only.
 
-No scheduler yet: the APScheduler scaffold from issue #16 lands with the first
-scheduled job (roadmap Phase 12/13) and is deliberately absent here.
+Periodic jobs (PHASE-6 T04a/T04b, #315/#316): the worker also hosts an
+APScheduler ``AsyncIOScheduler`` on the same event loop for the scheduled jobs
+ADR-0011's daily-sweep mechanism runs on. Today that is exactly one job - the
+daily credential-expiry sweep, registered against the configurable cron in
+:func:`build_scheduler`. The sweep callback composes the minimal partner stack
+(the facade's iam dependency is optional - WI-3 #336) and runs the
+``close_out_expired_credentials`` close-out pass (PHASE-6 T04b, #316); only the
+scheduler seam shipped in T04a. Job work stays in-process - no new dependency
+beyond APScheduler.
+
+The second periodic job is PHASE-14A B8's error-buffer drain (#726): the gateway
+error seam buffers captured server errors in this same process, and the drain
+writes them into the ``observability`` schema off every request path. It is an
+``IntervalTrigger`` rather than a cron because the buffer is in-process state, not
+a calendar job - a sub-minute cadence has no cron spelling, and an error feed that
+waits for the next night to drain would not be live. Both jobs share the one
+scheduler, so shutdown still has a single place to stop timers.
+
+The third is PHASE-14A B9's HTTP-counter fold (#727): the gateway counts every
+answered request into a per-minute bucket in this same process, and the fold adds
+those buckets onto ``observability_http_minute`` - one row per route per minute,
+never one write per request. It is a separate job rather than a second step inside
+the error drain for one reason worth stating: the two have independent failure
+histories. The error feed's loss is a countable occurrence; the counter's loss
+would inflate throughput permanently and invisibly, and a fold that shares a
+latch with the error drain would let one outage's backpressure speak for both.
 """
 
 import asyncio
 import contextlib
+import logging
 import signal
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from functools import partial
+from typing import Literal, TypeVar
 
-from sqlalchemy.ext.asyncio import create_async_engine
+# apscheduler ships no py.typed marker; strict mypy skips it (import-untyped).
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
+from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import-untyped]
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+# Cache module runtime toggle handlers (ticket #895) - not a MODULE_SCHEMAS module,
+# so registered separately in build_registry().
+from app.cache import register_handlers as cache_register_handlers
 from app.config import Settings, get_settings
 from bus.bootstrap import MODULE_SCHEMAS
 from bus.dispatcher import (
-    DEFAULT_DISPATCHER_CONFIG,
     DispatcherConfig,
     OutboxTable,
     discover_outbox_tables,
@@ -43,8 +77,118 @@ from modules.health.adapters import register_handlers as health_register_handler
 from modules.iam.adapters import register_handlers as iam_register_handlers
 from modules.intake.adapters import register_handlers as intake_register_handlers
 from modules.notify.adapters import register_handlers as notify_register_handlers
+from modules.observability.adapters import register_handlers as observability_register_handlers
+from modules.observability.facade import (
+    SECURITY_SCAN_INTERVAL_SECONDS,
+    ObservabilityFacade,
+    SecurityDetectorThresholds,
+    drain_error_buffer,
+    drain_http_counter,
+    run_security_scan,
+)
+from modules.ops.adapters import register_handlers as ops_register_handlers
+from modules.ops.facade import OpsFacade
 from modules.partner.adapters import register_handlers as partner_register_handlers
+from modules.partner.facade import PartnerFacade
 from modules.settlement.adapters import register_handlers as settlement_register_handlers
+from observability.error_capture import configure_error_capture
+from observability.http_counter import configure_http_counter
+from observability.langfuse_client import flush_langfuse, get_langfuse_client
+from observability.logging import SERVICE_WORKER, configure_logging
+from observability.otel import flush_otel, init_otel, start_span
+from observability.sentry import flush_sentry, init_sentry
+
+logger = logging.getLogger(__name__)
+
+# ARCH-P3 #858: AI async partition - the only two outbox event types that the
+# dedicated AI loop claims. The regular dispatcher excludes exactly these when
+# AI async is enabled. No new event names are introduced.
+AI_ASYNC_EVENT_TYPES: frozenset[str] = frozenset({"intake.captured", "intake.retry_requested"})
+AI_TRIGGER_EVENT_TYPES = AI_ASYNC_EVENT_TYPES
+AI_LOOP_EVENT_TYPES = AI_ASYNC_EVENT_TYPES
+AI_QUEUE_EVENT_TYPES = AI_ASYNC_EVENT_TYPES
+AI_ASYNC_TRIGGERS = AI_ASYNC_EVENT_TYPES
+AI_LOOP_INCLUDE_EVENT_TYPES = AI_ASYNC_EVENT_TYPES
+AI_LOOP_INCLUDE = AI_ASYNC_EVENT_TYPES
+AI_EVENTS = AI_ASYNC_EVENT_TYPES
+
+
+#: What a buffered-drain pass returns. The two drains report different reports
+#: (the error feed's write counts, the counter's fold counts), and the shared
+#: skeleton carries the type through so a caller reads its own report's fields
+#: rather than an untyped value.
+_DrainReportT = TypeVar("_DrainReportT")
+
+
+class _DrainLatch:
+    """Consecutive failed passes of ONE buffered-drain job.
+
+    The scheduler fires each job with ``max_instances=1`` on a single event loop, so
+    a plain attribute is sufficient and a lock would be noise - the sequence spans
+    passes, so there is no object to hang it off. One instance per job, never
+    shared: the error feed's loss and the counter's loss are different facts, and a
+    single count would let one job's outage report the other as failing too.
+    """
+
+    def __init__(self) -> None:
+        self.failures = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _DrainWording:
+    """The log lines ONE buffered-drain job reports with.
+
+    Passed in rather than derived, because the two drain jobs' failure modes are
+    genuinely different and a shared sentence would have to be vague enough to fit
+    both - which is exactly how a log line stops being read. The shape of the control
+    flow is shared; what it says is not.
+    """
+
+    #: First failure of a run. No ``%d``: the recovery line carries the count.
+    first_failure: str
+    #: Still failing. One ``%d``: the consecutive pass count.
+    still_failing: str
+    #: First success after a run of failures. One ``%d``: the failed pass count.
+    recovered: str
+
+
+# PHASE-14A B8 (#726): the error buffer's latch.
+_error_drain_latch = _DrainLatch()
+
+# PHASE-14A B9 (#727): the HTTP-counter fold's own latch, kept SEPARATE on purpose.
+_http_counter_drain_latch = _DrainLatch()
+
+# The B8 error drain's log wording. Every sentence names what the feed loses while
+# the pass keeps failing, because the feed going blind is not self-evident from a
+# stack trace an hour after the database came back.
+_ERROR_DRAIN_WORDING = _DrainWording(
+    first_failure=(
+        "error-buffer drain pass failed; the records stay buffered and the next pass "
+        "retries them. While this persists the error feed is not being written and the "
+        "buffer is discarding the overflow."
+    ),
+    still_failing="error-buffer drain still failing (%d consecutive pass(es))",
+    recovered=(
+        "error-buffer drain recovered after %d failed pass(es); the error stream was "
+        "unwritten for that window"
+    ),
+)
+
+# The B9 fold's wording, deliberately different: the loss here is THROUGHPUT going
+# unwritten, which the capture-liveness read will later have to answer for, and a
+# reader of these three lines should be able to tell the two feeds apart at a glance.
+_HTTP_COUNTER_FOLD_WORDING = _DrainWording(
+    first_failure=(
+        "http-counter fold pass failed; the deltas stay in the counter and the next pass "
+        "retries them. While this persists throughput is not being written and the "
+        "counter is discarding the overflow."
+    ),
+    still_failing="http-counter fold still failing (%d consecutive pass(es))",
+    recovered=(
+        "http-counter fold recovered after %d failed pass(es); throughput was unwritten "
+        "for that window"
+    ),
+)
 
 # Every module's register_handlers, in MODULE_SCHEMAS order. This is the one
 # place infra imports module adapters (coding-standards §2, ADR-0003); a new
@@ -61,6 +205,8 @@ _MODULE_REGISTERS: tuple[Callable[[HandlerRegistry], None], ...] = (
     settlement_register_handlers,
     notify_register_handlers,
     audit_register_handlers,
+    observability_register_handlers,
+    ops_register_handlers,
 )
 
 
@@ -95,34 +241,720 @@ def build_registry() -> HandlerRegistry:
     registry = HandlerRegistry()
     for register_handlers in _MODULE_REGISTERS:
         register_handlers(registry)
+    # Cache module runtime toggle handlers (ticket #895) - not a MODULE_SCHEMAS
+    # module, so registered separately after the module loop.
+    cache_register_handlers(registry)
     return registry
+
+
+def _build_sweep_facade(settings: Settings, engine: AsyncEngine) -> PartnerFacade:
+    """Compose the minimal partner stack the daily expiry sweep needs.
+
+    The sweep close-out only touches ``partner_credentials`` /
+    ``partner_directory_index`` and writes to the partner outbox. The partner
+    facade's iam dependency is OPTIONAL (WI-3, #336): only the register path
+    consumes it, so this sweep facade is built from the shared engine alone -
+    no iam facade, so no SMS adapter is built and no MFA secret is read on this
+    path, and no artifact store, audit or notify facade is required either (a
+    sweep emits no OTP and never registers). Composed here rather than in the
+    API ``create_app`` so the two processes stay independent composition roots
+    (coding-standards §2).
+    """
+    del settings
+    return PartnerFacade(engine=engine)
+
+
+async def _run_credential_sweep() -> None:
+    """Run the daily credential-expiry close-out pass (PHASE-6 T04b, #316).
+
+    ADR-0011's daily close-out job is scheduled by :func:`build_scheduler` on
+    ``settings.partner_credential_sweep_cron``; this callback is what the job
+    fires (T04a shipped the seam as a stub). It resolves the env-driven
+    ``Settings`` once, composes the sweep facade on a dedicated engine, runs the
+    ``close_out_expired_credentials`` pass, and disposes the engine - a
+    self-contained per-fire composition so daily cadence stays cheap and the
+    dispatcher's own engine is never shared into the timer. The pass result is
+    logged (info for the lifecycle close-out, exception for operational
+    failures - error-handling-observability §2; no PHI, ids only); failures
+    then bubble into APScheduler's job error path, and the lazy read-hide keeps
+    directory correctness regardless (ADR-0011).
+    """
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url)
+    # PHASE-14A A3b (#698): the scheduler job runs inside a span so worker
+    # activity shows up in traces; the sweep is not request-derived, so it has
+    # no traceparent to continue and the span is linked to nothing upstream.
+    # No-op when tracing is off, so the periodic job is unchanged.
+    with start_span(
+        "scheduler.credential_expiry_sweep",
+        attributes={"job.name": "credential-expiry-sweep", "job.system": "apscheduler"},
+    ):
+        try:
+            facade = _build_sweep_facade(settings, engine)
+            closed = await facade.close_out_expired_credentials()
+        except Exception:
+            logger.exception(
+                "credential-expiry sweep pass failed; lazy read-hide keeps directory correctness"
+            )
+            raise
+        finally:
+            await engine.dispose()
+    logger.info("credential-expiry sweep pass closed out %d credential(s)", len(closed))
+
+
+async def _run_buffered_drain(
+    *,
+    span_name: str,
+    job_name: str,
+    wording: _DrainWording,
+    latch: _DrainLatch,
+    drain: Callable[[AsyncEngine], Awaitable[_DrainReportT]],
+    engine: AsyncEngine | None,
+) -> _DrainReportT | None:
+    """Run ONE buffered-telemetry drain pass: span, latch, swallow, dispose.
+
+    The shared skeleton behind :func:`_run_error_drain` and
+    :func:`_run_http_counter_drain`, which are the same job twice over. What is
+    shared and why it is safe to share:
+
+    * **An engine the scheduled job supplies outlives the pass; one built here does
+      not.** The job fires every few seconds to a minute rather than daily, so a
+      per-fire pool would be built and torn down dozens of times an hour to hold a
+      connection for a handful of upserts. Sharing the dispatcher's engine for the
+      duration of one short transaction is safe precisely because the pass is brief
+      and self-contained - the opposite trade from the daily sweep, which builds its
+      own to keep the long-lived pipeline pool untouched.
+    * **Failures are swallowed, and only the TRANSITION is logged.** The records are
+      still buffered, so the next pass retries them; letting the exception reach
+      APScheduler would kill the recurring job over a transient blip (ADR-0011's
+      read-hide discipline, applied to a write). One line at the transition and one
+      recovery line naming the window beats a traceback per firing.
+    * **That silence is only safe while the buffer is BOUNDED.** Every swallowed pass
+      leaves its records in memory, so a database down for an hour accumulates what a
+    full buffer then discards - a silent gap in a table that exists to report the
+      outage. The recovery line is what makes the gap visible; it is not an ALARM,
+    because alerting on reliability lives with the reliability alerts (#734).
+
+    What is NOT shared is the wording: the three jobs' failure modes differ enough
+    that one sentence would have to be vague enough to fit all of them, which is
+    exactly how a log line stops being read. The caller passes its own.
+
+    Returns the pass's report, or ``None`` when the pass raised - a caller that has a
+    success line to log must not print it for a pass that wrote nothing.
+    """
+    settings = get_settings()
+    report: _DrainReportT | None = None
+    owned = engine is None
+    drain_engine = engine if engine is not None else create_async_engine(settings.database_url)
+    with start_span(
+        span_name,
+        attributes={"job.name": job_name, "job.system": "apscheduler"},
+    ):
+        try:
+            report = await drain(drain_engine)
+        except Exception:
+            latch.failures += 1
+            if latch.failures == 1:
+                logger.exception(wording.first_failure)
+            else:
+                logger.warning(wording.still_failing, latch.failures)
+        else:
+            if latch.failures:
+                logger.warning(wording.recovered, latch.failures)
+            latch.failures = 0
+        finally:
+            if owned:
+                await drain_engine.dispose()
+    return report
+
+
+async def _run_error_drain(engine: AsyncEngine | None = None) -> None:
+    """Drain this process's captured error buffer into the observability schema.
+
+    PHASE-14A B8 (#726). The counterpart of the gateway error seam: failures were
+    appended to a bounded in-process buffer by the requests that raised them, and
+    this moves them into ``observability_error_events`` through the module facade,
+    off every request path, so a failing request never waits on a telemetry write.
+
+    ``engine`` is the worker's own engine when the scheduled job supplies one, and
+    ``None`` when it does not. That is the difference from the daily sweep, which
+    builds a per-fire engine: this job fires every few SECONDS rather than daily,
+    so a per-fire pool would be built and torn down a hundred times an hour to hold
+    a connection for a handful of upserts. Sharing the dispatcher's engine for the
+    duration of one short transaction is safe precisely because the pass is brief
+    and self-contained - it is the long-lived intake pipeline sharing a pool that
+    the sweep avoids, and this is not that.
+
+    An empty buffer is a no-op that opens no connection, because a healthy system
+    must not hold a pooled connection to discover there is nothing to report.
+
+    Failures are logged and swallowed, and the first of a run is logged louder. Unlike
+    the sweep, a missed drain is not a correctness risk: the records are still
+    buffered, so the next pass retries them, and letting the exception reach
+    APScheduler would kill the recurring job over a transient database blip while the
+    buffer quietly does its job (ADR-0011's read-hide discipline, applied to a write).
+
+    That silence is only safe while the buffer is BOUNDED, and it is worth saying why
+    rather than assuming: every swallowed pass leaves the records in memory, so a
+    database that is down for an hour accumulates errors that a full buffer then
+    discards. A drain failing on every firing is therefore a silent gap in the error
+    feed - the table that exists to report the outage would be unwritten during it.
+    The recovery line fires when the pass starts succeeding again, naming how long
+    the feed was blind, so the gap is at least visible in the logs. It is not an
+    ALARM: alerting on reliability lives with the reliability alerts (#734), which
+    read the feed this job fills - an alarm here would be the second mechanism
+    watching the same condition.
+    """
+    report = await _run_buffered_drain(
+        span_name="scheduler.observability_error_drain",
+        job_name="observability-error-buffer-drain",
+        wording=_ERROR_DRAIN_WORDING,
+        latch=_error_drain_latch,
+        drain=drain_error_buffer,
+        engine=engine,
+    )
+    if report is not None and report.written:
+        logger.info(
+            "error-buffer drain wrote %d capture(s) across %d distinct failure(s)",
+            report.written,
+            report.frequencies,
+        )
+
+
+async def _run_http_counter_drain(engine: AsyncEngine | None = None) -> None:
+    """Fold this process's per-minute request buckets into the observability schema.
+
+    PHASE-14A B9 (#727). The counterpart of the gateway request counter: every
+    answered request incremented one in-process ``(minute, route, method, status
+    class)`` bucket, and this adds those buckets onto ``observability_http_minute``
+    through the module facade, off every request path.
+
+    It is structurally the error drain and deliberately reads as such: the same
+    engine-sharing rule, the same "an empty counter opens no connection" rule, the
+    same swallow-and-log discipline - see :func:`_run_buffered_drain`, which is
+    that shared skeleton. What differs is what a pass costs and what a failure
+    costs. A pass runs one upsert per waiting BUCKET rather than per captured
+    record, so its cost is a function of how many route/minute buckets exist and not
+    of how much traffic arrived - ten thousand requests to one route in one minute
+    are one statement here, which is the whole point of the grain (#717 decision
+    15). And a failure is not a retry of the same harmless kind: the error buffer's
+    retry re-counts one occurrence, whereas a counter whose deltas were double-
+    released would inflate throughput permanently and invisibly. So nothing is
+    released until the transaction commits, and only the delta that was written is
+    released.
+    """
+    report = await _run_buffered_drain(
+        span_name="scheduler.observability_http_counter_fold",
+        job_name="observability-http-counter-fold",
+        wording=_HTTP_COUNTER_FOLD_WORDING,
+        latch=_http_counter_drain_latch,
+        drain=drain_http_counter,
+        engine=engine,
+    )
+    if report is not None and report.series:
+        logger.info(
+            "http-counter fold wrote %d bucket(s) covering %d request(s)",
+            report.series,
+            report.requests,
+        )
+
+
+async def _run_security_scan(engine: AsyncEngine | None = None) -> None:
+    """Run one security detector pass over the recent signal window (#779).
+
+    The pass reads already-aggregated signals and writes alerts through the
+    module facade, so it shares the worker's engine when the scheduler supplies
+    one and builds a short-lived engine when invoked on its own. A failure is
+    logged and swallowed: the signal rows remain in the table, so the next
+    five-minute pass retries, while letting the exception reach APScheduler
+    would kill the recurring job over a transient database blip.
+    """
+    settings = get_settings()
+    thresholds = SecurityDetectorThresholds(
+        auth_failure=settings.security_detector_auth_failure_threshold,
+        operator_mfa_failure=settings.security_detector_operator_mfa_failure_threshold,
+        record_denial=settings.security_detector_record_denial_threshold,
+        rate_limit=settings.security_detector_rate_limit_threshold,
+        prompt_injection=settings.security_detector_prompt_injection_threshold,
+        window_minutes=settings.security_detector_window_minutes,
+        cooldown_seconds=settings.security_detector_cooldown_seconds,
+    )
+    owned = engine is None
+    scan_engine = engine if engine is not None else create_async_engine(settings.database_url)
+    try:
+        with start_span(
+            "scheduler.security_detector_scan",
+            attributes={"job.name": "security-detector-scan", "job.system": "apscheduler"},
+        ):
+            report = await run_security_scan(scan_engine, thresholds=thresholds)
+    except Exception:
+        logger.exception("security detector scan failed; next pass retries")
+        return
+    finally:
+        if owned:
+            await scan_engine.dispose()
+    if report.alerts_raised or report.alerts_resolved:
+        logger.info(
+            "security detector scan raised %d alert(s) and resolved %d",
+            report.alerts_raised,
+            report.alerts_resolved,
+        )
+
+
+async def _run_judge_job(engine: AsyncEngine | None = None) -> None:
+    """Run the LLM judge job over the active synthetic dataset (#789).
+
+    This job runs the completeness evaluator over the active dataset examples
+    with budget checks, temperature zero, strict JSON output, one retry on
+    parse failure, and stores scores with source=judge and a run reference.
+    Scores are advisory only and never gate approval.
+    """
+    settings = get_settings()
+    if not settings.llm_judge_enabled:
+        return
+    owned = engine is None
+    judge_engine = engine if engine is not None else create_async_engine(settings.database_url)
+    try:
+        with start_span(
+            "scheduler.llm_judge_run",
+            attributes={"job.name": "llm-judge-run", "job.system": "apscheduler"},
+        ):
+            obs_facade = ObservabilityFacade(engine=judge_engine, settings=settings)
+            report = await obs_facade.run_judge_job()
+    except Exception:
+        logger.exception("LLM judge run failed; next pass retries")
+        return
+    finally:
+        if owned:
+            await judge_engine.dispose()
+    if report.status == "completed":
+        logger.info(
+            "LLM judge run completed: %d examples scored, %d scores recorded",
+            report.examples_scored,
+            report.scores_recorded,
+        )
+    elif report.status in ("budget_exceeded", "partial", "failed", "disabled"):
+        logger.warning(
+            "LLM judge run finished with status %s: %s",
+            report.status,
+            report.failure_reason or "no details",
+        )
+
+
+# ARCH-P3 #855: explicit safety vs optional split. Optional jobs are the only
+# ones degraded mode may drop; all other scheduled jobs are safety/care work.
+SAFETY_SCHEDULER_JOBS: frozenset[str] = frozenset(
+    {
+        "credential-expiry-sweep",
+        "error-buffer-drain",
+        "security-detector-scan",
+        "alert-delivery-router",
+        "alert-delivery-drainer",
+    }
+)
+DEGRADED_MODE_OPTIONAL_JOBS: frozenset[str] = frozenset({"http-counter-fold", "llm-judge-run"})
+OPTIONAL_JOBS = DEGRADED_MODE_OPTIONAL_JOBS
+SAFETY_JOBS = SAFETY_SCHEDULER_JOBS
+
+
+def build_scheduler(
+    settings: Settings,
+    *,
+    sweep_callback: Callable[[], Awaitable[None]] = _run_credential_sweep,
+    drain_callback: Callable[[], Awaitable[None]] = _run_error_drain,
+    counter_drain_callback: Callable[[], Awaitable[None]] = _run_http_counter_drain,
+    security_scan_callback: Callable[[], Awaitable[None]] = _run_security_scan,
+    judge_job_callback: Callable[[], Awaitable[None]] = _run_judge_job,
+) -> AsyncIOScheduler:
+    """Build the worker's periodic-job scheduler (PHASE-6 T04a, #315).
+
+    An ``AsyncIOScheduler`` running on the worker's event loop, registered with
+    the periodic jobs below - the error-buffer drain only when its #753 gate is
+    on. The first is the daily credential-expiry sweep, scheduled
+    on ``settings.partner_credential_sweep_cron`` (defaults to the daily 01:30
+    cadence of the backup cron, ``deploy/cron``), whose callback is the injectable
+    ``sweep_callback`` (defaulting to :func:`_run_credential_sweep`, the T04b
+    close-out pass) so the scheduler wiring stays unit-testable.
+
+    The second is PHASE-14A B8's error-buffer drain (#726), on an
+    ``IntervalTrigger`` of ``settings.error_drain_interval_seconds``. It is an
+    interval rather than a cron because it drains in-process buffer state, not a
+    calendar period, and it must reach the module through
+    ``modules.observability.facade`` like every other composition-root seam -
+    importing ``modules.observability.error_stream`` here would bypass the facade
+    that owns this module's only legal write path. #753: the job is registered
+    ONLY when ``settings.error_capture_enabled`` - a deployment that has not
+    opted into the capture seam has an always-empty buffer, so the gate-off
+    scheduler is the pre-#726 one (sweep, plus the HTTP-counter fold when its own
+    gate is on, nothing else).
+
+    The third is PHASE-14A B9's HTTP-counter fold (#727), on an ``IntervalTrigger``
+    of ``settings.http_counter_drain_interval_seconds``, for the same two reasons:
+    it folds in-process state, and it reaches the module through the same facade.
+    #753: it is registered ONLY when ``settings.http_counter_enabled``, for the
+    same reason the error drain is conditional - the gate-off scheduler folds
+    nothing, so the job would only wake up to find an empty map.
+    Its cadence defaults to the counter's own one-minute grain because that is what
+    bounds the write cost at one row per route per minute - firing faster cannot add
+    information (a bucket split across two passes still lands on one row, since the
+    upsert ADDS) and firing slower only makes the operator's "recent past" stale.
+
+    The fourth is PHASE-14B Batch 2's security detector (#779), also on an
+    ``IntervalTrigger`` but fixed at five minutes: it reads one shared signal
+    table, not in-process state, and its cadence is the acceptance criterion.
+    Like the other gates it is registered ONLY when
+    ``settings.security_detection_enabled`` is on.
+
+    The fifth and sixth are PHASE-14B Batch 2's alert delivery (#784): a router
+    that creates delivery rows for newly opened alerts, and a drainer that
+    processes them with exponential backoff. Both are interval jobs registered
+    ONLY when ``settings.alert_delivery_enabled`` is on. The router runs every
+    minute; the drainer runs every 30 seconds.
+
+    Every registered job uses ``coalesce`` + a fixed job id so late or missed
+    firings cannot stack duplicate passes across a sleep, and ``max_instances=1``
+    so a drain that is slower than its interval skips rather than overlaps.
+    """
+    if getattr(settings, "ai_async_enabled", False) and not getattr(
+        settings, "ai_queue_worker_enabled", False
+    ):
+        logger.warning(
+            "AI async misconfiguration: AI_ASYNC_ENABLED is true but "
+            "AI_QUEUE_WORKER_ENABLED is false; the AI trigger events "
+            "(intake.captured, intake.retry_requested) would otherwise have "
+            "no claimer and would stall"
+        )
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        sweep_callback,
+        CronTrigger.from_crontab(settings.partner_credential_sweep_cron, timezone="UTC"),
+        id="credential-expiry-sweep",
+        name="daily-credential-expiry-sweep",
+        coalesce=True,
+        max_instances=1,
+    )
+    if settings.error_capture_enabled:
+        scheduler.add_job(
+            drain_callback,
+            IntervalTrigger(seconds=settings.error_drain_interval_seconds),
+            id="error-buffer-drain",
+            name="observability-error-buffer-drain",
+            coalesce=True,
+            max_instances=1,
+        )
+    # #753: the fold is registered ONLY when ``settings.http_counter_enabled`` -
+    # a deployment that has not opted into the counter has an always-empty map, so
+    # the gate-off scheduler is the pre-#727 one (sweep, plus the error drain when
+    # its own gate is on).
+    # Optional work: dropped only in degraded mode (central safety/optional split).
+    if settings.http_counter_enabled and not (
+        settings.degraded_mode and "http-counter-fold" in DEGRADED_MODE_OPTIONAL_JOBS
+    ):
+        scheduler.add_job(
+            counter_drain_callback,
+            IntervalTrigger(seconds=settings.http_counter_drain_interval_seconds),
+            id="http-counter-fold",
+            name="observability-http-counter-fold",
+            coalesce=True,
+            max_instances=1,
+        )
+    # #779: the security detector is region-agnostic and reads the shared signal
+    # table, so it is an interval job like the drains. Its five-minute cadence is
+    # fixed by the batch spec rather than a setting; the window, cooldown and
+    # thresholds beside it are configurable.
+    if settings.security_detection_enabled:
+        scheduler.add_job(
+            security_scan_callback,
+            IntervalTrigger(seconds=SECURITY_SCAN_INTERVAL_SECONDS),
+            id="security-detector-scan",
+            name="security-detector-scan",
+            coalesce=True,
+            max_instances=1,
+        )
+    # #784: alert delivery router and drainer - gated behind alert_delivery_enabled
+    if settings.alert_delivery_enabled:
+        # The router runs every minute to pick up new alerts
+        # The drainer runs every 30 seconds to process pending deliveries
+        pass  # Jobs are added in run_worker_until_stopped with proper adapters
+    # #789: LLM judge run - gated behind llm_judge_enabled
+    # Optional work: dropped only in degraded mode (central safety/optional split).
+    if settings.llm_judge_enabled and not (
+        settings.degraded_mode and "llm-judge-run" in DEGRADED_MODE_OPTIONAL_JOBS
+    ):
+        scheduler.add_job(
+            judge_job_callback,
+            CronTrigger.from_crontab("0 3 * * *", timezone="UTC"),  # Daily at 03:00 UTC
+            id="llm-judge-run",
+            name="llm-judge-run",
+            coalesce=True,
+            max_instances=1,
+        )
+    return scheduler
+
+
+def build_dispatcher_config(settings: Settings) -> DispatcherConfig:
+    """Copy dispatcher tuning fields from ``Settings`` into a ``DispatcherConfig``."""
+    exclude_event_types = (
+        AI_ASYNC_EVENT_TYPES if getattr(settings, "ai_async_enabled", False) else None
+    )
+    return DispatcherConfig(
+        poll_interval_seconds=settings.dispatcher_poll_interval_seconds,
+        claim_timeout_seconds=settings.dispatcher_claim_timeout_seconds,
+        batch_size=settings.dispatcher_batch_size,
+        exclude_event_types=exclude_event_types,
+    )
+
+
+def build_ai_dispatcher_config(settings: Settings) -> DispatcherConfig:
+    """Build the dedicated AI loop's dispatcher config (include-only filter)."""
+    base = build_dispatcher_config(settings)
+    return DispatcherConfig(
+        poll_interval_seconds=base.poll_interval_seconds,
+        claim_timeout_seconds=base.claim_timeout_seconds,
+        batch_size=base.batch_size,
+        max_attempts=base.max_attempts,
+        backoff_base_seconds=base.backoff_base_seconds,
+        include_event_types=AI_ASYNC_EVENT_TYPES,
+        exclude_event_types=None,
+    )
+
+
+def build_regular_dispatcher_config(settings: Settings) -> DispatcherConfig:
+    """Alias for the regular-loop dispatcher config."""
+    return build_dispatcher_config(settings)
 
 
 async def run_worker_until_stopped(
     stop_event: asyncio.Event,
     settings: Settings | None = None,
-    config: DispatcherConfig = DEFAULT_DISPATCHER_CONFIG,
+    config: DispatcherConfig | None = None,
+    *,
+    host: Literal["worker", "web"] = "worker",
 ) -> None:
     """Run the dispatcher loop until ``stop_event`` is set, draining inflight claims.
 
     Resolves the shared env-driven ``Settings`` once, builds the ``HandlerRegistry``
     at the composition root, creates the engine, discovers the module outboxes
     (list-based over ``MODULE_SCHEMAS``, issue #16), and drives ``run_poll_loop``.
-    The loop honours ``stop_event`` between passes, so the pass in flight finishes
-    and inflight claims already under delivery drain before this coroutine returns
-    (ADR-0002 §2, issue #16 user story 19). The engine is always disposed.
+    The periodic-job ``AsyncIOScheduler`` (PHASE-6 T04a, #315) starts on the same
+    event loop and the sweep job is stopped before the engine is disposed. The
+    loop honours ``stop_event`` between passes, so the pass in flight finishes and
+    inflight claims already under delivery drain before this coroutine returns
+    (ADR-0002, issue #16 user story 19). Exceptions from ``run_poll_loop``
+    propagate - a worker failing to reach its database crashes loudly. The engine
+    and scheduler are always disposed.
+
+    ``host`` selects which composition root invoked this function. ARCH-P3 #857
+    makes ``DISPATCHER_MODE`` decide the poll-loop host: the web process hosts a
+    loop only in ``inprocess`` mode, while the dedicated worker hosts it in
+    ``standalone``/``coordinated`` mode. Both roots share this function, so the
+    caller names its role rather than the callee guessing from ``DISPATCHER_MODE``
+    alone.
     """
     resolved_settings = settings if settings is not None else get_settings()
+    # Seed in-process runtime toggles from resolved settings for consistency.
+    from app.runtime_toggles import set_cache_enabled, set_redis_enabled
+
+    set_cache_enabled(resolved_settings.cache_enabled)
+    set_redis_enabled(resolved_settings.redis_enabled)
+    # PHASE-14A A1 (#694): configure structured logging once at the worker
+    # composition root so the dispatcher's lines are JSON/console-rendered and
+    # carry the service identity + trace id. Never raises.
+    configure_logging(resolved_settings, service=SERVICE_WORKER)
+    # PHASE-14A B8 (#726): size the in-process error-capture buffer from Settings
+    # once, here, rather than at each capture site - the seam appends without
+    # knowing anything about configuration and the drain reads the same bound when
+    # it reports what it dropped. #753: the same call applies ERROR_CAPTURE_ENABLED,
+    # so this root also decides whether the seam is armed at all.
+    configure_error_capture(
+        resolved_settings.error_capture_max_records,
+        enabled=resolved_settings.error_capture_enabled,
+    )
+    # PHASE-14A B9 (#727): size the in-process per-minute HTTP counter the same way,
+    # for the same reason - the gateway seam counts without knowing anything about
+    # configuration, and this fold reads the same bound when it reports what it
+    # dropped. In production this is a no-op, because the web process (which serves
+    # the requests being counted) already sized it in its own lifespan; a standalone
+    # worker has an empty counter to fold anyway, and setting the bound there means
+    # whichever process starts first has already sized it. #753: the same call
+    # applies HTTP_COUNTER_ENABLED, so this root also decides whether the counter
+    # is armed at all.
+    configure_http_counter(
+        resolved_settings.http_counter_max_series,
+        enabled=resolved_settings.http_counter_enabled,
+    )
+    # PHASE-14A A4 (#696): initialise Sentry error tracking at the worker
+    # composition root when SENTRY_DSN is set; a no-op when empty and never a
+    # boot failure (init failures are logged and swallowed).
+    init_sentry(resolved_settings)
+    # PHASE-14A B2 (#700): wire the Langfuse client explicitly at the worker
+    # composition root so AI spans raised in this process enrich and export.
+    # A no-op (returns None, SDK never imported) when the keys are absent.
+    get_langfuse_client(
+        resolved_settings.langfuse_public_key,
+        resolved_settings.langfuse_secret_key,
+        resolved_settings.langfuse_host,
+    )
     registry = build_registry()
     engine = create_async_engine(resolved_settings.database_url)
-    try:
-        async with engine.connect() as connection:
-            tables: tuple[OutboxTable, ...] = await discover_outbox_tables(
-                connection, MODULE_SCHEMAS
+    base_dispatcher_config = (
+        config if config is not None else build_dispatcher_config(resolved_settings)
+    )
+    effective_dispatcher_config = base_dispatcher_config
+
+    if resolved_settings.ai_async_enabled and not resolved_settings.ai_queue_worker_enabled:
+        logger.warning(
+            "AI async misconfiguration: AI_ASYNC_ENABLED is true but "
+            "AI_QUEUE_WORKER_ENABLED is false; the AI trigger events "
+            "(intake.captured, intake.retry_requested) would otherwise have "
+            "no claimer and would stall"
+        )
+
+    _ai_async_enabled = bool(resolved_settings.ai_async_enabled)
+    _ai_queue_worker_enabled = bool(resolved_settings.ai_queue_worker_enabled)
+    _should_run_ai_loop = _ai_async_enabled and _ai_queue_worker_enabled
+
+    if _ai_async_enabled:
+        regular_exclude = AI_ASYNC_EVENT_TYPES
+        if base_dispatcher_config.exclude_event_types is not None:
+            regular_exclude = base_dispatcher_config.exclude_event_types | AI_ASYNC_EVENT_TYPES
+        effective_dispatcher_config = DispatcherConfig(
+            poll_interval_seconds=base_dispatcher_config.poll_interval_seconds,
+            claim_timeout_seconds=base_dispatcher_config.claim_timeout_seconds,
+            batch_size=base_dispatcher_config.batch_size,
+            max_attempts=base_dispatcher_config.max_attempts,
+            backoff_base_seconds=base_dispatcher_config.backoff_base_seconds,
+            include_event_types=base_dispatcher_config.include_event_types,
+            exclude_event_types=regular_exclude,
+        )
+
+    ai_dispatcher_config = None
+    if _should_run_ai_loop:
+        ai_dispatcher_config = DispatcherConfig(
+            poll_interval_seconds=base_dispatcher_config.poll_interval_seconds,
+            claim_timeout_seconds=base_dispatcher_config.claim_timeout_seconds,
+            batch_size=base_dispatcher_config.batch_size,
+            max_attempts=base_dispatcher_config.max_attempts,
+            backoff_base_seconds=base_dispatcher_config.backoff_base_seconds,
+            include_event_types=AI_ASYNC_EVENT_TYPES,
+            exclude_event_types=None,
+        )
+    # PHASE-14A A3a (#697): wire the OTel SDK at the worker composition root and
+    # instrument the worker's engine (DB spans) + httpx outbound spans when
+    # OTEL_ENABLED is on; inert when off. Never raises.
+    init_otel(resolved_settings, service=SERVICE_WORKER, engine=engine)
+    scheduler = build_scheduler(
+        resolved_settings,
+        drain_callback=partial(_run_error_drain, engine=engine),
+        counter_drain_callback=partial(_run_http_counter_drain, engine=engine),
+        security_scan_callback=partial(_run_security_scan, engine=engine),
+    )
+
+    # #784: alert delivery router and drainer - gated behind alert_delivery_enabled
+    if resolved_settings.alert_delivery_enabled:
+        obs_facade = ObservabilityFacade(engine=engine, settings=resolved_settings)
+        ops_facade = OpsFacade(engine=engine, settings=resolved_settings)
+
+        # Fetch effective settings to check channel gates
+        effective_settings = await ops_facade.get_effective_settings()
+
+        # Build channel adapters from environment configuration via facade
+        adapters = obs_facade.alert_delivery_adapters(
+            resolved_settings,
+            effective_settings,  # type: ignore[arg-type]
+        )
+
+        # Add router job (runs every minute)
+        scheduler.add_job(
+            partial(obs_facade.run_alert_router_job, ops_facade=ops_facade),
+            IntervalTrigger(seconds=60),
+            id="alert-delivery-router",
+            name="alert-delivery-router",
+            coalesce=True,
+            max_instances=1,
+        )
+
+        # Add drainer job (runs every 30 seconds)
+        if adapters:
+            scheduler.add_job(
+                partial(obs_facade.run_alert_drainer_job, ops_facade=ops_facade, adapters=adapters),
+                IntervalTrigger(seconds=30),
+                id="alert-delivery-drainer",
+                name="alert-delivery-drainer",
+                coalesce=True,
+                max_instances=1,
             )
-        await run_poll_loop(engine, tables, registry, config, stop_event=stop_event)
+        else:
+            logger.warning("alert delivery enabled but no channel adapters configured")
+
+    try:
+        _inprocess_mode = resolved_settings.dispatcher_runs_in_process
+        # A worker process in inprocess mode is a no-op for the poll loop so the
+        # web process stays the one and only claimer.
+        _hosts_poll_loop = _inprocess_mode if host == "web" else not _inprocess_mode
+        if not _hosts_poll_loop:
+            logger.info(
+                "dispatcher poll loop not hosted by the %s process (mode=%s)",
+                host,
+                resolved_settings.dispatcher_mode,
+                extra={"event": "dispatcher_host_skip", "host": host},
+            )
+        else:
+            async with engine.connect() as connection:
+                tables: tuple[OutboxTable, ...] = await discover_outbox_tables(
+                    connection, MODULE_SCHEMAS
+                )
+            scheduler.start()
+            loop_tasks: list[asyncio.Task[None]] = []
+            regular_task = asyncio.create_task(
+                run_poll_loop(
+                    engine,
+                    tables,
+                    registry,
+                    effective_dispatcher_config,
+                    stop_event=stop_event,
+                ),
+                name="outbox-regular-loop",
+            )
+            loop_tasks.append(regular_task)
+            if _should_run_ai_loop and ai_dispatcher_config is not None:
+                ai_task = asyncio.create_task(
+                    run_poll_loop(
+                        engine,
+                        tables,
+                        registry,
+                        ai_dispatcher_config,
+                        stop_event=stop_event,
+                    ),
+                    name="outbox-ai-loop",
+                )
+                loop_tasks.append(ai_task)
+            try:
+                if loop_tasks:
+                    await asyncio.gather(*loop_tasks)
+            except Exception:
+                for task in loop_tasks:
+                    if not task.done():
+                        task.cancel()
+                if loop_tasks:
+                    await asyncio.gather(*loop_tasks, return_exceptions=True)
+                raise
+            finally:
+                # The poll loop returned (stop_event set) or raised; stop the
+                # scheduler before the engine/loop tear down so no timer wakes after
+                # return (wait=False: never block the drain on a mid-fire job).
+                scheduler.shutdown(wait=False)
     finally:
         await engine.dispose()
+        # PHASE-14A A4 (#696): flush queued Sentry events on shutdown; no-op
+        # when Sentry is off.
+        flush_sentry()
+        # PHASE-14A A3a (#697): force-flush the OTel exporter on shutdown so a
+        # Render spin-down does not drop buffered spans; no-op when off.
+        flush_otel()
+        # PHASE-14A B2 (#700): force-flush buffered Langfuse AI spans on
+        # shutdown; no-op when Langfuse is unconfigured.
+        flush_langfuse()
 
 
 def install_signal_handlers(

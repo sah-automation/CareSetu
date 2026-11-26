@@ -20,6 +20,8 @@ Stand up a public, live CareSetu demo at zero monthly cost so a recruiter or eva
 
 The plan is written to double as a migration reference: section 8 covers moving to the roadmap's single-VM launch environment.
 
+> **Session-transport note:** this plan's env-var values (CORS origins, `NEXT_PUBLIC_API_BASE_URL`, gateway flags) are half of the deployed-auth contract. The cookie/guard/CORS behavioral invariants that keep it working across the Vercel+Render split live in `docs/adr/0007-split-origin-deployment-session-invariants.md` (with `ADR-0005` for storage mechanics) - read ADR-0007 before any auth/session change.
+
 ---
 
 ## 2. Current state assessment (post-Phase-2)
@@ -39,19 +41,19 @@ The plan is written to double as a migration reference: section 8 covers moving 
 
 ### 2.2 Gaps to close (the change list)
 
-| #   | Gap                                                                                  | Change                                      |
-| :-- | :----------------------------------------------------------------------------------- | :------------------------------------------ |
-| 1   | CORS hardcodes `localhost:3000`; production was designed for same-origin Caddy proxy | Make allowed origins env-driven             |
-| 2   | Demo OTP read-back is gated to dev/test environments                                 | Gate on `DEMO_MODE` as well                 |
-| 3   | `alembic.ini` hardcodes the localhost URL; `env.py` ignores `DATABASE_URL`           | Read `DATABASE_URL` in `env.py`             |
-| 4   | No demo data                                                                         | Idempotent seed script                      |
-| 5   | No Render/Vercel provisioning                                                        | `render.yaml` + Vercel project config       |
-| 6   | No CD                                                                                | `.github/workflows/deploy.yml`              |
-| 7   | No runbook                                                                           | this folder (`docs/plans/deployment-plan/`) |
+| #   | Gap                                                                                  | Change                                                                    |
+| :-- | :----------------------------------------------------------------------------------- | :------------------------------------------------------------------------ |
+| 1   | CORS hardcodes `localhost:3000`; production was designed for same-origin Caddy proxy | Make allowed origins env-driven                                           |
+| 2   | Demo OTP read-back is gated to dev/test environments                                 | Gate on `DEMO_MODE` as well                                               |
+| 3   | `alembic.ini` hardcodes the localhost URL; `env.py` ignores `DATABASE_URL`           | Read `DATABASE_URL` in `env.py`                                           |
+| 4   | No demo data                                                                         | Idempotent seed script                                                    |
+| 5   | No Render/Vercel provisioning                                                        | `render.yaml` + Vercel project config                                     |
+| 6   | No CD                                                                                | `.github/workflows/deploy.yml`                                            |
+| 7   | No runbook                                                                           | `worker-outbox-runbook.md` in this folder (`docs/plans/deployment-plan/`) |
 
 ### 2.3 Deliberately deferred (do NOT build now)
 
-- **Async worker** (`worker/main.py`): Render free has no free background workers. No business event handlers are registered yet (Phase 1/2 registers are empty), so the outbox/dispatcher does nothing useful in production today. Outbox rows accumulate harmlessly and the dispatcher's reclaim design handles them later. From Phase 4 (audit) run the dispatcher in-process via a FastAPI lifespan task instead of a separate process.
+- **Async worker** (`worker/main.py`): Render free has no free background workers, so the dispatcher does not run as a separate process in production. Instead, from PHASE-7 (#385 follow-up) the Render web service runs the dispatcher **in-process via a FastAPI lifespan task** (`DISPATCHER_IN_PROCESS_ENABLED=true`), which also fixes the deployed `/v1/intake/{id}/pre-summary` 404 (the intake pipeline runs inside the web process, not a never-deployed worker). Localhost dev/CI keep the standalone `python -m worker.main`. Whenever the dispatcher runs (standalone or in-process), the **single-worker rule** applies - exactly one poll loop across the whole deployment, never two - and the operator runbook (`worker-outbox-runbook.md` in this folder, ticket #394) is the operational reference for that rule and for repairing stranded outbox rows.
 - **MinIO / object storage**: not wired into `Settings`; first needed at Phase 7 (intake media). Later free options: Supabase Storage or Cloudflare R2 (free 10 GB).
 - **Gemini / EXT-002 AI**: Phase 7 concern only.
 - **Backup cron** (`deploy/cron/backup.sh`): VM/`pg_dump` based; Supabase free has no automated backups. Accept for demo (see caveats).
@@ -101,6 +103,21 @@ Add to the `Settings` dataclass:
 `__post_init__` validation:
 
 - `demo_mode=True` requires `sms_provider == "mock"` (fail-closed: the demo-flag must never ride a real provider).
+
+Later, observability gates were added (PHASE-14A, #693; `plan-phase14-observability.md` §4) - all additive and **disabled by default**, so boot and tests are unchanged until a gate is set:
+
+- `log_format: str = "console"` - env `LOG_FORMAT`; `json` selects the structlog renderer for production log search.
+- `sentry_dsn: str = ""` - env `SENTRY_DSN`; empty = error tracking off (fail-closed, never commit a DSN).
+- `sentry_traces_sample_rate: float = 0.0` - env `SENTRY_TRACES_SAMPLE_RATE`; a rate above 0 with an empty DSN is refused.
+- `otel_enabled: bool = False` - env `OTEL_ENABLED`; true requires `otel_exporter_otlp_endpoint`.
+- `otel_exporter_otlp_endpoint: str = ""` - env `OTEL_EXPORTER_OTLP_ENDPOINT`; the Grafana Cloud OTLP/HTTP ingest URL (gRPC is frequently blocked on free tiers).
+- `otel_exporter_otlp_headers: tuple[str, ...] = ()` - env `OTEL_EXPORTER_OTLP_HEADERS`; comma-separated `key=value` pairs, a **secret**.
+- `otel_traces_sampler_ratio: float = 1.0` - env `OTEL_TRACES_SAMPLER_RATIO`; lower it to bound free-tier volume.
+- `otel_service_version: str = ""` - env `OTEL_SERVICE_VERSION`; the git SHA shared by OTel resource attributes and Sentry releases.
+- `metrics_enabled: bool = False` - env `METRICS_ENABLED`; the optional Prometheus `/metrics` surface (OTLP is the production path).
+- `observability_enabled: bool = False` - env `OBSERVABILITY_ENABLED`; the MOD-013 aggregate-consumer gate, reserved for a future opt-in.
+- `grafana_url: str = ""` - env `GRAFANA_URL`; the browsable Grafana base the operator `/deeplinks` read links out to. Not derived from the ingest endpoint above - that host is not something an operator can open.
+- `observability_rollup_max_dates: int = 90` - env `OBSERVABILITY_ROLLUP_MAX_DATES`; ceiling on the UTC days one nightly rollup pass may cover.
 
 Wire into `get_settings()`.
 
@@ -152,21 +169,49 @@ Free-tier constraints (accepted):
 
 ### 5.2 Render (backend)
 
-1. Create the service via the **Blueprint** (`render.yaml`) or manually: root directory `apps/backend`, Python, env `PYTHON_VERSION=3.13`.
+1. Create the service via the **Blueprint** (`render.yaml`) or manually: root directory `apps/backend`, Python, env `PYTHON_VERSION=3.13`. The blueprint pins **region: singapore** (issue #902) - the free-tier Supabase project's region (§5.1 provisions "Singapore/Mumbai"; confirm the exact region in the Supabase dashboard and match it). Render cannot change a service's region in place; the full move checklist is §7.2 below.
 2. Build command: `uv sync --frozen --no-dev` (uses `uv.lock`; add `UV=1` or a `pip install uv` bootstrap if the buildpack needs it).
 3. Start command: `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` (migration is idempotent; runs every boot as belt-and-suspenders even though `deploy.yml` also migrates).
 4. Env vars:
 
-| Var                          | Value                                       |
-| :--------------------------- | :------------------------------------------ |
-| `DATABASE_URL`               | Supabase direct connection string           |
-| `APP_ENVIRONMENT`            | `production`                                |
-| `GATEWAY_JWT_VERIFY_ENABLED` | `true`                                      |
-| `GATEWAY_JWT_SIGNING_KEY`    | strong random secret (openssl rand -hex 32) |
-| `GATEWAY_RATE_LIMIT_ENABLED` | `true`                                      |
-| `SMS_PROVIDER`               | `mock`                                      |
-| `DEMO_MODE`                  | `true`                                      |
-| `CORS_ALLOWED_ORIGINS`       | `https://<frontend>.vercel.app`             |
+| Var                              | Value                                                                                                                                                                                                                                                            |
+| :------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                   | Supabase direct connection string                                                                                                                                                                                                                                |
+| `APP_ENVIRONMENT`                | `production`                                                                                                                                                                                                                                                     |
+| `GATEWAY_JWT_VERIFY_ENABLED`     | `true`                                                                                                                                                                                                                                                           |
+| `GATEWAY_JWT_SIGNING_KEY`        | strong random secret (openssl rand -hex 32)                                                                                                                                                                                                                      |
+| `GATEWAY_RATE_LIMIT_ENABLED`     | `true`                                                                                                                                                                                                                                                           |
+| `SMS_PROVIDER`                   | `mock`                                                                                                                                                                                                                                                           |
+| `DEMO_MODE`                      | `true`                                                                                                                                                                                                                                                           |
+| `CORS_ALLOWED_ORIGINS`           | `https://<frontend>.vercel.app`                                                                                                                                                                                                                                  |
+| `INTAKE_MEDIA_BACKEND`           | `supabase` (PHASE-7 #385)                                                                                                                                                                                                                                        |
+| `SUPABASE_URL`                   | Supabase project URL (PHASE-7 #385)                                                                                                                                                                                                                              |
+| `SUPABASE_SERVICE_ROLE_KEY`      | Supabase service role key (PHASE-7 #385)                                                                                                                                                                                                                         |
+| `DISPATCHER_IN_PROCESS_ENABLED`  | `true` (PHASE-7 #385 follow-up)                                                                                                                                                                                                                                  |
+| `AI_PROVIDER`                    | `openai_compatible` (T14 #414 - blueprint-managed so a sync cannot flip it back to mock)                                                                                                                                                                         |
+| `AI_ALLOW_DEMO_PROVIDER`         | `true` (T14 #414 - explicit opt-in letting a real provider run under `DEMO_MODE=true`; blueprint-managed)                                                                                                                                                        |
+| `AI_API_KEY`                     | OpenAI-compatible API key (dashboard-only, `sync: false`, never committed)                                                                                                                                                                                       |
+| `AI_BASE_URL`                    | provider base URL (dashboard-only, `sync: false`)                                                                                                                                                                                                                |
+| `AI_MODEL`                       | provider model (dashboard-only, `sync: false`)                                                                                                                                                                                                                   |
+| `AI_ASR_MODEL`                   | ASR model for `/audio/transcriptions` (dashboard-only, `sync: false`)                                                                                                                                                                                            |
+| `AI_FALLBACK_PROVIDER`           | fallback provider (all-or-none, dashboard-only, `sync: false`)                                                                                                                                                                                                   |
+| `AI_FALLBACK_BASE_URL`           | fallback base URL (dashboard-only, `sync: false`)                                                                                                                                                                                                                |
+| `AI_FALLBACK_API_KEY`            | fallback API key (dashboard-only, `sync: false`, never committed)                                                                                                                                                                                                |
+| `AI_FALLBACK_MODEL`              | fallback model (dashboard-only, `sync: false`)                                                                                                                                                                                                                   |
+| `AI_MONTHLY_BUDGET_PAISE`        | monthly AI budget in paise (PHASE-14A B5b #705). The nightly rollup's `ai_budget` alert threshold is a repo **variable** of the same name (§6.2) - keep the two in step, or the scheduled alert compares against a different cap than the runtime `BudgetMeter`. |
+| `AI_PRICING_TABLE`               | per-model rates in paise, `model:price_in:price_out` (PHASE-14A B1 #699). Without it every call prices 0 and `NFR-001` has no signal; an unlisted model prices 0 and is logged.                                                                                  |
+| `LOG_FORMAT`                     | `json` in production, `console` for readable local output (PHASE-14A A1 #694).                                                                                                                                                                                   |
+| `SENTRY_DSN`                     | Sentry free-tier DSN (dashboard-only, `sync: false`, never committed). Empty = error tracking off (PHASE-14A A4 #696).                                                                                                                                           |
+| `SENTRY_TRACES_SAMPLE_RATE`      | `0` keeps errors only; raise to sample error events with traces. Meaningful only with a DSN.                                                                                                                                                                     |
+| `OTEL_ENABLED`                   | `true` wires the OTel SDK + HTTP OTLP exporter; requires `OTEL_EXPORTER_OTLP_ENDPOINT` (fail-closed) (PHASE-14A A3 #697).                                                                                                                                        |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`    | Grafana Cloud OTLP/HTTP ingest URL (dashboard-only, `sync: false`).                                                                                                                                                                                              |
+| `OTEL_EXPORTER_OTLP_HEADERS`     | comma-separated `key=value` pairs, e.g. the instance id + API token (dashboard-only, `sync: false`, never committed).                                                                                                                                            |
+| `OTEL_TRACES_SAMPLER_RATIO`      | parent-based `traceidratio`, default `1.0`; lower it to keep free-tier volume bounded.                                                                                                                                                                           |
+| `OTEL_SERVICE_VERSION`           | git SHA of the deployed commit; carries the release into OTel resource attributes and Sentry releases.                                                                                                                                                           |
+| `METRICS_ENABLED`                | `true` exposes the optional Prometheus `/metrics` surface. OTLP is the production metrics path (PHASE-14A A3 #697).                                                                                                                                              |
+| `OBSERVABILITY_ENABLED`          | MOD-013 aggregate-consumer gate; off by default (the composition root registers handlers unconditionally).                                                                                                                                                       |
+| `GRAFANA_URL`                    | browsable Grafana Cloud base the operator `/deeplinks` read links out to (dashboard-only). Empty = no Grafana link, never an error (PHASE-14A C1b #707).                                                                                                         |
+| `OBSERVABILITY_ROLLUP_MAX_DATES` | ceiling on the UTC days one nightly rollup pass may cover; a long backfill is trimmed and finished by the next run (PHASE-14A B5b #705).                                                                                                                         |
 
 5. Create a **deploy hook** (Render dashboard → service → Deploy Hooks) and copy its URL into the GitHub secret `RENDER_DEPLOY_HOOK_URL`.
 
@@ -206,11 +251,40 @@ Vercel is not part of the workflow - it deploys itself from the same push. Order
 
 ### 6.2 GitHub Actions secrets
 
-| Secret                    | Source                                                                                            |
-| :------------------------ | :------------------------------------------------------------------------------------------------ |
-| `SUPABASE_DATABASE_URL`   | Supabase direct connection string (see 5.1)                                                       |
-| `RENDER_DEPLOY_HOOK_URL`  | Render service deploy hook (see 5.2)                                                              |
-| `BACKUP_DRILL_PASSPHRASE` | random passphrase for the DR drill's at-rest AES-256 encryption (TEST-E #133; `backup-drill.yml`) |
+| Secret                    | Source                                                                                                    |
+| :------------------------ | :-------------------------------------------------------------------------------------------------------- |
+| `SUPABASE_DATABASE_URL`   | Supabase direct connection string (see 5.1); `deploy.yml`, `backup-drill.yml`, `observability-rollup.yml` |
+| `RENDER_DEPLOY_HOOK_URL`  | Render service deploy hook (see 5.2)                                                                      |
+| `BACKUP_DRILL_PASSPHRASE` | random passphrase for the DR drill's at-rest AES-256 encryption (TEST-E #133; `backup-drill.yml`)         |
+
+Repository **variables** (Settings → Secrets and variables → Actions → Variables), not
+secrets - these are configuration, not credentials:
+
+| Variable                  | Value                                                                                                                                                                                                                                                                                                                                                                                         |
+| :------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AI_MONTHLY_BUDGET_PAISE` | paise cap for the `ai_budget` alert threshold in the nightly rollup (PHASE-14A B5b #705; `observability-rollup.yml`). Must equal the Render service's `AI_MONTHLY_BUDGET_PAISE` (5.2), or the scheduled alert would compare against a different cap than the runtime `BudgetMeter` reports. Optional - unset it and the backend applies its own default, which is the one copy of the number. |
+
+### 6.2a Nightly observability rollup (PHASE-14A B5b #705)
+
+`.github/workflows/observability-rollup.yml` runs `python -m worker.rollup` on a
+nightly cron (02:45 UTC) plus a manual `workflow_dispatch` that accepts an optional
+`backfill_days` override. It is a scheduled workflow rather than an in-process
+scheduler because the Render free web process sleeps at ~15 minutes idle, so a timer
+inside it would fire only while someone was using the app.
+
+What the pass covers is decided by the database, not by the workflow: the entry point
+reads `observability_rollup_runs` and plans itself, so the first run sweeps all
+existing AI-job history and every run after that rolls the previous UTC day,
+catching up on any night the job missed. Re-rolling a night already covered is a
+no-op - every write in the pass is an upsert keyed on the rolled date, and the ledger
+row is written in the same transaction as the aggregates it describes. Nothing is
+rendered awake: the job runs against Supabase over `SUPABASE_DATABASE_URL` and
+hard-fails with a clear message if that secret is missing or the database is paused.
+
+The monthly AI budget period resets with no separate job: `observability_ai_cost_budget`
+carries a calendar-month billing period, so the first pass whose target date falls in
+the new month zeroes the closed month's spend - in practice the run on the 2nd, one
+day after the 1st's pass rolls the old month's last day.
 
 ### 6.3 Demo flow after deploy
 
@@ -223,14 +297,15 @@ Vercel is not part of the workflow - it deploys itself from the same push. Order
 
 ## 7. Free-tier caveats (accepted)
 
-| Caveat                                          | Impact                                                              | Workaround chosen                                   |
-| :---------------------------------------------- | :------------------------------------------------------------------ | :-------------------------------------------------- |
-| Render spins down after 15 min idle             | first request per idle period ~1 min cold start                     | none (accepted)                                     |
-| Supabase pauses after 7 days idle               | DB unavailable; paused projects must be restored from the dashboard | none (accepted); restore before a demo              |
-| Supabase free: no automated backups             | data loss on delete/incident; diverges from roadmap `NFR-004`       | manual `pg_dump`; acceptable for demo data          |
-| Render free: no background workers              | the outbox dispatcher cannot run as a process                       | defer worker; in-process lifespan loop from Phase 4 |
-| Free SMS providers don't match EXT-001 contract | real OTP delivery impossible                                        | demo-mode OTP in UI (`DEMO_MODE=true`, mock SMS)    |
-| Cold-start load                                 | concurrent demo traffic may see slow first responses                | none (single evaluator use case)                    |
+| Caveat                                          | Impact                                                              | Workaround chosen                                                                                                                                 |
+| :---------------------------------------------- | :------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Render spins down after 15 min idle             | first request per idle period ~1 min cold start                     | none (accepted)                                                                                                                                   |
+| Supabase pauses after 7 days idle               | DB unavailable; paused projects must be restored from the dashboard | none (accepted); restore before a demo                                                                                                            |
+| Supabase free: no automated backups             | data loss on delete/incident; diverges from roadmap `NFR-004`       | manual `pg_dump`; acceptable for demo data                                                                                                        |
+| Render free: no background workers              | the outbox dispatcher cannot run as a process                       | in-process lifespan loop on the web service (`DISPATCHER_IN_PROCESS_ENABLED=true`, PHASE-7 #385 follow-up); never a second process                |
+| Free SMS providers don't match EXT-001 contract | real OTP delivery impossible                                        | demo-mode OTP in UI (`DEMO_MODE=true`, mock SMS)                                                                                                  |
+| Demo mode now rides a real AI provider          | real LLM spend under demo (cost overruns possible)                  | `AI_ALLOW_DEMO_PROVIDER=true` opt-in (T14 #414); the monthly budget meter stays observe-and-warn only (PS-10, NFR-001) - it never blocks the demo |
+| Cold-start load                                 | concurrent demo traffic may see slow first responses                | none (single evaluator use case)                                                                                                                  |
 
 ### 7.1 Post-deploy optimizations (applied 2026-08-16, POST-DEPLOY-OPTS)
 
@@ -244,24 +319,61 @@ Audit of the live free-tier stack. Three code changes + two dashboard settings, 
 | 4   | Vercel **Ignored Build Step** set to a `HEAD^`-based bash diff         | Skips the frontend build when nothing changed since the previous commit, saving Hobby build quota (100 builds/day) on pushes that don't touch the frontend. Command: `git diff HEAD^ HEAD --quiet` - compares the deployed commit against its parent, so it never depends on Vercel's `$VERCEL_GIT_PREVIOUS_SHA`. **Failure modes found 2026-08-16:** (1) a `-- apps/frontend ...` pathspec version returned 0 (skip) for every commit because Vercel runs the step with its working directory at the **project root (`apps/frontend`)**, so the pathspec matched nothing and the diff was empty - every production build from `d78a922` to `9112f50` was silently cancelled and the live site kept serving the pre-header `d24bd67` build (TEST-B2 failed on the missing `X-Content-Type-Options`). (2) The original `$VERCEL_GIT_PREVIOUS_SHA`-based command cancelled the same commits - treat that variable as unreliable. Dropping the pathspec (whole-tree `git diff HEAD^ HEAD --quiet`) fixed it; tradeoff: backend-only and docs-only pushes also rebuild the frontend. **Gotchas:** enter the bare command, never a `bash ` prefix - Vercel executes the box as `bash <script>`, so a leading `bash ` makes bash treat `git` as a script file and fail with `/usr/bin/git: cannot execute binary file` (seen on PR #140, 2026-08-16). After changing the rule, click **Redeploy** on the latest production deployment to force the pending commit through. | Vercel dashboard → project settings → Git → Ignored Build Step     |
 | 5   | Vercel build now fails loudly if `NEXT_PUBLIC_API_BASE_URL` is missing | Before, the frontend fell back to `http://localhost:8000` when the var was absent - the site built and looked fine but quietly talked to localhost (broken demo). A new `next.config.ts` throws during Vercel builds only (`VERCEL` is set by Vercel, never locally/CI).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `apps/frontend/next.config.ts`                                     |
 
+### 7.2 Region co-location with the database (issue #902, LATENCY-REGION)
+
+The backend originally provisioned in Render's default region (Oregon) while the Supabase project sits in the Singapore/Mumbai area and the audience is India: every request paid a ~250-350 ms trans-ocean round trip plus a second hop to the database region, which dominates the latency table the `npm run check:latency` probe (#901) reports. No code change can remove a network round trip, so the levers are:
+
+1. **Compute moves to the database's region** - `render.yaml` pins `region: singapore`. Database region change or migration is out of scope (#902 keeps the DB as-is; compute moves to it).
+2. **Response compression** - the backend registers GZip middleware (`RESPONSE_COMPRESSION_ENABLED` default on, `RESPONSE_COMPRESSION_MIN_SIZE=1024`), so large JSON does not ride uncompressed across the link. Small envelopes stay uncompressed (the size floor), and clients that send no `Accept-Encoding: gzip` receive bytes unchanged.
+3. **CORS preflight cache** - the CORS middleware now sets `max_age` (env `CORS_PREFLIGHT_MAX_AGE_SECONDS`, default 86400; browsers clamp Chromium to ~2 h, Firefox/Safari to 24 h), so each browser reuses one preflight answer instead of paying an un-cached cross-site round trip (ADR-0007's split-origin) before every authenticated call.
+
+#### 7.2.1 Why changing region requires recreation (not an in-place update)
+
+Render binds a service to a region at creation; the region selector is disabled for an existing service. A region move for the backend is a **recreate-in-the-new-region** operation with a rollback window - never an in-place update.
+
+#### 7.2.2 Region-move checklist (human, ordered; keep the OLD service alive until the verification passes)
+
+Read §5.2 for the full env-var table - the recreated service needs every row. Every `sync: false` item below is a dashboard-only secret that is NEVER synced from the repo - a blueprinted recreation re-asks for all of them.
+
+1. **Record the before-numbers**: `npm run check:latency -- --backend-url https://<current-url>.onrender.com --iterations 20` (the #902 ticket cites these).
+2. **Create the new backend service in `singapore`** via the Blueprint (`render.yaml`); set every dashboard secret when prompted:
+   - `DATABASE_URL` (the same Supabase direct connection string - it does not change)
+   - `CORS_ALLOWED_ORIGINS` (the exact Vercel origin, ADR-0007 rule 10)
+   - `IAM_MFA_SECRET_KEY` (MUST equal the GitHub Actions secret the migrate-and-seed job uses)
+   - `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`
+   - `SENTRY_DSN`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_VERSION`
+   - `GRAFANA_URL`
+   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+   - `INTAKE_MEDIA_KEY`, `PROFILE_MEDIA_KEY` (if either is lost, previously stored media becomes permanently undecryptable - confirm both exist before deleting anything)
+   - `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`, `AI_ASR_MODEL`, `AI_PRICING_TABLE`, `AI_FALLBACK_*` chain, `AI_WEBHOOK_*` / `AI_JOB_*` (all-or-none pairs)
+3. **Expect the generated key to rotate**: `GATEWAY_JWT_SIGNING_KEY` is `generateValue: true` in the blueprint - a recreated service mints a NEW signing key, so every existing session dies at cutover. Acceptable for the demo; users re-login.
+4. **Point the deploy hook**: create the new service's deploy hook and update the GitHub secret `RENDER_DEPLOY_HOOK_URL` so deploy.yml migrates-and-seeds the same database through the new service.
+5. **Repoint the frontend**: update the Vercel env `NEXT_PUBLIC_API_BASE_URL` to the new service URL and redeploy (the build fails loudly when unset, §7.1 #5).
+6. **Repoint keep-warm**: update the `LIVE_BACKEND_URL` repository variable (`.github/workflows/keep-warm.yml` reads it; the workflow fails loudly when unset). The cadence does not change - cron every 10 min targeting `<new-url>/health` with a 5-attempt retry. A region move changes the target, not the schedule.
+7. **Migrate-and-seed, then first boot**: push to `main` (deploy.yml) or run the migrate-and-seed job manually; then let the service settle. Cold-start expectation: one ~1 min cold start on the new service before the first keep-warm ping succeeds; keep-warm's own retry window absorbs it.
+8. **Verify before cutover**: `npm run check:latency -- --backend-url https://<new-url>.onrender.com --iterations 20` exits 0 under the threshold, AND one full login + data flow (register → verify → session → a consented read) succeeds on the new URL. Record the after-numbers with the ticket.
+9. **Retire the old service** only AFTER step 8 passes: delete the old Render service (the rollback window closes here; never earlier).
+
 ---
 
-## 8. Future migration path: single VM (roadmap PHASE-14)
+## 8. Future migration path: single VM (roadmap PHASE-14B)
 
 The roadmap's launch target is one VM (`FastAPI + worker + Next.js + Postgres + MinIO + Caddy edge + backup cron`, roadmap §2.14). When moving off the free tiers, do the reverse of this plan:
 
-| Free-tier artifact                        | VM replacement                                                                  |
-| :---------------------------------------- | :------------------------------------------------------------------------------ |
-| `NEXT_PUBLIC_API_BASE_URL` (cross-origin) | same-origin `/api/*` via `deploy/edge/Caddyfile`; unset the env var             |
-| Render web service                        | systemd service running `uvicorn app.main:app` (workers via gunicorn if needed) |
-| Worker deferred                           | run `python -m worker.main` as its own systemd unit (outbox/dispatcher drains)  |
-| Supabase `DATABASE_URL`                   | local PostgreSQL URL; `alembic upgrade head` at deploy                          |
-| MinIO (Phase 7+)                          | local MinIO, or keep Supabase Storage/R2 if still convenient                    |
-| Vercel                                    | `next build && next start` behind Caddy, or static export                       |
-| `CORS_ALLOWED_ORIGINS`                    | leave empty (same-origin)                                                       |
-| `DEMO_MODE=true`                          | `false`; use `SMS_PROVIDER=provider` with a real SMS_API_KEY/BASE_URL           |
-| No automated backups                      | `deploy/cron/backup.sh` + `deploy/cron/caresetu-backup.cron` (already in repo)  |
-| No keep-alive                             | always-on VM; no pause issue                                                    |
+| Free-tier artifact                                         | VM replacement                                                                                                                                                                                                                            |
+| :--------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_API_BASE_URL` (cross-origin)                  | same-origin `/api/*` via `deploy/edge/Caddyfile`; unset the env var                                                                                                                                                                       |
+| Render web service                                         | systemd service running `uvicorn app.main:app` (workers via gunicorn if needed)                                                                                                                                                           |
+| Worker deferred                                            | run `python -m worker.main` as its own systemd unit (outbox/dispatcher drains). Exactly one such unit - the single-worker rule + stranded-row repair live in `worker-outbox-runbook.md` in this folder.                                   |
+| Supabase `DATABASE_URL`                                    | local PostgreSQL URL; `alembic upgrade head` at deploy                                                                                                                                                                                    |
+| MinIO (Phase 7+)                                           | local MinIO, or keep Supabase Storage/R2 if still convenient                                                                                                                                                                              |
+| Vercel                                                     | `next build && next start` behind Caddy, or static export                                                                                                                                                                                 |
+| `CORS_ALLOWED_ORIGINS`                                     | leave empty (same-origin)                                                                                                                                                                                                                 |
+| `DEMO_MODE=true`                                           | `false`; use `SMS_PROVIDER=provider` with a real SMS_API_KEY/BASE_URL                                                                                                                                                                     |
+| No automated backups                                       | `deploy/cron/backup.sh` + `deploy/cron/caresetu-backup.cron` (already in repo)                                                                                                                                                            |
+| No keep-alive                                              | always-on VM; no pause issue                                                                                                                                                                                                              |
+| Grafana Cloud / Sentry / Langfuse free tiers (`PHASE-14A`) | self-hosted Grafana + Tempo/Loki/Mimir and an on-host error sink; the Postgres `observability` schema is the system of record either way (`ADR-0024`, `ADR-0025`). Unset `SENTRY_DSN` and the error pillar goes quiet - the app stays up. |
+| Nightly observability rollup as a GitHub Actions schedule  | move the same `python -m worker.rollup` invocation onto a VM cron beside `deploy/cron/backup.sh`; the pass is re-run safe and idempotent, so the trigger can change without the pass changing.                                            |
 
 The code changes in section 4 are all env-driven (off by default), so the same codebase runs both topologies - only env vars and deployment config differ.
 

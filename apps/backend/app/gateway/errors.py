@@ -9,6 +9,12 @@ strings and the distinguishing cause stays server-side, recorded via the
 module logger as a structured ``gateway_rejection`` line carrying the trace
 id. ``error_response`` is the single funnel for all three shapes so the log
 line and the envelope can never drift.
+
+``CODE_INTERNAL_SERVER_ERROR`` below belongs to the catch-all seam in
+``app/main.py``, which captures its failures into the bounded error buffer
+(#726). It lives here beside the gateway rejections because the captured record's
+fingerprint is derived from the code: a code spelled two different ways in two
+places splits one failure into two entries in the operator's feed.
 """
 
 from __future__ import annotations
@@ -17,18 +23,35 @@ import logging
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.gateway.trace import resolve_trace_id
 
 CODE_AUTH_UNAUTHENTICATED = "AUTH_UNAUTHENTICATED"
 CODE_AUTH_INSUFFICIENT_SCOPE = "AUTH_INSUFFICIENT_SCOPE"
 CODE_RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED"
+#: The catch-all seam's envelope code (app/main.py's ``Exception`` handler). Named
+#: here beside the gateway rejections so the string that goes into the envelope, the
+#: log line and the captured error record (#726) is spelled once - a code that
+#: drifts between the envelope and the telemetry is an error feed that groups two
+#: different failures under one fingerprint.
+CODE_INTERNAL_SERVER_ERROR = "INTERNAL_SERVER_ERROR"
 
 MESSAGE_AUTH_UNAUTHENTICATED = "Authentication required; provide a valid access token"
 MESSAGE_AUTH_INSUFFICIENT_SCOPE = "Your session does not grant the scope this route requires"
 MESSAGE_RATE_LIMIT_EXCEEDED = "Too many requests; retry after the window"
+MESSAGE_INTERNAL_SERVER_ERROR = "An unexpected error occurred"
 
 logger = logging.getLogger(__name__)
+
+
+class ErrorEnvelope(BaseModel):
+    """The single error shape every CareSetu endpoint answers (api-standards §2)."""
+
+    code: str
+    message: str
+    trace_id: str
+    details: dict[str, object]
 
 
 class GatewayError(Exception):
@@ -60,22 +83,26 @@ def error_response(
     *,
     request: Request,
     headers: dict[str, str] | None = None,
+    details: dict[str, object] | None = None,
+    log_tag: str = "gateway_rejection",
 ) -> JSONResponse:
     """One error envelope for every gateway rejection (api-standards §2).
 
     Records the rejection as a structured log line keyed by the request-scoped
     trace id the envelope carries - the same id every log line for that request
     uses - so a reported 401/403/429 is reproducible from logs alone
-    (error-handling-observability §3). Never logs the token or the caller's raw
-    input.
+    (error-handling-observability §3). ``log_tag`` lets a module adapter keep
+    its own rejection label in the log line (``iam_rejection`` etc.) so an
+    operator can tell which surface rejected a call. Never logs the token or
+    the caller's raw input.
     """
     trace_id = resolve_trace_id(request)
-    logger.warning("gateway_rejection code=%s status=%d trace_id=%s", code, status_code, trace_id)
-    envelope = {"code": code, "message": message, "trace_id": trace_id, "details": {}}
+    logger.warning("%s code=%s status=%d trace_id=%s", log_tag, code, status_code, trace_id)
+    envelope = {"code": code, "message": message, "trace_id": trace_id, "details": details or {}}
     return JSONResponse(status_code=status_code, content=envelope, headers=headers)
 
 
-async def _emit_access_denial(request: Request) -> None:
+async def emit_access_denial(request: Request) -> None:
     """Publish ``patient.auth_failed`` (reason ``access_denied``) for an authenticated 403.
 
     PHASE-2 REM T7 (#87): an access denial on a protected route becomes
@@ -122,7 +149,7 @@ def register_gateway_error_handlers(app: FastAPI) -> None:
         )
 
     async def _insufficient_scope(request: Request, exc: Exception) -> JSONResponse:
-        await _emit_access_denial(request)
+        await emit_access_denial(request)
         return error_response(
             status.HTTP_403_FORBIDDEN,
             CODE_AUTH_INSUFFICIENT_SCOPE,

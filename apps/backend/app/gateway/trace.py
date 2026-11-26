@@ -6,6 +6,21 @@ route can answer, and flows through every error envelope and the log lines that
 record them (error-handling-observability §3). ``resolve_trace_id`` is the
 single read point for both the gateway rejection funnel and the iam error
 envelope, so an envelope and its log line can never drift.
+
+A client-supplied id is honoured only when it is an identifier this platform can
+store and link (see ``observability.trace_ids``); anything else falls back to a
+minted id. The rule is shared with the deep-link builder, so a stored id and
+the link built from it can never disagree.
+
+Since PHASE-14A B8 (#726) this middleware is also where a server-error
+RESPONSE is captured into the bounded in-process error buffer. An exception that
+escapes every module handler is captured on the other side instead, by the
+catch-all seam in ``app/main.py`` - Starlette runs a registered ``Exception``
+handler in its ``ServerErrorMiddleware``, which sits OUTSIDE all user middleware,
+so an exception never comes back through here and the two seams cannot double
+capture the same failure. What reaches ``call_next`` instead is a 5xx a handler
+produced deliberately, and that is the half of the error feed the exception seam
+cannot see.
 """
 
 from __future__ import annotations
@@ -16,20 +31,12 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
+from observability.error_capture import ERROR_KIND_SERVER_ERROR_RESPONSE, capture_server_error
+from observability.logging import reset_trace_id, set_trace_id
+from observability.trace_ids import normalize_trace_id
+
 _TRACE_HEADER = "x-request-id"
 _TRACE_STATE_ATTR = "trace_id"
-_MAX_TRACE_ID_LENGTH = 128
-
-
-def _is_safe_trace_id(trace_id: str) -> bool:
-    """A client-supplied id is echoed into log lines and envelopes, so only
-    printable non-space tokens up to a sane length are honoured; anything else
-    (blank, newlines, tabs, unbounded length) falls back to a minted id
-    (error-handling-observability §2 - no log injection, no PHI vector).
-    """
-    if not trace_id or len(trace_id) > _MAX_TRACE_ID_LENGTH:
-        return False
-    return all(char.isprintable() and not char.isspace() for char in trace_id)
 
 
 def resolve_trace_id(request: Request) -> str:
@@ -60,9 +67,41 @@ class TraceMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         client_trace_id = request.headers.get(_TRACE_HEADER)
         if client_trace_id:
-            candidate = client_trace_id.strip()
-            if _is_safe_trace_id(candidate):
+            # #757: the client's id is honoured only when it is an identifier this
+            # platform can STORE and LINK - printable ASCII, no whitespace, no URL
+            # separator, at most the column's width. A longer value would reach
+            # the product ledger unclamped and wedge its write; a value carrying a
+            # separator would reach a deep link the builder refuses. Anything else
+            # falls back to a minted id, and the request is unaffected.
+            candidate = normalize_trace_id(client_trace_id)
+            if candidate is not None:
                 request.state.trace_id = candidate
-                return await call_next(request)
-        resolve_trace_id(request)
-        return await call_next(request)
+        # Resolved ONCE and reused by the capture below: ``resolve_trace_id`` reads
+        # ``request.state`` after the first call, so a second call is a redundant
+        # read, and one local is the cheaper way to say "this request's id".
+        trace_id = resolve_trace_id(request)
+        # PHASE-14A A1 (#694): bind the one request-scoped id into the logging
+        # context so every log line emitted while this request is in flight -
+        # across the gateway, routes, and module facades - carries it.
+        token = set_trace_id(trace_id)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_trace_id(token)
+        # PHASE-14A B8 (#726): a 5xx the handler produced itself is captured here,
+        # outside the trace-reset above so the record still carries this request's
+        # id. One integer comparison on the way out of every request; the capture
+        # itself only runs for a failure, and it buffers rather than writes.
+        if response.status_code >= 500:
+            capture_server_error(
+                request=request,
+                status_code=response.status_code,
+                kind=ERROR_KIND_SERVER_ERROR_RESPONSE,
+                # No envelope code: reading one would mean consuming the response
+                # stream this middleware exists to hand back. The route template,
+                # method and status already identify the failure, and ``kind`` is
+                # what keeps it separate from an escaped exception in the feed.
+                code="",
+                trace_id=trace_id,
+            )
+        return response

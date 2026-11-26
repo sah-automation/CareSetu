@@ -1,0 +1,478 @@
+// Operator HTTP surface client (PHASE-5 T1, #278). Thin fetch wrapper over
+// the backend's operator-scoped endpoints: MFA-gated operator login
+// (/v1/auth/operator/*) and the partner verification queue/decision surface
+// (/v1/partner/verification-queue etc.). Response shapes mirror
+// modules/iam/session_facade.py (SessionResult), modules/iam/mfa_facade.py
+// (EnrollMfaResult), and modules/partner/facade.py (PartnerQueue /
+// PartnerVerificationDetail / PartnerView).
+
+import { IDEMPOTENCY_KEY_HEADER, idempotencyKey } from "@/lib/idempotency";
+import { guardShape, request, requestBlob, requestVoid } from "@/lib/request";
+import type { SessionResult } from "@/lib/auth/api";
+import { isPartnerView } from "@/lib/partner/api";
+import type { PartnerView } from "@/lib/partner/api";
+
+export type { SessionResult } from "@/lib/auth/api";
+export type { PartnerType, PartnerView } from "@/lib/partner/api";
+
+export interface OperatorLoginRequest {
+  phone: string;
+  code: string;
+}
+
+export interface OperatorSummary {
+  identity_id: number;
+  phone_masked: string;
+  tier: string;
+  is_active: boolean;
+  mfa_enabled: boolean;
+  created_at: string;
+}
+
+export interface OperatorInviteRequest {
+  phone: string;
+  tier?: "admin" | "operator";
+}
+
+export interface OperatorInvitedResult {
+  identity_id: number;
+  phone_e164: string;
+}
+
+export interface OperatorTierUpdateRequest {
+  tier: "admin" | "operator";
+}
+
+export interface OperatorActiveUpdateRequest {
+  is_active: boolean;
+}
+
+export interface EnrollMfaResult {
+  identity_id: number;
+  phone_e164: string;
+  secret: string;
+  provisioning_uri: string;
+}
+
+export interface PartnerQueueItem {
+  partner_id: number;
+  identity_id: number;
+  partner_type: string;
+  status: string;
+  practice_name?: string | null;
+  practice_address: string;
+  created_at: string;
+  round: number;
+  audit_link?: string | null;
+}
+
+export interface PartnerQueue {
+  items: PartnerQueueItem[];
+}
+
+export interface CredentialDetail {
+  credential_id: number;
+  credential_type: string;
+  verified: boolean;
+  expires_at?: string | null;
+  artifact_refs: Record<string, string>;
+}
+
+export interface VerificationRound {
+  round: number;
+  status: string;
+  decision?: string | null;
+  decision_reason?: string | null;
+  decision_by?: number | null;
+  decided_at?: string | null;
+  created_at: string;
+}
+
+export interface AuditEventDetail {
+  id: string;
+  event_type: string;
+  actor_id?: string | null;
+  target_id?: string | null;
+  scope?: string | null;
+  metadata: Record<string, unknown>;
+  timestamp: string;
+  prev_hash: string;
+  hash: string;
+}
+
+export interface PartnerVerificationDetail {
+  partner_id: number;
+  identity_id: number;
+  partner_type: string;
+  status: string;
+  practice_name?: string | null;
+  practice_address: string;
+  service_area_id?: number | null;
+  created_at: string;
+  credentials: CredentialDetail[];
+  verification_history: VerificationRound[];
+  audit_events: AuditEventDetail[];
+  audit_link?: string | null;
+}
+
+export interface OperatorDecisionRequest {
+  approve: boolean;
+  reason?: string | null;
+}
+
+function isSessionResult(value: unknown): value is SessionResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "jwt" in value &&
+    "jti" in value &&
+    "scope" in value &&
+    "identity_id" in value &&
+    "expires_in_seconds" in value &&
+    "refresh_token" in value
+  );
+}
+
+function isEnrollMfaResult(value: unknown): value is EnrollMfaResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "identity_id" in value &&
+    "phone_e164" in value &&
+    "secret" in value &&
+    "provisioning_uri" in value
+  );
+}
+
+function isPartnerQueueItem(value: unknown): value is PartnerQueueItem {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "partner_id" in value &&
+    "status" in value &&
+    "round" in value
+  );
+}
+
+function isPartnerQueue(value: unknown): value is PartnerQueue {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "items" in value &&
+    Array.isArray((value as PartnerQueue).items) &&
+    (value as PartnerQueue).items.every(isPartnerQueueItem)
+  );
+}
+
+function isPartnerVerificationDetail(
+  value: unknown,
+): value is PartnerVerificationDetail {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "partner_id" in value &&
+    "credentials" in value &&
+    Array.isArray((value as PartnerVerificationDetail).credentials) &&
+    "verification_history" in value &&
+    Array.isArray((value as PartnerVerificationDetail).verification_history)
+  );
+}
+
+export async function operatorLogin(
+  req: OperatorLoginRequest,
+): Promise<SessionResult> {
+  const data = await request<unknown>("/v1/auth/operator/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return guardShape(
+    data,
+    isSessionResult,
+    "The API returned an unexpected login session shape",
+  );
+}
+
+export async function enrollOperatorMfa(): Promise<EnrollMfaResult> {
+  const data = await request<unknown>("/v1/auth/operator/mfa/enroll", {
+    method: "POST",
+  });
+  return guardShape(
+    data,
+    isEnrollMfaResult,
+    "The API returned an unexpected MFA enrollment shape",
+  );
+}
+
+export interface VerificationQueueParams {
+  partner_type?: string | null;
+  status?: string | null;
+  sort_by?: string | null;
+}
+
+export async function fetchVerificationQueue(
+  params: VerificationQueueParams = {},
+): Promise<PartnerQueue> {
+  const search = new URLSearchParams();
+  if (params.partner_type) search.set("partner_type", params.partner_type);
+  if (params.status) search.set("status", params.status);
+  if (params.sort_by) search.set("sort_by", params.sort_by);
+  const query = search.toString();
+  const data = await request<unknown>(
+    `/v1/partner/verification-queue${query ? `?${query}` : ""}`,
+  );
+  return guardShape(
+    data,
+    isPartnerQueue,
+    "The API returned an unexpected verification queue shape",
+  );
+}
+
+export async function fetchVerificationDetail(
+  partnerId: number,
+): Promise<PartnerVerificationDetail> {
+  const data = await request<unknown>(`/v1/partner/verification/${partnerId}`);
+  return guardShape(
+    data,
+    isPartnerVerificationDetail,
+    "The API returned an unexpected verification detail shape",
+  );
+}
+
+export async function submitOperatorDecision(
+  partnerId: number,
+  req: OperatorDecisionRequest,
+): Promise<PartnerView> {
+  const data = await request<unknown>(
+    `/v1/partner/verification/${partnerId}/decision`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  return guardShape(
+    data,
+    isPartnerView,
+    "The API returned an unexpected decision result shape",
+  );
+}
+
+function isOperatorSummary(value: unknown): value is OperatorSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.identity_id === "number" &&
+    typeof row.phone_masked === "string" &&
+    typeof row.tier === "string" &&
+    typeof row.is_active === "boolean" &&
+    typeof row.mfa_enabled === "boolean" &&
+    typeof row.created_at === "string"
+  );
+}
+
+interface OperatorListResponse {
+  operators: OperatorSummary[];
+}
+
+function isOperatorListResponse(value: unknown): value is OperatorListResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return Array.isArray(row.operators) && row.operators.every(isOperatorSummary);
+}
+
+function isOperatorInvitedResult(
+  value: unknown,
+): value is OperatorInvitedResult {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.identity_id === "number" && typeof row.phone_e164 === "string"
+  );
+}
+
+/**
+ * List all operators (admin only).
+ */
+export async function fetchOperators(): Promise<OperatorSummary[]> {
+  const data = await request<unknown>("/v1/auth/operator/users");
+  const read = guardShape(
+    data,
+    isOperatorListResponse,
+    "The API returned an unexpected operator list shape",
+  );
+  return read.operators;
+}
+
+/**
+ * Invite a new operator (admin only).
+ */
+export async function inviteOperator(
+  req: OperatorInviteRequest,
+): Promise<OperatorInvitedResult> {
+  const data = await request<unknown>("/v1/auth/operator/invite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return guardShape(
+    data,
+    isOperatorInvitedResult,
+    "The API returned an unexpected operator invite shape",
+  );
+}
+
+/**
+ * Update an operator's tier (admin only).
+ */
+export async function updateOperatorTier(
+  identityId: number,
+  req: OperatorTierUpdateRequest,
+): Promise<OperatorSummary> {
+  const data = await request<unknown>(
+    `/v1/auth/operator/users/${identityId}/tier`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  return guardShape(
+    data,
+    isOperatorSummary,
+    "The API returned an unexpected operator tier update shape",
+  );
+}
+
+/**
+ * Update an operator's active state (admin only).
+ */
+export async function updateOperatorActive(
+  identityId: number,
+  req: OperatorActiveUpdateRequest,
+): Promise<OperatorSummary> {
+  const data = await request<unknown>(
+    `/v1/auth/operator/users/${identityId}/active`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  return guardShape(
+    data,
+    isOperatorSummary,
+    "The API returned an unexpected operator active update shape",
+  );
+}
+
+// ---- the calling operator's own private profile (FEAT-015, #863, parent #862) ----
+
+export type OperatorTier = "admin" | "operator";
+
+export interface OperatorProfileView {
+  identity_id: number;
+  name: string | null;
+  phone: string;
+  tier: OperatorTier;
+  mfa_enabled: boolean;
+  photo_ref: string | null;
+  created_at: string;
+}
+
+export interface OperatorProfileUpdate {
+  name: string | null;
+}
+
+export interface OperatorProfilePhotoRef {
+  photo_ref: string;
+}
+
+function isOperatorProfileView(value: unknown): value is OperatorProfileView {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.identity_id === "number" &&
+    (row.name === null || typeof row.name === "string") &&
+    typeof row.phone === "string" &&
+    (row.tier === "admin" || row.tier === "operator") &&
+    typeof row.mfa_enabled === "boolean" &&
+    (row.photo_ref === null || typeof row.photo_ref === "string") &&
+    typeof row.created_at === "string"
+  );
+}
+
+function isOperatorProfilePhotoRef(
+  value: unknown,
+): value is OperatorProfilePhotoRef {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return typeof row.photo_ref === "string";
+}
+
+export async function fetchOperatorProfile(): Promise<OperatorProfileView> {
+  const data = await request<unknown>("/v1/operator/profile");
+  return guardShape(
+    data,
+    isOperatorProfileView,
+    "The API returned an unexpected operator profile shape",
+  );
+}
+
+export async function updateOperatorProfile(
+  update: OperatorProfileUpdate,
+  retryKey?: string,
+): Promise<OperatorProfileView> {
+  const data = await request<unknown>("/v1/operator/profile", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey),
+    },
+    body: JSON.stringify(update),
+  });
+  return guardShape(
+    data,
+    isOperatorProfileView,
+    "The API returned an unexpected operator profile shape",
+  );
+}
+
+export async function uploadOperatorProfilePhoto(
+  file: File,
+  retryKey?: string,
+): Promise<OperatorProfilePhotoRef> {
+  const body = new FormData();
+  body.append("file", file);
+  const data = await request<unknown>("/v1/operator/profile/photo", {
+    method: "PUT",
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey) },
+    body,
+  });
+  return guardShape(
+    data,
+    isOperatorProfilePhotoRef,
+    "The API returned an unexpected operator photo shape",
+  );
+}
+
+export async function fetchOperatorProfilePhoto(): Promise<Blob> {
+  return requestBlob("/v1/operator/profile/photo");
+}
+
+export async function deleteOperatorProfilePhoto(
+  retryKey?: string,
+): Promise<void> {
+  await requestVoid("/v1/operator/profile/photo", {
+    method: "DELETE",
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey(retryKey) },
+  });
+}
+
+// Operator user-management audit history seam (re-exported for settings).
+export {
+  fetchOperatorChangeHistory,
+  fetchOperatorAuditHistory,
+  fetchOperatorHistory,
+  fetchAuditEvents as fetchOperatorAuditEvents,
+} from "@/lib/audit/api";

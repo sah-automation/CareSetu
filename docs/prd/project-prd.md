@@ -157,6 +157,12 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 - `consent_granted` / `consent_revoked`: `patient_id`, `consent_id`, `timestamp`
 - `record_accessed`: `patient_id`, `actor_id`, `access_type`, `timestamp`
 
+**Delivery Notes (batch #529):**
+
+- The grantable `record_scope` set is now the closed enum `consultations | prescriptions | lab_results | metrics | health_background | full_record`. `health_background` was added by the doctor-console/profiles batch (#529) so a patient can share - or revoke - their own health background independently of the rest of the record; `full_record` still subsumes it, and every existing grant is unaffected. Resolved in `ADR-0018`.
+- A patient's **first** health-background save carries a one-time acknowledgment; it records a normal, fully revocable `health_background` grant to each doctor the patient has a live relationship with, in the same transaction as the write. Later saves never re-prompt and never re-grant.
+- Doctor-side reads stay fail-closed per scope and are ledgered: the doctor Patients list, the patient-detail sections, and the patient photo each write an access-history entry, and every served section writes an egress-disclosure row pinned to the authorizing consent id + version.
+
 #### Feature 4.1.3: Patient Record Access & Audit View
 
 - **Feature ID:** `FEAT-003`
@@ -185,7 +191,11 @@ _Traceability: `REQ-021`, `REQ-003`, `NFR-002`, `GAP-001`, `GAP-005`, `GAP-013`,
 
 **Telemetry & Event Tracking:**
 
-- `record_view_denied`: `patient_id`, `actor_id`, `reason`, `timestamp`
+- `record.denied`: `patient_id`, `actor_id`, `reason`, `timestamp`
+
+**Delivery Notes (batch #529):**
+
+- The access history now also records surface-level reads that are not tied to a single record entry: serving a row of the doctor's derived Patients list, serving a row of the doctor's open-cases list, and reading a patient's detail or photo each append an entry under a surface marker (`doctor_patients_list`, `doctor_cases_list`, `doctor_patient_detail`) alongside the existing owner, partner, and denied-attempt rows. This is what lets the trust view answer "who has seen this" for the doctor console as well as for the record timeline. Delivered by #539/#540, widened by #646.
 
 ---
 
@@ -225,6 +235,10 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
 - `directory_search`: `patient_id`, `query`, `filters`, `result_count`, `timestamp`
 - `provider_selected`: `patient_id`, `provider_id`, `provider_type`, `timestamp`
 
+**Delivery Notes (batch #599):**
+
+- Specialty search is now live. It returns nothing today because nothing ever writes a specialty; this is a production defect the batch fixes, not a new capability being announced.
+
 #### Feature 4.2.2: Provider Profiles & Credential Display
 
 - **Feature ID:** `FEAT-005`
@@ -255,6 +269,17 @@ _Traceability: `REQ-001`, `REQ-008`, `REQ-022`, `REQ-005`, `GAP-009`_
 
 - `credential_displayed`: `provider_id`, `credential_type`, `timestamp`
 - `credential_invalidated`: `provider_id`, `reason`, `timestamp`
+
+**Delivery Notes (batch #529):**
+
+- Profiles are now **private, self-service surfaces** for the subject as well as public projections for others: a patient maintains their own profile photo, and an active doctor has a private profile (photo, practice details, experience, languages, about, availability, notification preferences) plus the consultation-fee editor moved onto it. Delivered by #533 (patient), #542/#543 (doctor).
+- Every profile photo lives in one private, encrypted object store (`profile-media`, ADR-0020) under a role-prefixed key, with only the object key held in SQL. Photos are never publicly addressable and are always streamed decrypted through the backend - a doctor's read of a patient photo passes the consent gate first.
+- Uploads are validated before any write (JPEG/PNG/WebP, ≤ 5 MB, GIF refused) and go through a bounded retry so a flaky store fails loudly instead of silently dropping the photo.
+
+**Delivery Notes (batch #599):**
+
+- The doctor profile's public field set now includes clinic name, specialties, languages, consulting days and hours, about text, years of experience, and structured address parts (locality, street/building, PIN). Each new public field renders in the declared band, never the verified band.
+- The practice address saves update the directory's derived practice position (ADR-0021); the position is a PIN centroid derived from the declared PIN (ADR-0022), with no new external integration created.
 
 ---
 
@@ -353,17 +378,28 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
   - **Given** a doctor attempts to complete a consult for a patient without a reviewed pre-summary
   - **When** the handshake is submitted
   - **Then** the platform requires the pre-summary to be finalized before the prescription stage opens
+- **Scenario 3: Edge Case - doctor closes the visit without a prescription**
+  - **Given** the case is in the Prescription Pending stage and the doctor decides no medicine is needed
+  - **When** the doctor deliberately closes the visit and records a close reason
+  - **Then** the case moves to `Closed` and leaves the pending list, the close reason is recorded, and `case.closed` is published (a rejected AI draft never triggers this - only the doctor's deliberate action)
 
 **Business Rules & State Transitions:**
 
 - **Rule 1:** The consult itself happens off-platform (`REQ-004`); the platform only orchestrates the handshake and downstream stages.
-- **Rule 2:** **Open decision `CFL-003`:** who initiates the handshake (doctor vs. patient vs. dual). Baseline for this PRD: doctor-initiated. See Section 7.1.
-- **State Change:** `[Case: Pre-Summary]` → `[Case: Consult Complete]` → `[Case: Prescription Pending]`.
+- **Rule 2:** **Resolved `CFL-003`:** who initiates the handshake (doctor vs. patient vs. dual). **Decision:** doctor-initiated - delivered in Phase 8 (`CaseConsoleFacade.mark_consult_complete`). See ADR-0014 and Section 7.1.
+- **State Change:** `[Case: Pre-Summary]` → _consult-complete milestone_ → `[Case: Prescription Pending]` → (close-without-prescription) → `[Case: Closed]`.
 
 **Telemetry & Event Tracking:**
 
-- `consult_marked_complete`: `case_id`, `doctor_id`, `patient_id`, `timestamp`
-- `case_stage_changed`: `case_id`, `from_stage`, `to_stage`, `timestamp`
+- `case.consult_complete`: `case_id`, `doctor_id`, `patient_id`, `pre_summary_id` (registry dot-notation - supersedes the legacy `consult_marked_complete` spelling)
+- `case.closed`: `case_id`, `doctor_id`, `patient_id`, `close_reason` (registry dot-notation - supersedes the legacy `case_stage_changed` spelling)
+
+**Delivery Notes (PHASE-8.1):**
+
+- The pick-a-doctor step delivered with the doctor-console chassis insert: after completing the pre-summary (editable before pick if low-confidence), the patient picks exactly one doctor from the filtered verified directory - pre-filtered by the suggested specialty (child → Pediatrician, pregnancy/menstrual → Gynecologist, dental → Dentist, otherwise General Physician), each card showing verified tick, practice, specialty, distance, consultation fee (renders "fee not set" when unset and never blocks care), and a credentials summary. The pick is the consent moment (`MOD-004`): one plain-language sheet names what the chosen doctor will see, and the choice plus the consent grant are recorded atomically; thereafter the pre-summary is visible only to that doctor. A confirmation screen follows with next steps. The doctor sets the consultation fee from their console; it surfaces on the pick card and the verified provider profile.
+- The doctor side of this feature is delivered inside the console: a review queue of assigned pre-summaries awaiting review (low-confidence first, amber "Verify" chip) and a case workspace where one attributed review finalizes a low-confidence pre-summary in the same action (no stuck cases), and the "Mark consult complete" handshake moves the case to Prescription Pending. This delivery covers the blueprint §6.1-§6.4 doctor-channel shell; Patients and Profile console areas render as "coming soon" placeholders in this phase.
+
+**Delivery Notes (batch #529):** the two placeholders above are now live. The doctor's **Patients** area is the care-loop anchor: a derived Current/Past list (Current = a live standing grant to this doctor of any scope, or an open care case; Past = closed care cases only, with no live grant), recomputed on every read from the consent lineage and care cases - never a stored patient-relationship table (ADR-0019). Selecting a patient opens a section-gated detail: contact/photo on any live grant, consultation history on `consultations`, health background on `health_background`, with a deep link into the case workspace. A denied section renders locked rather than leaking (a patient with no live grant at all answers every section locked, and the photo stream fails closed with 403), and every served row and section is access-logged and egress-disclosed. The **Profile** area carries the doctor's private profile and fee editor. The doctor console chrome (account avatar, Patients/Profile nav, collapsible sidebar) and the professional restyle of landing, cases, workspace, and review shipped in the same batch; the backend seam is a facade-only `MOD-012` console seam with no schema of its own.
 
 #### Feature 4.4.2: E-Prescription - AI Draft & Doctor Approval
 
@@ -389,14 +425,23 @@ _Traceability: `REQ-004`, `REQ-013`, `REQ-023`, `REQ-005`, `CFL-002`, `CFL-003`,
 **Business Rules & State Transitions:**
 
 - **Rule 1:** An e-prescription is never issued without doctor review and approval (`REQ-023`).
-- **Rule 2:** **Open decision `CFL-002`/`RISK-EVAL-003`:** the regulatory posture of AI-drafted prescriptions under a pure-facilitator model is unvalidated; the compliance stakeholder is `[Not Yet Elicited]`. Baseline: AI is a drafting assistant under the licensed doctor's authority.
+- **Rule 2:** **Resolved `CFL-002`/`RISK-EVAL-003`:** the regulatory posture of AI-drafted e-prescriptions. **Decision (ADR-0015):** AI is a drafting assistant under the licensed doctor's authority - drafting cap two AI drafts per care case (a new AI draft requires fewer than two rejected drafts), manual-authoring fallback; a stricter gate slots into the existing approval seam without redesign (CFL-002 seam landed at the facade). See Section 7.1.
 - **State Change:** `[Rx: Draft]` → `[Rx: Doctor Reviewed]` → `[Rx: Approved & Issued]` → `[Rx: Fulfilled]`.
 
 **Telemetry & Event Tracking:**
 
-- `prescription_draft_created`: `case_id`, `doctor_id`, `input_type` (voice|photo), `timestamp`
-- `prescription_approved`: `case_id`, `doctor_id`, `edited_yn`, `timestamp`
-- `prescription_rejected`: `case_id`, `doctor_id`, `reason`, `timestamp`
+- `prescription.draft_created`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`, `source`, `attempt_no`
+- `prescription.reviewed`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`
+- `prescription.approved`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`, `edited_yn`
+- `prescription.rejected`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`, `reason`
+- `prescription.issued`: `case_id`, `prescription_id`, `patient_id`, `doctor_id`, `occurred_at`
+
+(registry dot-notation - supersedes the legacy `prescription_draft_created`/`prescription_approved`/`prescription_rejected` snake_case spellings)
+
+**Delivery Notes (PHASE-8.1):**
+
+- The e-prescription frontend shipped inside the doctor console: the prescription tab lives in the case workspace, stage-locked until the pre-summary is finalized and the consult handshake is complete (the locked state names exactly what is missing with a one-tap jump to it). Unlocked, it accepts the Persona-002 input modes - voice note ("Boliye / Voice note"), photo, or a typed addendum - and renders the AI draft as editable item rows (drug / dose / frequency / duration) with doctor edits surfaced ("2 items edited by you"), per the blueprint §6.2c. In-progress prescription work survives a hard refresh of a pending case (the workspace renders from the working-prescription read or the last mutation response).
+- Approval follows the two-step gate from the blueprint §6.5: "Review & approve" full-screen preview, then a confirmation sheet with the "Maine check kar liya / I have reviewed this prescription" verification declaration before "Approve & issue" stamps timestamp and doctor attribution. Reject-with-reason returns the case for re-drafting; close-without-prescription records a close reason and publishes `case.closed`. The delivery consumes the PHASE-8 backend seams (`CaseConsoleFacade`, `PrescriptionFacade`), preserves the AI drafting-cap rule (ADR-0015), and never auto-issues (`REQ-023`).
 
 ---
 
@@ -578,8 +623,8 @@ _Traceability: `REQ-011`, `REQ-028`, `REQ-005`, `GAP-002`, `AMB-003`, `NFR-001`_
 
 **Telemetry & Event Tracking:**
 
-- `partner_registered`: `partner_id`, `partner_type`, `timestamp`
-- `partner_verification_started` / `partner_activated` / `partner_rejected`: `partner_id`, `reason`, `timestamp`
+- `partner.registered`: `partner_id`, `partner_type`, `timestamp`
+- `partner.verification_started` / `partner.activated` / `partner.rejected`: `partner_id`, `reason`, `timestamp`
 
 #### Feature 4.7.2: Operator Console - Verification & Moderation
 
@@ -793,6 +838,11 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 - `audit_event_written`: `event_type`, `actor_id`, `target_id`, `timestamp`
 - `audit_tamper_attempt`: `event_id`, `timestamp`
 
+**Delivery Notes (batch #529):**
+
+- Consent lifecycle coverage is now complete against the delivered scope set: a patient's first health-background save records its grant, and the patient can later revoke any scope - including the new independent `health_background` scope - from Settings, exactly as for any other scope (ADR-0018). The grant is a normal, versioned, revocable consent, so the audit trail records it with no special case.
+- Every consent-authorized disclosure made by the doctor console writes an egress row pinned to the authorizing consent id + version, and every served read writes an access-history entry - so the "complete trail of regulated acts" above now includes the doctor Patients list, the doctor open-cases list, the patient-detail sections, and the patient photo read. No new event vocabulary was introduced: these ride the existing `audit.event`, `record.accessed`, and `consent.*` lifecycle.
+
 ---
 
 ## 5. System Workflows & Edge Cases
@@ -802,7 +852,7 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 1. **Patient registers and authenticates** (`FEAT-001`); a stable identity is created.
 2. **Patient discovers a provider** - GP, lab, or chemist - via the directory (`FEAT-004`); sees verified credentials (`FEAT-005`).
 3. **Patient submits symptoms** by voice or text in English/Hindi (`FEAT-006`); the AI generates a clinical pre-summary (`FEAT-007`).
-4. **Patient and doctor consult off-platform** (`REQ-004`); the doctor marks the consult complete on-platform (`FEAT-008`) - the handshake seam is the open `CFL-003` decision.
+4. **Patient and doctor consult off-platform** (`REQ-004`); the doctor marks the consult complete on-platform (`FEAT-008`) - the doctor-initiated handshake is the delivered baseline (`CFL-003` resolved).
 5. **Doctor issues an e-prescription**: AI drafts from a voice note/photo; the doctor reviews and approves (`FEAT-009`).
 6. **Patient books diagnostics** (home pickup or partner lab/pickup point; direct fallback) (`FEAT-010`).
 7. **Lab returns the report**; the upload is matched to the order and patient before filing (`FEAT-011`).
@@ -844,8 +894,8 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 
 > Carried forward from the Conflict & Gap Report. Each is flagged inline at the affected feature with its **baseline assumption** in use until the stakeholder decides.
 
-- **`CFL-002` / `RISK-EVAL-003`** - Regulatory posture of AI-drafted e-prescriptions under the pure-facilitator model; compliance stakeholder `[Not Yet Elicited]`. **Baseline:** AI as drafting assistant under doctor's authority (`FEAT-009`).
-- **`CFL-003` / `GAP-003`** - Who triggers the off-platform consult → on-platform prescription handshake. **Baseline:** doctor-initiated (`FEAT-008`).
+- **`CFL-002` / `RISK-EVAL-003`** - Regulatory posture of AI-drafted e-prescriptions under the pure-facilitator model. **RESOLVED (ADR-0015):** AI is a drafting assistant under the doctor's authority - drafting cap two AI drafts per care case, manual-authoring fallback, approval gate live, CFL-002 seam landed at the facade (`FEAT-009`).
+- **`CFL-003` / `GAP-003`** - Who triggers the off-platform consult → on-platform prescription handshake. **RESOLVED:** doctor-initiated, delivered in Phase 8 via `CaseConsoleFacade.mark_consult_complete` (`FEAT-008`).
 - **`CFL-004` / `AMB-005`** - Counterparty of chronic-care "follow-up interactions." **Baseline:** patient self-service logging + nudges; doctor interaction stays off-platform (`FEAT-018`).
 - **`GAP-001`** - Patient identity strength (OTP vs. stronger verification). **Baseline:** phone OTP (`FEAT-001`).
 - **`GAP-004` / `GAP-008`** - Report→order→patient matching mechanism. **Baseline:** order-ID binding + patient confirmation (`FEAT-011`).
@@ -860,14 +910,15 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 
 ### 7.2 Risk Register & Operational Mitigations
 
-| Risk ID             | Risk Description                                                | Category                         | Impact | Mitigation Strategy                                                                      | Traceability                     |
-| :------------------ | :-------------------------------------------------------------- | :------------------------------- | :----- | :--------------------------------------------------------------------------------------- | :------------------------------- |
-| **`RISK-001`**      | Payment fraud between patient and partner                       | Financial                        | Medium | Cash/UPI direct primary; platform-facilitated only on risk signal (REQ-030)              | `REQ-030`, `FEAT-016`            |
-| **`RISK-002`**      | Wrong/mismatched lab report attached to wrong patient           | Data integrity / clinical safety | High   | Order-ID + patient confirmation binding before filing (FEAT-011); KPI-003 = 0 mismatches | `REQ-025`, `FEAT-011`            |
-| **`RISK-EVAL-003`** | AI-drafted prescription regulatory exposure                     | Legal/Regulatory                 | High   | Pending compliance sign-off (CFL-002); doctor approval gate before issuance              | `REQ-005`, `REQ-023`, `FEAT-009` |
-| **`RISK-EVAL-004`** | Single-city dependency on Daltonganj partner supply & demand    | Commercial                       | Medium | Activation-cycle KPI (KPI-004); open supply-side elicitation; ISSUE-004 gates expansion  | `REQ-002`, `REQ-008`             |
-| **`RISK-EVAL-005`** | Data loss on longitudinal record under best-effort availability | Data                             | High   | Daily backup floor (RPO ≤ 24 h), monthly restore validation (NFR-004)                    | `REQ-021`, `NFR-004`             |
-| **`RISK-EVAL-006`** | Hindi voice extraction quality vs. near-zero AI cost            | Feasibility                      | Medium | Early spike to validate; low-confidence fallback to doctor review (AMB-006)              | `REQ-007`, `NFR-001`, `FEAT-007` |
+| Risk ID             | Risk Description                                                                                            | Category                         | Impact | Mitigation Strategy                                                                                                                                                                                                                                                                                                                                                         | Traceability                                     |
+| :------------------ | :---------------------------------------------------------------------------------------------------------- | :------------------------------- | :----- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------- |
+| **`RISK-001`**      | Payment fraud between patient and partner                                                                   | Financial                        | Medium | Cash/UPI direct primary; platform-facilitated only on risk signal (REQ-030)                                                                                                                                                                                                                                                                                                 | `REQ-030`, `FEAT-016`                            |
+| **`RISK-002`**      | Wrong/mismatched lab report attached to wrong patient                                                       | Data integrity / clinical safety | High   | Order-ID + patient confirmation binding before filing (FEAT-011); KPI-003 = 0 mismatches                                                                                                                                                                                                                                                                                    | `REQ-025`, `FEAT-011`                            |
+| **`RISK-EVAL-003`** | AI-drafted prescription regulatory exposure                                                                 | Legal/Regulatory                 | High   | Resolved (ADR-0015): drafting-assistant posture + drafting cap two AI drafts per care case; doctor approval gate live before issuance                                                                                                                                                                                                                                       | `REQ-005`, `REQ-023`, `FEAT-009`                 |
+| **`RISK-EVAL-004`** | Single-city dependency on Daltonganj partner supply & demand                                                | Commercial                       | Medium | Activation-cycle KPI (KPI-004); open supply-side elicitation; ISSUE-004 gates expansion                                                                                                                                                                                                                                                                                     | `REQ-002`, `REQ-008`                             |
+| **`RISK-EVAL-005`** | Data loss on longitudinal record under best-effort availability                                             | Data                             | High   | Daily backup floor (RPO ≤ 24 h), monthly restore validation (NFR-004)                                                                                                                                                                                                                                                                                                       | `REQ-021`, `NFR-004`                             |
+| **`RISK-EVAL-006`** | Hindi voice extraction quality vs. near-zero AI cost                                                        | Feasibility                      | Medium | Early spike to validate; low-confidence fallback to doctor review (AMB-006)                                                                                                                                                                                                                                                                                                 | `REQ-007`, `NFR-001`, `FEAT-007`                 |
+| **`RISK-EVAL-007`** | AI tracing vendor free tier has no healthcare compliance agreement, no healthcare data region and two users | Legal/Regulatory                 | Medium | ACCEPTED RISK (ADR-0031): PHI-free metadata behind a hard allow-list; evaluations run on a synthetic golden dataset, never on real clinical content; vendor metrics reach Postgres by daily batch. Reopens on a paid-tier decision, a vendor change, or any request to evaluate real content - a paid tier needs an amendment to the no-paid-observability constraint first | `NFR-001`, `NFR-SEC-006`, `ADR-0024`, `ADR-0031` |
 
 ---
 
@@ -882,8 +933,8 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 | `FEAT-005`              | `REQ-005`, `REQ-028`            | -                                           | Baseline Approved                              |
 | `FEAT-006`              | `REQ-006`, `REQ-007`            | -                                           | Baseline Approved                              |
 | `FEAT-007`              | `REQ-004`, `REQ-007`            | `AMB-006`, `RISK-EVAL-006`                  | Baseline Approved (open decision)              |
-| `FEAT-008`              | `REQ-002`, `REQ-004`, `REQ-013` | `CFL-003`, `GAP-003`                        | Baseline Approved (open decision)              |
-| `FEAT-009`              | `REQ-013`, `REQ-023`, `REQ-005` | `CFL-002`, `RISK-EVAL-003`                  | Baseline Approved (open decision)              |
+| `FEAT-008`              | `REQ-002`, `REQ-004`, `REQ-013` | `CFL-003`, `GAP-003`                        | Baseline Approved (resolved - ADR-0014)        |
+| `FEAT-009`              | `REQ-013`, `REQ-023`, `REQ-005` | `CFL-002`, `RISK-EVAL-003`                  | Baseline Approved (resolved - ADR-0015)        |
 | `FEAT-010`              | `REQ-012`, `REQ-024`, `REQ-033` | -                                           | Baseline Approved                              |
 | `FEAT-011`              | `REQ-025`, `REQ-033`            | `RISK-002`, `GAP-004`, `GAP-008`            | Baseline Approved (open decision)              |
 | `FEAT-012`              | `REQ-010`, `REQ-014`, `REQ-027` | -                                           | Baseline Approved                              |
@@ -904,3 +955,5 @@ _Traceability: `REQ-005`, `NFR-002`, `GAP-011`, `GAP-013`_
 | `NFR-002`               | `NFR-002`                       | `GAP-011`, `GAP-013`                        | Baseline Approved (Section 6)                  |
 | `NFR-003`               | `NFR-003`                       | -                                           | Baseline Approved (Section 6)                  |
 | `NFR-004`               | `NFR-004`                       | `GAP-012`                                   | Baseline Approved (Section 6)                  |
+
+> **Delivery annotation - doctor-console/profiles batch (#529, delivered 2026-09-24).** The batch created no new feature id; it extended five existing ones additively, each annotated with a `Delivery Notes (batch #529)` block in its section above: `FEAT-002` (the `health_background` record scope, independently grantable and revocable - `ADR-0018`), `FEAT-003` (access-history surface markers for the doctor console), `FEAT-005` (private patient and doctor profile surfaces on encrypted, non-public photo storage - `ADR-0020`), `FEAT-008` (the doctor Patients list as the care-loop anchor, plus the section-gated patient detail - `ADR-0019`), and `FEAT-020` (consent-lifecycle and egress completeness for the new scope and the new reads). The module and storage side of the same delivery is registered in `docs/architecture/internal-modules.md` §3.12/§3.13, §4.1, §4.2, and §5.

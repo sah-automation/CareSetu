@@ -16,32 +16,34 @@
 - **Frontend:** Vercel free, root dir `apps/frontend`, env `NEXT_PUBLIC_API_BASE_URL` + `NEXT_PUBLIC_DEMO_MODE`.
 - **Database:** Supabase free Postgres (direct connection, port 5432).
 - **OTP:** demo-mode - `DEMO_MODE=true`, OTP shown in the UI banner (mock SMS). Portfolio-only exception to never-expose-OTP.
-- **Async worker:** deferred (no business handlers exist yet). Render free has no background workers; run the dispatcher in-process (FastAPI lifespan) from Phase 4 onward.
+- **Async worker:** Render free has no background workers, so the dispatcher runs in-process inside the web service's FastAPI lifespan (`DISPATCHER_IN_PROCESS_ENABLED=true`) - required for the deployed intake pipeline to create pre-summary rows (Phase 7 #385 follow-up). Localhost dev/CI keep the standalone `python -m worker.main`; exactly one poll loop either way.
 
 ## Key free-tier caveats (accepted - no keep-alive)
 
 - Render web service spins down after 15 min idle; cold start ~1 min on first request.
 - **Supabase free project pauses after 7 days idle** - restore it from the Supabase dashboard before a demo.
 - Supabase free has **no automated backups** (diverges from roadmap `NFR-004`); manual `pg_dump` only.
-- No free background worker on Render -> worker deferred.
+- No free background worker on Render -> dispatcher runs in-process on the web service (`DISPATCHER_IN_PROCESS_ENABLED=true`).
 - Free SMS providers do not match the EXT-001 contract (`POST {base}/v1/send`, `{request_id,status}`); demo mode chosen instead of a provider adapter.
 
-## Required code changes (tracked in the plan)
+## Code changes (all delivered - DEPLOY-1..7, #112-#125)
 
-| Change                                        | File                                                          | Status  |
-| :-------------------------------------------- | :------------------------------------------------------------ | :------ |
-| `CORS_ALLOWED_ORIGINS` + `DEMO_MODE` settings | `apps/backend/app/config.py`                                  | planned |
-| Honour `DATABASE_URL` in migrations           | `apps/backend/alembic/env.py`                                 | planned |
-| CORS from settings + demo OTP gate            | `apps/backend/app/main.py`                                    | planned |
-| Idempotent demo identity seed                 | `apps/backend/scripts/seed_demo.py`                           | planned |
-| Demo OTP read-back client call                | `apps/frontend/src/lib/auth/api.ts`                           | planned |
-| Demo OTP banner                               | `apps/frontend/src/components/auth/otp/PatientAuthWizard.tsx` | planned |
-| Render blueprint                              | `render.yaml`                                                 | planned |
-| CD workflow                                   | `.github/workflows/deploy.yml`                                | planned |
+| Change                                        | File                                                          | Status            |
+| :-------------------------------------------- | :------------------------------------------------------------ | :---------------- |
+| `CORS_ALLOWED_ORIGINS` + `DEMO_MODE` settings | `apps/backend/app/config.py`                                  | done (DEPLOY-1)   |
+| Honour `DATABASE_URL` in migrations           | `apps/backend/alembic/env.py`                                 | done (DEPLOY-2)   |
+| CORS from settings + demo OTP gate            | `apps/backend/app/main.py`                                    | done (DEPLOY-1)   |
+| Idempotent demo identity seed                 | `apps/backend/scripts/seed_demo.py`                           | done (DEPLOY-3)   |
+| Demo OTP read-back client call                | `apps/frontend/src/lib/auth/api.ts`                           | done (DEPLOY-4)   |
+| Demo OTP banner                               | `apps/frontend/src/components/auth/otp/PatientAuthWizard.tsx` | done (DEPLOY-4)   |
+| Render blueprint                              | `render.yaml`                                                 | done (DEPLOY-5)   |
+| CD workflow                                   | `.github/workflows/deploy.yml`                                | done (DEPLOY-6/7) |
+
+> Deployed-auth behavior (cookies, guard, credentialed CORS) is governed by `docs/adr/0007-split-origin-deployment-session-invariants.md` - read it before touching session transport; localhost masks split-origin failures.
 
 ## Env var cheat sheet
 
-**Render** - `DATABASE_URL` (Supabase direct), `APP_ENVIRONMENT=production`, `GATEWAY_JWT_VERIFY_ENABLED=true`, `GATEWAY_JWT_SIGNING_KEY`, `GATEWAY_RATE_LIMIT_ENABLED=true`, `SMS_PROVIDER=mock`, `DEMO_MODE=true`, `CORS_ALLOWED_ORIGINS=https://<vercel>.vercel.app`.
+**Render** - `DATABASE_URL` (Supabase direct), `APP_ENVIRONMENT=production`, `GATEWAY_JWT_VERIFY_ENABLED=true`, `GATEWAY_JWT_SIGNING_KEY`, `GATEWAY_RATE_LIMIT_ENABLED=true`, `SMS_PROVIDER=mock`, `DEMO_MODE=true`, `CORS_ALLOWED_ORIGINS=https://<vercel>.vercel.app`, `INTAKE_MEDIA_BACKEND=supabase`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DISPATCHER_IN_PROCESS_ENABLED=true` (in-process dispatcher - Render free has no background workers).
 
 **Vercel** - `NEXT_PUBLIC_API_BASE_URL=https://<render>.onrender.com`, `NEXT_PUBLIC_DEMO_MODE=true`.
 

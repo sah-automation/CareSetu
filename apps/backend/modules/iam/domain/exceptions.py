@@ -47,6 +47,43 @@ class SessionIssuanceError(IamError):
     """
 
 
+class OperatorMfaError(SessionIssuanceError):
+    """``issue_operator_session`` refused on the MFA second factor (S9, #262).
+
+    Raised when the operator-scoped session cannot be minted because the
+    second factor is absent (MFA not yet verified, no enrolled TOTP secret) or
+    bad (the presented RFC-6238 code failed verification). This is an
+    authentication failure - distinct from the identity-state refusals a
+    ``SessionIssuanceError`` describes - so the edge answers it 401 rather
+    than 409. It subclasses ``SessionIssuanceError`` so existing caller code
+    that catches the wide type still works.
+    """
+
+
+class InvalidOperatorCodeError(SessionIssuanceError):
+    """The presented TOTP code failed verification (#295).
+
+    Raised when the operator submits a wrong RFC-6238 code. Distinct from
+    ``OperatorMfaError`` (MFA enrollment or secret missing) so the gateway
+    answers it with ``INVALID_OPERATOR_CODE`` rather than
+    ``SESSION_MFA_REQUIRED``. Subclasses ``SessionIssuanceError`` so
+    existing broad catches still work.
+    """
+
+
+class OperatorMfaLockedError(OperatorMfaError):
+    """Operator TOTP login is locked after too many wrong codes (#778).
+
+    The refusal carries the whole seconds left on the lock so the edge can
+    answer 429 with ``Retry-After``. It subclasses ``OperatorMfaError`` so
+    broad MFA catches still recognise it as an authentication refusal.
+    """
+
+    def __init__(self, message: str, *, remaining_seconds: int) -> None:
+        super().__init__(message)
+        self.remaining_seconds = remaining_seconds
+
+
 class InvalidAccessTokenError(IamError):
     """Base for an access token the gateway must reject (spec #51 §2.5).
 
@@ -100,3 +137,88 @@ class RefreshTokenRevokedError(InvalidRefreshTokenError):
 
 class RefreshTokenExpiredError(InvalidRefreshTokenError):
     """The ~30-day sliding refresh window has closed; the patient must re-auth."""
+
+
+class ProfilePhotoValidationError(IamError):
+    """A profile-photo upload failed the content-type or size contract (US-20, #533).
+
+    Raised by ``save_patient_photo`` when the photo is not a JPEG/PNG/WebP
+    (GIF and every other type are refused) or exceeds the 5MB ceiling. The
+    message is the human-safe validation reason the 422 envelope answers.
+    """
+
+
+class PatientProfileNotSetError(IamError):
+    """A photo mutation requires a saved profile row to carry the key (US-20, #533).
+
+    Raised by ``save_patient_photo`` / ``delete_patient_photo`` when the
+    caller has no ``iam_patient_profiles`` row yet: ``photo_ref`` lives on
+    that row, so there is nowhere to attach or clear the key until the profile
+    is set. The message is human-safe for the 409 envelope.
+    """
+
+
+class ProfilePhotoTransferError(IamError):
+    """The profile-media store write stayed failed after the retry ladder (#533).
+
+    Raised by ``save_patient_photo`` when every ``ProfileMediaStore.save``
+    attempt raised a transient :class:`OSError` (NFR-PERF-002 upload
+    resilience, mirroring the intake upload ladder). The message names the
+    failing patient only - never the ciphertext or object state - so a 502 is
+    safe for the envelope and logs.
+    """
+
+
+class OperatorSelfChangeError(IamError):
+    """An operator attempted to change their own tier or active state.
+
+    Raised when an admin tries to demote or deactivate themselves. The message
+    is human-safe for the 409 envelope.
+    """
+
+
+class OperatorLastAdminError(IamError):
+    """An operator change would leave no active admin.
+
+    Raised when demoting or deactivating the last active admin operator. The
+    message is human-safe for the 409 envelope.
+    """
+
+
+class OperatorProfileNotFoundError(IamError):
+    """The caller has no operator profile row, or it is inactive (self-service).
+
+    Raised by the operator self-service profile and photo routes for a missing
+    or deactivated operator authority profile. The route maps it to 404
+    ``OPERATOR_PROFILE_NOT_FOUND`` so a revoked account fails closed.
+    """
+
+    def __init__(self, identity_id: int | None = None) -> None:
+        if identity_id is None:
+            super().__init__("operator profile not found or inactive")
+        else:
+            super().__init__(f"operator profile {identity_id} not found or inactive")
+        self.identity_id = identity_id
+
+
+class OperatorProfilePhotoNotFoundError(IamError):
+    """The operator profile has no readable photo (or the object is gone)."""
+
+    def __init__(self, identity_id: int | None = None) -> None:
+        if identity_id is None:
+            super().__init__("operator has no profile photo")
+        else:
+            super().__init__(f"operator {identity_id} has no profile photo")
+        self.identity_id = identity_id
+
+
+class OperatorProfilePhotoValidationError(IamError):
+    """An operator profile photo upload failed the content-type or size contract."""
+
+
+class OperatorProfilePhotoTransferError(IamError):
+    """The operator profile media store write stayed failed after the retry ladder."""
+
+
+class OperatorProfilePhotoStoreUnavailableError(IamError):
+    """The operator profile media store is unavailable or returned bad data."""

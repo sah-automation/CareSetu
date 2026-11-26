@@ -1,0 +1,71 @@
+/* Single design-token source (#193). Blueprint §1.2 resolved brand:
+   deep-teal accent + saffron warm ramp on slate neutrals.
+   Tailwind config and component CSS consume these variables; brand hexes
+   live here only. warn (amber) = system warnings; warm (saffron) = brand-only,
+   never errors/warnings. Dark ramp can remap this block later without renames. */
+
+:root {
+  /* Accent - deep teal */
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --accent-soft: #f0fdfa;
+  --accent-border: #99f6e4;
+
+  /* Warm - saffron */
+  --warm: #c2410c;
+  --warm-mid: #ea580c;
+  --warm-soft: #fff7ed;
+
+  /* Semantic */
+  --success: #10b981;
+  --success-soft: #dcfce7;
+  --success-text: #166534;
+
+  --warn-soft: #fef3c7;
+  --warn-text: #92400e;
+
+  --danger: #b91c1c;
+  --danger-soft: #fef2f2;
+  --danger-border: #fecaca;
+
+  /* Neutrals */
+  --page-bg: #f8fafc;
+  --surface: #ffffff;
+  --hairline: #e2e8f0;
+  --hairline-soft: #eef2f7;
+  --on-accent: #ffffff;
+
+  --txt: #0f172a;
+  --txt-sub: #334155;
+  --txt-muted: #64748b;
+
+  /* Shape + elevation */
+  --radius-sm: 0.5rem;
+  --radius: 0.75rem;
+  --radius-lg: 1rem;
+  --shadow-card: 0 1px 3px rgba(2, 6, 23, 0.08);
+  --shadow-pop: 0 12px 32px rgba(2, 6, 23, 0.18);
+
+  /* Typography - Mukta loaded once in app/layout.tsx via next/font */
+  --font-stack: var(--font-mukta), "Noto Sans Devanagari", "Nirmala UI",
+    system-ui, sans-serif;
+
+  /* shadcn/ui slot bridge (#195). The Tailwind theme maps these onto the
+     shadcn semantic color names (primary/secondary/destructive/...) that the
+     copied primitives under src/components/ui consume; no palette lives in
+     the primitives themselves. Slots whose utilities use alpha modifiers
+     (hover:bg-primary/90, bg-primary/10, ...) are stored as H S% L%
+     channel triplets so Tailwind can inject alpha via hsl(var(--x)); each
+     triplet restates a resolved token above - update both lines together
+     when the palette moves. All other slots are direct aliases. Hexes are
+     deliberately not repeated in these comments; the #193 gate counts them. */
+  --ui-primary: 175.34 77.44% 26.08%; /* = --accent teal-700 */
+  --ui-primary-fg: 0 0% 100%; /* = --on-accent white */
+  --ui-secondary: 33.33 100% 96.47%; /* = --warm-soft orange-50 */
+  --ui-secondary-fg: 17.47 88.35% 40.39%; /* = --warm orange-700 */
+  --ui-destructive: 0 73.71% 41.76%; /* = --danger red-700 */
+  --ui-destructive-fg: 0 0% 100%; /* white on danger */
+
+  /* Scrim wash behind sheet/dialog overlays (same ink as --shadow-pop). */
+  --scrim: rgb(2 6 23 / 0.8);
+}

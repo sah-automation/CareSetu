@@ -1,0 +1,888 @@
+"""MOD-001: Session sub-facade (ADR-0006, ticket #166).
+
+Owns session JWT issuance, access-token validation, and refresh-token
+rotation.  The coordinator ``IamFacade`` delegates to this class; routes
+and tests see the same public surface as before (ADR-0006 decision 2).
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.engine import RowMapping
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from app.db import AsyncEngineLike
+from modules.iam.adapters.sms import mask_phone
+from modules.iam.domain import events, jwt, refresh
+from modules.iam.domain.exceptions import (
+    InvalidOperatorCodeError,
+    OperatorMfaError,
+    OperatorMfaLockedError,
+    RefreshTokenExpiredError,
+    RefreshTokenRevokedError,
+    RefreshTokenUnknownError,
+    SessionIssuanceError,
+)
+from modules.iam.domain.lockout import lockout_remaining_seconds
+from modules.iam.domain.mfa_lockout import (
+    DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
+    DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+    evaluate_mfa_failure,
+)
+from modules.iam.domain.shared import _identity_phone
+from modules.iam.domain.verify import IDENTITY_ACTIVE, IDENTITY_SUSPENDED
+from modules.iam.outbox import IAM_OUTBOX_TABLE
+from modules.iam.schema.models import (
+    iam_identities,
+    iam_operator_mfa,
+    iam_operator_profiles,
+    iam_role_grants,
+    iam_sessions,
+)
+
+if TYPE_CHECKING:
+    from modules.iam.domain.shared import IdentityGuardState
+
+_IAM_SCHEMA = "iam"
+_PATIENT_ROLE = "patient"
+_PARTNER_ROLE = "partner"
+_OPERATOR_ROLE = "operator"
+
+
+VerifyPartnerExists = Callable[[AsyncConnection, int], Awaitable[None]]
+
+VerifyPartnerProfile = Callable[[AsyncConnection, int], Awaitable[None]]
+
+
+class _OperatorTotpFailure(Exception):
+    """Internal signal: the code was wrong, so persist the failure after rollback."""
+
+
+class SessionResult(BaseModel):
+    """A session, whether freshly issued or rotated (spec #51 section 2.5, tickets #57, #58).
+
+    One model for both paths: ``issue_session`` mints the first session for a
+    verified patient, and ``refresh_session`` rotates an opaque refresh token
+    into the same shape.  ``jwt`` is the HS256 access JWT the PWA stores;
+    ``jti``/``expires_in_seconds`` mirror its claims so the client can show a
+    session indicator, and ``scope`` is the resolved RBAC scope - always from
+    the patient role grant, never from client input.  ``refresh_token`` is the
+    opaque, server-side-hashed refresh token the PWA keeps for the next
+    ``refresh_session``; on a rotation the previous refresh token is already
+    invalid by the time the result is returned.
+    """
+
+    jwt: str
+    jti: str
+    scope: str
+    identity_id: int
+    expires_in_seconds: int
+    refresh_token: str
+
+
+class ValidatedAccessToken(BaseModel):
+    """Claims of a verified access JWT, as the gateway attaches them (ticket #57, T8).
+
+    ``subject_id`` is the identity id the gateway scopes to the patient's own
+    record; ``scope`` is the RBAC scope resolved from the token claim.
+    ``tier`` is the optional operator authority tier (spec #761) - absent on
+    patient and partner tokens, and never inferred when missing.
+    """
+
+    subject_id: int
+    scope: str
+    jti: str
+    tier: str | None = None
+
+
+def _default_clock() -> datetime:
+    return datetime.now(UTC)
+
+
+class SessionFacade:
+    """Sub-facade for session JWT issuance, validation, and refresh (ADR-0006)."""
+
+    def __init__(
+        self,
+        engine: AsyncEngineLike,
+        clock: Callable[[], datetime] = _default_clock,
+        *,
+        access_token_signing_key: str = "",
+        access_token_ttl_seconds: int = jwt.ACCESS_TOKEN_TTL_SECONDS,
+        refresh_token_ttl_seconds: int = refresh.REFRESH_TOKEN_TTL_SECONDS,
+        mfa_secret_key: str = "",
+        operator_mfa_lockout_threshold: int = DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
+        operator_mfa_lockout_seconds: int = DEFAULT_OPERATOR_MFA_LOCKOUT_SECONDS,
+    ) -> None:
+        self._engine = engine
+        self._clock = clock
+        self._access_token_signing_key = access_token_signing_key
+        self._access_token_ttl_seconds = access_token_ttl_seconds
+        self._refresh_token_ttl_seconds = refresh_token_ttl_seconds
+        self._mfa_secret_key = mfa_secret_key
+        self._operator_mfa_lockout_threshold = operator_mfa_lockout_threshold
+        self._operator_mfa_lockout_seconds = operator_mfa_lockout_seconds
+
+    async def issue_session(self, phone: str) -> SessionResult:
+        """Mint an access JWT for a verified patient (spec #51 section 2.5, ticket #57).
+
+        The scope claim is always derived from the patient's active role grant,
+        never from the client (acceptance criterion #3): the identity must be
+        ``Active`` (OTP-verified) and hold an ``Active`` patient grant, else a
+        ``SessionIssuanceError`` names the missing precondition.  A fresh ``jti``
+        is generated per token, ``exp`` is ~15 minutes out so a stolen token has
+        limited value, and the session row is recorded in the ``iam``
+        ``sessions`` table in the same transaction - the jti is the anchor the
+        refresh rotation (T7) and revocation check against, and the row also
+        carries the SHA-256 of a fresh opaque refresh token (never the token
+        itself) with its ~30-day sliding ``refresh_expires_at``.  An empty signing
+        key fails closed rather than minting a token anyone could forge.
+        """
+        from modules.iam.domain.phone import normalize_phone
+
+        phone_e164 = normalize_phone(phone)
+        if not self._access_token_signing_key:
+            raise SessionIssuanceError(
+                "access-token signing key is not configured; refusing to issue a session"
+            )
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            locked = await _lock_identity_by_phone(connection, phone_e164)
+            if locked is None:
+                raise SessionIssuanceError(
+                    f"no identity for {mask_phone(phone_e164)}; "
+                    "register the phone before issuing a session"
+                )
+            identity_id = locked.identity_id
+            identity_status = locked.status
+            if identity_status != IDENTITY_ACTIVE:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} is {identity_status}, not Active; "
+                    "verify the OTP before issuing a session"
+                )
+            scope = await _resolve_active_role(connection, identity_id, _PATIENT_ROLE)
+            if scope is None:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} has no active patient role grant"
+                )
+
+            jti, refresh_token, token = await self._mint_session_row(
+                connection, identity_id, scope, now
+            )
+
+        return SessionResult(
+            jwt=token,
+            jti=jti,
+            scope=scope,
+            identity_id=identity_id,
+            expires_in_seconds=self._access_token_ttl_seconds,
+            refresh_token=refresh_token,
+        )
+
+    async def issue_operator_session(self, phone: str, code: str) -> SessionResult:
+        """Mint an operator-scoped access JWT (T07, ticket #250; S8, #261).
+
+        Operators are a trusted closed group that never self-registers; a
+        session is minted only after the MFA second factor has been completed
+        at login. Mirror of ``issue_session`` for the ``operator`` role with an
+        extra gate: the identity must be ``Active``, hold an ``Active``
+        ``operator`` role grant, AND have an enrolled, verified MFA factor
+        (``iam_operator_mfa.mfa_enabled`` with a recorded ``last_verified_at``).
+        If MFA is not enrolled or not yet verified, an ``OperatorMfaError``
+        names the missing precondition - an operator can never land an
+        operator-scoped session on the phone-OTP factor alone. The minted
+        ``scope`` resolves to ``operator`` so the gateway's ``require_operator``
+        admits the caller. The operator's active profile tier (``admin`` /
+        ``operator``, spec #761) rides the access token as the optional ``tier``
+        claim; a missing profile fails closed rather than minting a tier-free
+        operator token.
+
+        The ``code`` parameter is an RFC-6238 TOTP code derived from the
+        operator's enrolled MFA secret.  It is verified against the decrypted
+        ``iam_operator_mfa.secret`` at the current clock time with a small drift
+        window (S8, #261).  A wrong or expired code is rejected with
+        ``OperatorMfaError`` (a ``SessionIssuanceError`` subclass the edge
+        answers 401, ticket #262).
+        """
+        from modules.iam.domain.phone import normalize_phone
+        from modules.iam.domain.secret_encryption import decrypt_secret
+        from modules.iam.domain.totp import (
+            TotpSecretEmptyError,
+            TotpVerificationError,
+            verify_totp,
+        )
+
+        phone_e164 = normalize_phone(phone)
+        if not self._access_token_signing_key:
+            raise SessionIssuanceError(
+                "access-token signing key is not configured; refusing to issue a session"
+            )
+        now = self._clock()
+
+        try:
+            async with self._engine.begin() as connection:
+                locked = await _lock_identity_by_phone(connection, phone_e164)
+                if locked is None:
+                    raise SessionIssuanceError(
+                        f"no identity for {mask_phone(phone_e164)}; "
+                        "invite the operator before issuing a session"
+                    )
+                identity_id = locked.identity_id
+                identity_status = locked.status
+                if identity_status != IDENTITY_ACTIVE:
+                    raise SessionIssuanceError(
+                        f"identity {identity_id} is {identity_status}, not Active; "
+                        "verify the phone before issuing a session"
+                    )
+                if not await _mfa_verified(connection, identity_id):
+                    raise OperatorMfaError(
+                        f"identity {identity_id} has not completed the MFA second factor; "
+                        "enroll and verify MFA before issuing an operator session"
+                    )
+
+                if not self._mfa_secret_key:
+                    raise SessionIssuanceError(
+                        f"identity {identity_id} cannot complete MFA: encryption key "
+                        "is not configured (set IAM_MFA_SECRET_KEY)"
+                    )
+
+                profile = await _lock_operator_profile(connection, identity_id)
+                if profile is not None:
+                    remaining = lockout_remaining_seconds(profile["mfa_locked_until"], now)
+                    if remaining is not None:
+                        raise OperatorMfaLockedError(
+                            f"identity {identity_id} is locked after repeated TOTP "
+                            f"failures; try again in {remaining} seconds",
+                            remaining_seconds=remaining,
+                        )
+
+                secret_ciphertext = (
+                    await connection.execute(
+                        select(iam_operator_mfa.c.secret).where(
+                            iam_operator_mfa.c.identity_id == identity_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                if not secret_ciphertext:
+                    raise OperatorMfaError(
+                        f"identity {identity_id} has no enrolled TOTP secret; "
+                        "complete MFA enrollment before issuing an operator session"
+                    )
+                try:
+                    decrypted_secret = decrypt_secret(secret_ciphertext, self._mfa_secret_key)
+                    verify_totp(decrypted_secret, code, clock=self._clock)
+                except (TotpSecretEmptyError, TotpVerificationError, ValueError) as exc:
+                    raise _OperatorTotpFailure(str(exc)) from exc
+
+                scope = await _resolve_active_role(connection, identity_id, _OPERATOR_ROLE)
+                if scope is None:
+                    raise SessionIssuanceError(
+                        f"identity {identity_id} has no active operator role grant"
+                    )
+                tier = await _resolve_operator_tier(connection, identity_id)
+                if tier is None:
+                    raise SessionIssuanceError(
+                        f"identity {identity_id} has no active operator profile; "
+                        "refusing to issue an operator session without a tier"
+                    )
+
+                if profile is not None:
+                    await connection.execute(
+                        iam_operator_profiles.update()
+                        .where(iam_operator_profiles.c.identity_id == identity_id)
+                        .values(mfa_failed_attempts=0, mfa_locked_until=None)
+                    )
+
+                jti, refresh_token, token = await self._mint_session_row(
+                    connection, identity_id, scope, now, tier=tier
+                )
+
+            return SessionResult(
+                jwt=token,
+                jti=jti,
+                scope=scope,
+                identity_id=identity_id,
+                expires_in_seconds=self._access_token_ttl_seconds,
+                refresh_token=refresh_token,
+            )
+        except _OperatorTotpFailure as failure:
+            await self._record_operator_mfa_failure(identity_id, now)
+            raise InvalidOperatorCodeError(
+                f"TOTP verification failed for identity {identity_id}: {failure}"
+            ) from failure.__cause__
+
+    async def _record_operator_mfa_failure(self, identity_id: int, now: datetime) -> None:
+        """Persist one wrong operator TOTP code in its own transaction.
+
+        The failed login transaction rolls back before this runs - it issued no
+        session, so the counter and lockout must commit separately. The profile
+        row is locked ``FOR UPDATE`` so concurrent wrong codes cannot lose an
+        increment, and the ``operator.mfa_failed`` event commits with it.
+        """
+        async with self._engine.begin() as connection:
+            profile = await _lock_operator_profile(connection, identity_id)
+            if profile is None:
+                return
+            decision = evaluate_mfa_failure(
+                consecutive_failures=int(profile["mfa_failed_attempts"]),
+                now=now,
+                lockout_until=profile["mfa_locked_until"],
+                threshold=self._operator_mfa_lockout_threshold,
+                lockout_seconds=self._operator_mfa_lockout_seconds,
+            )
+            await connection.execute(
+                iam_operator_profiles.update()
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(
+                    mfa_failed_attempts=decision.counter,
+                    mfa_locked_until=decision.lockout_until,
+                )
+            )
+            await bus_outbox_write(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.operator_mfa_failed_envelope(
+                    identity_id=identity_id,
+                    reason="lockout" if decision.locked else "failure",
+                    lockout_until=decision.lockout_until,
+                ),
+            )
+
+    async def resolve_identity_id_by_phone(self, phone: str) -> int:
+        """The identity id for a phone, without minting a session (WI-3, #336).
+
+        Read-only companion for the partner session route: the calling route
+        resolves the identity for the phone so it can ask the partner facade
+        whether a partner profile exists (the verification happens at the
+        composition boundary, not inside the iam module). The mint
+        (:meth:`issue_partner_session`) independently re-asserts identity
+        existence under row lock, so this is an advisory pre-read. An unknown
+        phone is refused with the same 409 ``SESSION_REFUSED`` contract as
+        ``issue_partner_session``.
+        """
+        from modules.iam.domain.phone import normalize_phone
+
+        phone_e164 = normalize_phone(phone)
+        async with self._engine.connect() as connection:
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id)
+                    .where(iam_identities.c.phone_e164 == phone_e164)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if identity_id is None:
+            raise SessionIssuanceError(
+                f"no identity for {mask_phone(phone_e164)}; "
+                "register the phone before issuing a session"
+            )
+        return int(identity_id)
+
+    async def issue_partner_session(
+        self,
+        phone: str,
+        partner_id: int,
+        verify_partner_exists: VerifyPartnerExists | None = None,
+    ) -> SessionResult:
+        """Mint a partner-scoped access JWT for a registered partner (T05, #298).
+
+        Unlike ``issue_session`` this does NOT require identity ``Active`` or an
+        active patient role grant - a fresh registrant is ``[Unverified]`` with
+        no role grant (ADR-0010). The gate is partner-profile existence plus a
+        phone-verified identity (F014-T04, #464): the phone must have completed
+        a phone-code verification (ticket 03 sets the ``phone_verified`` marker,
+        also set by the patient verification path) so knowing a partner's number
+        is never enough to become them. The profile-existence gate is verified
+        UPSTREAM by the calling route (WI-3, #336): the route resolves the
+        identity through :meth:`resolve_identity_id_by_phone`, asks the partner
+        facade for the profile, and passes the already-verified ``partner_id``
+        into this method. iam no longer reaches into the partner module - a
+        patient-only phone (identity exists but no partner profile) is refused
+        409 ``SESSION_REFUSED`` by the route before this method runs. The
+        phone-verified gate is enforced HERE, read atomically from the locked
+        identity row as described below.
+
+        The upstream check is an early-rejection fast path only. Because the
+        profile could be deleted between that check and this mint, the caller may
+        pass an optional ``verify_partner_exists`` callback that re-confirms the
+        profile still exists (or raises ``SessionIssuanceError``) against this
+        method's open connection, atomically under the identity row lock, before
+        the JWT is minted (#342). The phone-verified gate is enforced in the
+        same locked transaction: the marker is read from the locked identity row
+        and an unverified phone is refused 409 ``SESSION_REFUSED``, so the marker
+        can never change between the route pre-check and the mint. Leaving the
+        callback ``None`` keeps the pre-WI-3-F4 behavior of trusting the
+        upstream partner_id, though the phone-verified gate always applies.
+        """
+        from modules.iam.domain.phone import normalize_phone
+
+        phone_e164 = normalize_phone(phone)
+        if not self._access_token_signing_key:
+            raise SessionIssuanceError(
+                "access-token signing key is not configured; refusing to issue a session"
+            )
+        if partner_id < 1:
+            raise SessionIssuanceError(
+                "partner status was not verified before issuing a partner session"
+            )
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            locked = await _lock_identity_by_phone(connection, phone_e164)
+            if locked is None:
+                raise SessionIssuanceError(
+                    f"no identity for {mask_phone(phone_e164)}; "
+                    "register the phone before issuing a session"
+                )
+            identity_id = locked.identity_id
+
+            if not locked.phone_verified:
+                raise SessionIssuanceError(
+                    f"identity {identity_id} is not phone-verified; "
+                    "verify the phone before issuing a partner session"
+                )
+
+            if verify_partner_exists is not None:
+                await verify_partner_exists(connection, partner_id)
+
+            jti, refresh_token, token = await self._mint_session_row(
+                connection, identity_id, _PARTNER_ROLE, now
+            )
+
+        return SessionResult(
+            jwt=token,
+            jti=jti,
+            scope=_PARTNER_ROLE,
+            identity_id=identity_id,
+            expires_in_seconds=self._access_token_ttl_seconds,
+            refresh_token=refresh_token,
+        )
+
+    async def validate_token(self, token: str) -> ValidatedAccessToken:
+        """Resolve a valid access JWT to its scope for the gateway (ticket #57).
+
+        A pure signature + expiry check with no database round-trip (acceptance
+        criterion #4), so the edge hot path stays far under the 100 ms p95
+        (MOD-001 section 3.1): the signing key and the clock are all it needs.  Every
+        rejection raises the matching ``InvalidAccessTokenError`` subclass -
+        expired, malformed, or wrong signature - for the gateway to deny with a
+        single 401.
+        """
+        claims = jwt.verify_token(token, self._access_token_signing_key, now=self._clock())
+        return ValidatedAccessToken(
+            subject_id=claims.subject_id, scope=claims.scope, jti=claims.jti, tier=claims.tier
+        )
+
+    async def refresh_session(
+        self,
+        refresh_token: str,
+        verify_partner_profile: VerifyPartnerProfile | None = None,
+    ) -> SessionResult:
+        """Rotate an opaque refresh token into a fresh session (ticket #58).
+
+        The refresh path is fully independent of SMS (NFR-004): it only reads
+        the ``sessions`` table and mints tokens, so an EXT-001 outage never
+        bricks an existing session.  The token is looked up by its SHA-256
+        (opaque, never stored or logged in clear); an unknown token, a revoked
+        one, and an expired one are each refused with their own
+        ``InvalidRefreshTokenError`` subclass (acceptance criterion #3).
+
+        The seam is backend-only: an internal rotation path with no HTTP route,
+        no frontend consumer, and no lifecycle outbox event.  Clients reach a
+        session only through ``issue_session`` and call ``refresh_session``
+        when the access JWT expires; its only outbox write is the
+        ``patient.auth_failed`` replay audit on a refused rotation.
+
+        A valid token rotates in the same transaction as the mint: the old
+        session row is revoked (``revoked_at``) and a fresh row records the new
+        access ``jti`` with a brand-new refresh token whose lifetime slides to
+        ~30 days from ``now``.  Presenting the already-rotated token afterwards
+        finds the revoked row - a replay signal - and is refused while
+        ``patient.auth_failed`` is committed to the outbox in the same
+        transaction (audit can tell a stolen-session replay from a garbage
+        token, which matches nothing).  The scope of the fresh JWT never comes
+        from the old token: a patient/operator scope is re-derived from the
+        identity's current active role grant, a partner scope from the
+        identity's current state (below).  The identity row is locked
+        ``FOR UPDATE`` (after the session
+        row) so a concurrent role change cannot race the refresh, and the
+        session-row lock serializes two concurrent refreshes of the same token
+        so only one rotation wins.  An operator refresh re-derives the tier from
+        the operator profile (spec #761), so a tier change lands within the
+        access-token lifetime; a missing tier fails closed.  An empty signing
+        key fails closed exactly like ``issue_session``.
+
+        Partner-scoped sessions renew differently (F014-T05, #465): a waiting
+        partner holds no ``partner`` role grant until activation (ADR-0010), so
+        requiring an active grant to re-derive the scope ejects them every ~15
+        minutes.  For the ``partner`` scope ``Suspended`` is the only refusal,
+        read as the iam-side suspension signal (#466): the identity being
+        ``Suspended`` OR its ``partner`` role grant being ``Suspended`` (a
+        deactivated partner's grant is flipped by ``suspend_partner_role``).  A
+        missing or ``Active`` grant renews, so every pre-activation state
+        renews, and the partner profile must still exist, re-confirmed at the
+        composition boundary on this lock-held connection through the optional
+        ``verify_partner_profile`` callback (the same pattern the session mint
+        uses, #342) so iam never reads the partner schema.  Patient/operator
+        scopes keep the existing identity-``Active`` plus active-role-grant gate
+        unchanged.
+        """
+        if not self._access_token_signing_key:
+            raise SessionIssuanceError(
+                "access-token signing key is not configured; refusing to refresh a session"
+            )
+        now = self._clock()
+        token_hash = refresh.hash_refresh_token(refresh_token)
+        replay_signal = False
+
+        async with self._engine.begin() as connection:
+            session_row = await _session_for_refresh(connection, token_hash)
+            if session_row is None:
+                raise RefreshTokenUnknownError("no session matches this refresh token")
+
+            decision = refresh.evaluate_refresh(
+                revoked_at=session_row["revoked_at"],
+                refresh_expires_at=session_row["refresh_expires_at"],
+                now=now,
+            )
+
+            if decision.reason == "revoked":
+                phone = await _identity_phone(connection, session_row["identity_id"])
+                await bus_outbox_write(
+                    connection,
+                    _IAM_SCHEMA,
+                    IAM_OUTBOX_TABLE,
+                    events.patient_auth_failed_envelope(
+                        identity_id=session_row["identity_id"],
+                        phone_e164=phone,
+                        reason="replay",
+                    ),
+                )
+                replay_signal = True
+            elif decision.reason == "expired":
+                raise RefreshTokenExpiredError(
+                    "this refresh token has expired; re-authenticate to continue"
+                )
+            else:
+                identity = await _lock_identity_by_id(connection, session_row["identity_id"])
+                if identity is None:
+                    raise RefreshTokenRevokedError("the session identity no longer exists")
+                identity_id = identity.identity_id
+                identity_status = identity.status
+                scope_name = session_row["scope"]
+                tier: str | None = None
+                if scope_name == _PARTNER_ROLE:
+                    if identity_status == IDENTITY_SUSPENDED:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} is {identity_status}; refusing to refresh"
+                        )
+                    partner_grant_status = await _partner_role_status(connection, identity_id)
+                    if partner_grant_status == IDENTITY_SUSPENDED:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} has a suspended partner role; "
+                            "refusing to refresh"
+                        )
+                    if verify_partner_profile is not None:
+                        await verify_partner_profile(connection, identity_id)
+                    scope = scope_name
+                else:
+                    if identity_status != IDENTITY_ACTIVE:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} is {identity_status}; refusing to refresh"
+                        )
+                    scope = await _resolve_active_role(connection, identity_id, scope_name)
+                    if scope is None:
+                        raise RefreshTokenRevokedError(
+                            f"identity {identity_id} has no active {scope_name} role grant; "
+                            "refusing to refresh"
+                        )
+                    if scope == _OPERATOR_ROLE:
+                        tier = await _resolve_operator_tier(connection, identity_id)
+                        if tier is None:
+                            raise RefreshTokenRevokedError(
+                                f"identity {identity_id} has no active operator profile; "
+                                "refusing to refresh"
+                            )
+
+                new_jti, new_refresh_token, token = await self._mint_session_row(
+                    connection, identity_id, scope, now, tier=tier
+                )
+                await connection.execute(
+                    iam_sessions.update()
+                    .where(iam_sessions.c.id == session_row["id"])
+                    .values(revoked_at=now)
+                )
+
+        if replay_signal:
+            raise RefreshTokenRevokedError(
+                "this refresh token was already used or revoked; refusing to refresh"
+            )
+
+        return SessionResult(
+            jwt=token,
+            jti=new_jti,
+            scope=scope,
+            identity_id=identity_id,
+            expires_in_seconds=self._access_token_ttl_seconds,
+            refresh_token=new_refresh_token,
+        )
+
+    async def _mint_session_row(
+        self,
+        connection: AsyncConnection,
+        identity_id: int,
+        scope: str,
+        now: datetime,
+        *,
+        tier: str | None = None,
+    ) -> tuple[str, str, str]:
+        """Mint a fresh access JWT + opaque refresh token and record the session row.
+
+        Shared by ``issue_session`` and ``refresh_session`` so both mint the
+        same row shape: a random ``jti``, a fresh opaque refresh token (stored
+        hashed, never in clear) with its ~30-day sliding ``refresh_expires_at``,
+        and an access JWT whose ``exp`` is the access-token TTL out. ``tier``
+        rides the access JWT only for operators (spec #761). Returns
+        ``(jti, refresh_token, jwt)``.
+        """
+        jti = uuid.uuid4().hex
+        refresh_token = refresh.generate_refresh_token()
+        token = jwt.issue_token(
+            jti=jti,
+            subject_id=identity_id,
+            scope=scope,
+            signing_key=self._access_token_signing_key,
+            now=now,
+            ttl_seconds=self._access_token_ttl_seconds,
+            tier=tier,
+        )
+        await connection.execute(
+            iam_sessions.insert().values(
+                jti=jti,
+                identity_id=identity_id,
+                scope=scope,
+                issued_at=now,
+                expires_at=now + timedelta(seconds=self._access_token_ttl_seconds),
+                refresh_token_hash=refresh.hash_refresh_token(refresh_token),
+                refresh_expires_at=now + timedelta(seconds=self._refresh_token_ttl_seconds),
+            )
+        )
+        return jti, refresh_token, token
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers (thin wrappers, no ``self``)
+# ---------------------------------------------------------------------------
+
+from bus.outbox_writer import write_outbox as bus_outbox_write  # noqa: E402
+
+
+async def _lock_identity_by_phone(
+    connection: AsyncConnection, phone_e164: str
+) -> IdentityGuardState | None:
+    """Row-lock the identity for ``phone_e164`` and return its guard state."""
+    from modules.iam.domain.shared import _lock_identity_row
+
+    return await _lock_identity_row(connection, iam_identities.c.phone_e164 == phone_e164)
+
+
+async def _lock_identity_by_id(
+    connection: AsyncConnection, identity_id: int
+) -> IdentityGuardState | None:
+    """Row-lock an identity by id and return its guard state (ticket #58)."""
+    from modules.iam.domain.shared import _lock_identity_row
+
+    return await _lock_identity_row(connection, iam_identities.c.id == identity_id)
+
+
+async def _lock_operator_profile(
+    connection: AsyncConnection, identity_id: int
+) -> RowMapping | None:
+    """Row-lock an operator profile and return its failure/lock state."""
+    return (
+        (
+            await connection.execute(
+                select(
+                    iam_operator_profiles.c.mfa_failed_attempts,
+                    iam_operator_profiles.c.mfa_locked_until,
+                )
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .with_for_update()
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+
+async def _session_for_refresh(connection: AsyncConnection, token_hash: str) -> RowMapping | None:
+    """The session row for a refresh-token hash, locked to serialize rotation."""
+    return (
+        (
+            await connection.execute(
+                select(
+                    iam_sessions.c.id,
+                    iam_sessions.c.identity_id,
+                    iam_sessions.c.scope,
+                    iam_sessions.c.revoked_at,
+                    iam_sessions.c.refresh_expires_at,
+                )
+                .where(iam_sessions.c.refresh_token_hash == token_hash)
+                .with_for_update()
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+
+async def _resolve_active_role(
+    connection: AsyncConnection, identity_id: int, role: str
+) -> str | None:
+    """The role name if ``identity_id`` holds an Active grant for ``role``."""
+    return (
+        await connection.execute(
+            select(iam_role_grants.c.role)
+            .where(
+                iam_role_grants.c.identity_id == identity_id,
+                iam_role_grants.c.role == role,
+                iam_role_grants.c.status == IDENTITY_ACTIVE,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _resolve_operator_tier(connection: AsyncConnection, identity_id: int) -> str | None:
+    """The active operator tier for ``identity_id`` (``admin`` / ``operator``).
+
+    A missing or inactive profile returns ``None`` so callers fail closed: an
+    operator session is never minted without a tier (spec #761).
+    """
+    return (
+        await connection.execute(
+            select(iam_operator_profiles.c.tier)
+            .where(
+                iam_operator_profiles.c.identity_id == identity_id,
+                iam_operator_profiles.c.is_active.is_(True),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _mfa_verified(connection: AsyncConnection, identity_id: int) -> bool:
+    """Whether ``identity_id`` has completed the MFA second factor (T07, #250).
+
+    The operator MFA gate reads the ``iam_operator_mfa`` row (seeded by T01,
+    #244): the factor must be enrolled (``mfa_enabled``) and a successful
+    verification must have been recorded (``last_verified_at`` set). Both are
+    required - an enrolled-but-never-verified factor, or a row with no
+    enrollment at all, refuses the operator session (fail-closed). The phone
+    OTP factor alone never admits an operator-scoped session.
+    """
+    row = (
+        (
+            await connection.execute(
+                select(
+                    iam_operator_mfa.c.mfa_enabled,
+                    iam_operator_mfa.c.last_verified_at,
+                )
+                .where(iam_operator_mfa.c.identity_id == identity_id)
+                .limit(1)
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return False
+    return bool(row["mfa_enabled"]) and row["last_verified_at"] is not None
+
+
+async def _grant_or_reactivate_role(
+    connection: AsyncConnection, identity_id: int, role: str
+) -> None:
+    """Grant (or restore) a role on ``identity_id`` (T03 #248, T07 #250).
+
+    Idempotent: an existing ``Active`` grant is left untouched, a missing one is
+    inserted, and a ``Suspended`` one is flipped back to ``Active``.  Runs on
+    the consumer's delivery connection inside the same transaction as the
+    ``consumed_events`` ledger row (ADR-0002 §3).
+    """
+    await connection.execute(
+        iam_role_grants.update()
+        .where(
+            iam_role_grants.c.identity_id == identity_id,
+            iam_role_grants.c.role == role,
+            iam_role_grants.c.status == IDENTITY_SUSPENDED,
+        )
+        .values(status=IDENTITY_ACTIVE)
+    )
+    existing = (
+        await connection.execute(
+            select(iam_role_grants.c.id).where(
+                iam_role_grants.c.identity_id == identity_id,
+                iam_role_grants.c.role == role,
+                iam_role_grants.c.status == IDENTITY_ACTIVE,
+            )
+        )
+    ).first()
+    if existing is None:
+        await connection.execute(
+            iam_role_grants.insert().values(
+                identity_id=identity_id, role=role, status=IDENTITY_ACTIVE
+            )
+        )
+
+
+async def grant_partner_role(connection: AsyncConnection, identity_id: int) -> None:
+    """Grant (or restore) the ``partner`` role on ``identity_id`` (T03, #248)."""
+    await _grant_or_reactivate_role(connection, identity_id, _PARTNER_ROLE)
+
+
+async def suspend_partner_role(connection: AsyncConnection, identity_id: int) -> None:
+    """Suspend the ``partner`` role on ``identity_id`` (T03, #248).
+
+    Flips an ``Active`` partner grant to ``Suspended``; a missing grant (never
+    activated) or one already suspended is left alone, so the deny is idempotent
+    even when no grant row exists. Runs on the consumer's delivery connection in
+    the same transaction as the ``consumed_events`` ledger row.
+    """
+
+    await connection.execute(
+        iam_role_grants.update()
+        .where(
+            iam_role_grants.c.identity_id == identity_id,
+            iam_role_grants.c.role == _PARTNER_ROLE,
+            iam_role_grants.c.status == IDENTITY_ACTIVE,
+        )
+        .values(status=IDENTITY_SUSPENDED)
+    )
+
+
+async def grant_operator_role(connection: AsyncConnection, identity_id: int) -> None:
+    """Grant (or restore) the ``operator`` role on ``identity_id`` (T07, #250)."""
+    await _grant_or_reactivate_role(connection, identity_id, _OPERATOR_ROLE)
+
+
+async def _partner_role_status(connection: AsyncConnection, identity_id: int) -> str | None:
+    """The ``partner`` role grant status for ``identity_id`` (None if none)."""
+    return (
+        await connection.execute(
+            select(iam_role_grants.c.status)
+            .where(
+                iam_role_grants.c.identity_id == identity_id,
+                iam_role_grants.c.role == _PARTNER_ROLE,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()

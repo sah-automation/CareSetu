@@ -1,0 +1,1457 @@
+"""MOD-001: Identity sub-facade (ADR-0006, ticket #169).
+
+Extracts the identity registration lifecycle from the coordinator
+``IamFacade``: ``register_patient`` and its result model
+``RegisterPatientResult``.  The sub-facade accepts an ``OtpSender`` port
+(from ``domain/shared.py``) instead of adapter types, and imports
+lockout/challenge helpers from ``domain/shared.py``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Final, Literal
+
+from cryptography.exceptions import InvalidTag
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from app.cache import get_cached, invalidate, set_cached
+from app.config import DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES, get_settings
+from app.db import AsyncEngineLike
+from app.redis import get_redis_client
+from bus.outbox_writer import write_outbox
+from modules.iam.adapters.sms import mask_phone
+from modules.iam.domain import events
+from modules.iam.domain.exceptions import (
+    IamError,
+    OperatorLastAdminError,
+    OperatorProfileNotFoundError,
+    OperatorProfilePhotoNotFoundError,
+    OperatorProfilePhotoStoreUnavailableError,
+    OperatorProfilePhotoTransferError,
+    OperatorProfilePhotoValidationError,
+    OperatorSelfChangeError,
+    PatientProfileNotSetError,
+    ProfilePhotoTransferError,
+    ProfilePhotoValidationError,
+)
+from modules.iam.domain.otp import (
+    MAX_ATTEMPTS,
+    OTP_TTL_SECONDS,
+    RESEND_COOLDOWN_SECONDS,
+)
+from modules.iam.domain.phone import normalize_phone
+from modules.iam.domain.shared import (
+    OtpSender as OtpSender,
+)
+from modules.iam.domain.shared import (
+    _issue_challenge,
+    _lock_identity_row,
+    _reissue_otp_challenge,
+)
+from modules.iam.outbox import IAM_OUTBOX_TABLE
+from modules.iam.schema.models import (
+    iam_identities,
+    iam_operator_mfa,
+    iam_operator_profiles,
+    iam_patient_profiles,
+    iam_sessions,
+)
+from modules.iam.session_facade import grant_operator_role
+from modules.profile_media.facade import (
+    OPERATOR_PREFIX,
+    PATIENT_PREFIX,
+    ProfileMediaStore,
+    ProfileMediaStoreError,
+)
+
+_IAM_SCHEMA = "iam"
+
+# Patient profile cache (ARCH-P1 #817) marker for a "not set" profile.
+_PROFILE_NOT_SET_MARKER_KEY = "__patient_profile_not_set__"
+_PROFILE_NOT_SET_MARKER = {_PROFILE_NOT_SET_MARKER_KEY: True}
+_PROFILE_CACHE_NAMESPACE = "profile"
+
+
+def _profile_cache_ttl(self: object) -> int:
+    ttl = getattr(self, "_profile_cache_ttl_seconds", None)
+    if ttl is None:
+        try:
+            ttl = int(get_settings().profile_cache_ttl_seconds)
+        except Exception:
+            ttl = 0
+    try:
+        return int(ttl or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+class RegisterPatientResult(BaseModel):
+    """Outcome of the begin-or-resume entry, as the PWA renders it (spec #51 sec 2.1/2.4).
+
+    ``sent``: a challenge was issued (first-time registration or an
+    out-of-cooldown login) and the challenge fields seed the countdown ring,
+    the resend cooldown, and the attempts-left strip; ``is_existing``/``flow``
+    tell the client which notice to show. ``cooldown``/``locked``/``suspended``:
+    the entry was refused exactly like a resend - no fresh challenge was issued
+    and no SMS was sent - and the PWA stays on the phone step with the matching
+    countdown or lockout state. ``no_identity`` is impossible on this path: the
+    single begin-or-resume entry always resolves to an identity.
+    """
+
+    outcome: Literal["sent", "cooldown", "locked", "suspended"]
+    phone_e164: str
+    identity_id: int
+    challenge_id: int | None = None
+    is_existing: bool
+    flow: Literal["register", "login"]
+    expires_in_seconds: int | None = None
+    cooldown_remaining_seconds: int | None = None
+    attempts_left: int | None = None
+    lockout_remaining_seconds: int | None = None
+
+
+class PartnerCredentialCreatedResult(BaseModel):
+    """Outcome of creating a partner credential account (ADR-0010, ticket #245).
+
+    The identity is created ``[Unverified]`` with no role grant, so it is
+    login-capable via phone-OTP from the moment the partner registers but holds
+    no ``partner`` role scope until activation (the role grant is the
+    activation-gated step, T03 #246). ``identity_id`` and ``phone_e164`` let
+    the ``partner`` module persist its own row in the same transaction.
+    """
+
+    identity_id: int
+    phone_e164: str
+
+
+class OperatorInvitedResult(BaseModel):
+    """Outcome of inviting a new operator (T07, ticket #250).
+
+    The invited identity is created ``[Unverified]`` with an ``Active``
+    ``operator`` role grant, so the invited phone can complete MFA at first
+    login and then hold the ``operator`` scope - there is no self-registration
+    path, only this credentialed operator-invites-operator flow.
+    """
+
+    identity_id: int
+    phone_e164: str
+
+
+class OperatorSummary(BaseModel):
+    """One operator row for the admin user-management list (spec #761, #768).
+
+    The phone is always masked before it leaves the facade - the list is a
+    management view, never a contact-data export. ``mfa_enabled`` reports
+    whether the operator has enrolled a TOTP factor (invited-but-not-enrolled
+    operators show ``False``). ``created_at`` is the identity's creation time,
+    so a backfilled operator keeps its real join date rather than the migration
+    timestamp.
+    """
+
+    identity_id: int
+    phone_masked: str
+    tier: str
+    is_active: bool
+    mfa_enabled: bool
+    created_at: datetime
+
+
+class OperatorProfileView(BaseModel):
+    """The caller's own operator self-service profile (ticket #869).
+
+    Read from the operator profile row joined to the identity and the MFA
+    factor. ``phone`` is the canonical E.164 - this is a self-service route, so
+    the caller's own number is never masked. ``created_at`` is the identity's
+    creation time, so a backfilled operator keeps its real join date.
+    """
+
+    identity_id: int
+    name: str | None = None
+    phone: str
+    tier: Literal["admin", "operator"]
+    mfa_enabled: bool
+    photo_ref: str | None = None
+    created_at: datetime
+
+
+class OperatorProfilePhotoView(BaseModel):
+    """Response shape for an operator profile photo upload (#869)."""
+
+    photo_ref: str
+
+
+class PatientProfile(BaseModel):
+    """The patient's profile-completion data (PHASE-8.1 T1, #482; FEAT-008).
+
+    One row per identity, persisted in ``iam.iam_patient_profiles`` so a
+    returning patient is asked only once. ``area``, the emergency contact, and
+    the photo reference are optional and unsettable; ``preferred_language``
+    mirrors what the PWA's locale picker chose (en/hi) and persists with the
+    profile but never drives the app locale (ticket #488 keeps its own store).
+    Extra fields are refused (``extra="forbid"``, the iam surface convention)
+    so a client typo cannot silently widen the stored shape. String bounds
+    mirror the ``VARCHAR`` column widths so an over-long value is a 422 at the
+    edge, never a ``DataError`` 500 at the database (api-standards §2).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    age: int = Field(gt=0, lt=150)
+    gender: str = Field(min_length=1, max_length=20)
+    preferred_language: str = Field(min_length=1, max_length=20)
+    area: str | None = Field(default=None, max_length=255)
+    emergency_contact: str | None = Field(default=None, max_length=32)
+    photo_ref: str | None = Field(default=None, max_length=255)
+
+
+#: JPG/PNG/WebP are the only profile-photo content types admitted (US-20).
+MEDIA_TYPE_JPEG: Final[str] = "image/jpeg"
+MEDIA_TYPE_PNG: Final[str] = "image/png"
+MEDIA_TYPE_WEBP: Final[str] = "image/webp"
+ALLOWED_PHOTO_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
+    {MEDIA_TYPE_JPEG, MEDIA_TYPE_PNG, MEDIA_TYPE_WEBP}
+)
+
+#: Profile-photo size ceiling (US-20): any photo over the configured ceiling is
+#: refused. NOT an independent literal: it aliases the settings default, which
+#: is the single source of the value (coding-standards §9.2). The composition
+#: root injects the resolved ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` into
+#: ``IdentityFacade`` so raising the env var moves the patient and doctor photo
+#: limits together; this alias is only the no-argument default.
+MAX_PROFILE_PHOTO_BYTES: Final[int] = DEFAULT_PROFILE_MEDIA_MAX_UPLOAD_BYTES
+
+#: Attempts (initial + retries) the profile-photo write ladder makes before it
+#: gives up on a flaky store (NFR-PERF-002, mirroring the intake upload ladder).
+MAX_PROFILE_PHOTO_ATTEMPTS: Final[int] = 3
+
+
+def _profile_photo_backoff_delay(attempt: int) -> float:
+    """Exponential backoff (seconds) before retry ``attempt`` (loop count, 2+).
+
+    Retry ordinal ``r = attempt - 1`` scales ``base * 2**(r-1)``, so the two
+    retries after the first failure back off 0.5s then 1.0s.
+    """
+    return 0.5 * (2.0 ** (attempt - 2))
+
+
+def validate_profile_photo(
+    media_type: str | None,
+    data: bytes,
+    *,
+    max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
+) -> None:
+    """Enforce the profile-photo contract (US-20): JPEG/PNG/WebP only, size cap.
+
+    The canonical type is derived from the upload's content type (the
+    ``; charset=``-style suffix is stripped and the value lowercased); GIF and
+    every other type are refused, and the byte size must fit ``max_bytes`` - the
+    resolved ``PROFILE_MEDIA_MAX_UPLOAD_BYTES`` the caller injects, so the
+    patient and doctor photo ceilings move together (coding-standards §9.2).
+    A violation raises :class:`ProfilePhotoValidationError` with a human-safe
+    message for the 422 envelope.
+    """
+    mime = (media_type or "").split(";", 1)[0].strip().lower()
+    if mime not in ALLOWED_PHOTO_MEDIA_TYPES:
+        raise ProfilePhotoValidationError(
+            "profile photo must be JPEG, PNG, or WebP (GIF is not supported)"
+        )
+    if len(data) > max_bytes:
+        raise ProfilePhotoValidationError(
+            f"profile photo must be {max_bytes // (1024 * 1024)}MB or smaller"
+        )
+
+
+def _sniff_image_media_type(data: bytes) -> str:
+    """Answer the stored photo's media type from its magic bytes.
+
+    The stored bytes were accepted under their declared JPEG/PNG/WebP type, so
+    a well-formed photo sniffs to one of the three admitted types; the
+    octet-stream fallback catches a declared type whose bytes did not actually
+    match its content (uploads validate the declared type only), so the streamed
+    read still answers an honest ``Content-Type`` instead of a mismatched one.
+    Kept here so the read needs no stored metadata next to the opaque object
+    key (ADR-0020 D2: refs only in SQL).
+    """
+    if data.startswith(b"\xff\xd8\xff"):
+        return MEDIA_TYPE_JPEG
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return MEDIA_TYPE_PNG
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return MEDIA_TYPE_WEBP
+    return "application/octet-stream"
+
+
+@dataclass(frozen=True)
+class PhotoContent:
+    """Decrypted profile-photo bytes plus their sniffed media type (US-20).
+
+    The streamed read answer: the route renders ``data`` with ``media_type``
+    as the ``Content-Type``. Never a public URL - the photo lives in the
+    private ``profile-media`` store and is only ever streamed through the
+    backend for the session owner.
+    """
+
+    data: bytes
+    media_type: str
+
+
+def _default_clock() -> datetime:
+    return datetime.now(UTC)
+
+
+class IdentityFacade:
+    """Identity sub-facade: registration and identity lifecycle (ADR-0006)."""
+
+    def __init__(
+        self,
+        engine: AsyncEngineLike,
+        otp_sender: OtpSender,
+        clock: Callable[[], datetime] = _default_clock,
+        *,
+        media_store: ProfileMediaStore | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        photo_max_bytes: int = MAX_PROFILE_PHOTO_BYTES,
+        profile_cache_ttl_seconds: int | None = None,
+    ) -> None:
+        self._engine = engine
+        self._otp_sender = otp_sender
+        self._clock = clock
+        # The profile-photo ceiling comes from the one settings source
+        # (``PROFILE_MEDIA_MAX_UPLOAD_BYTES``, injected at the composition root),
+        # so the patient's photo path and the doctor's share a single value
+        # (coding-standards §9.2).
+        self._photo_max_bytes = photo_max_bytes
+        # US-20 (#533): the private profile-media store backs the patient's
+        # profile photo. Injected at the composition root; None is the unconfigured
+        # state the photo methods refuse loudly.
+        self._media_store = media_store
+        self._sleep = sleep
+        # Profile cache TTL (ARCH-P1 #817). ``None`` falls back to settings.
+        self._profile_cache_ttl_seconds = profile_cache_ttl_seconds
+
+    async def register_patient(self, phone: str) -> RegisterPatientResult:
+        """Begin-or-resume: create the identity on first use, else resolve it.
+
+        The phone is normalized server-side to +91 E.164 (the country code is
+        never trusted from the client). Concurrency converges via the unique
+        ``phone_e164`` index: ``INSERT ... ON CONFLICT DO NOTHING`` then a
+        re-read, never SELECT-then-INSERT (spec #51 section 2.3). A new identity is
+        created ``[Unverified]`` and emits ``patient.registered``; a repeat
+        phone resolves to the existing identity (no duplicate).
+
+        The existing-phone login branch enforces the same anti-spam gate as a
+        resend (spec #51 section 2.4, ADR-0004): while the phone is inside the >= 60 s
+        resend cooldown measured from the last issuance, in the brute-force
+        lockout, or ``Suspended``, the entry is refused - no fresh challenge is
+        issued, no ``otp.sent`` is written, and no SMS is sent - so an attacker
+        cannot defeat the cooldown by calling register repeatedly or poke a
+        locked phone back into the OTP flow. The identity row is locked
+        ``FOR UPDATE`` so the refusal reads stable guard state and concurrent
+        writers serialize. First-time registration and out-of-cooldown login
+        share the resend's latest-wins issuance via the shared re-issue
+        primitive ``_reissue_otp_challenge`` (WI-4, #335), which defines the
+        cooldown/lockout semantics once for both paths: the pending challenge is
+        invalidated before a fresh hashed one is issued (the old code can no
+        longer verify), ``otp.sent`` lands in the iam outbox in the same
+        transaction as the change, and the EXT-001 adapter delivers it as a
+        background task afterwards - the request never blocks on the provider
+        (PHASE-2 REM T4, #86).
+        """
+        phone_e164 = normalize_phone(phone)
+        now = self._clock()
+
+        async with self._engine.begin() as connection:
+            inserted = await connection.execute(
+                postgresql_insert(iam_identities)
+                .values(phone_e164=phone_e164)
+                .on_conflict_do_nothing(index_elements=["phone_e164"])
+            )
+            is_new = inserted.rowcount == 1
+            if is_new:
+                identity_id = (
+                    await connection.execute(
+                        select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
+                    )
+                ).scalar_one()
+                await write_outbox(
+                    connection,
+                    _IAM_SCHEMA,
+                    IAM_OUTBOX_TABLE,
+                    events.patient_registered_envelope(identity_id, phone_e164),
+                )
+                challenge_id, otp = await _issue_challenge(
+                    connection,
+                    identity_id=identity_id,
+                    phone_e164=phone_e164,
+                    now=now,
+                )
+            else:
+                locked = await _lock_identity_row(
+                    connection, iam_identities.c.phone_e164 == phone_e164
+                )
+                if locked is None:
+                    raise IamError("existing identity disappeared between the insert and the lock")
+                identity_id = locked.identity_id
+
+                reissue = await _reissue_otp_challenge(
+                    connection,
+                    identity_id=identity_id,
+                    phone_e164=phone_e164,
+                    identity_status=locked.status,
+                    lockout_until=locked.lockout_until,
+                    now=now,
+                )
+                if reissue.outcome != "sent":
+                    return RegisterPatientResult(
+                        outcome=reissue.outcome,
+                        phone_e164=phone_e164,
+                        identity_id=reissue.identity_id,
+                        is_existing=True,
+                        flow="login",
+                        cooldown_remaining_seconds=reissue.cooldown_remaining_seconds,
+                        lockout_remaining_seconds=reissue.lockout_remaining_seconds,
+                    )
+                challenge_id, otp = reissue.sent_challenge()
+
+        await self._otp_sender(phone_e164, otp)
+
+        return RegisterPatientResult(
+            outcome="sent",
+            phone_e164=phone_e164,
+            identity_id=identity_id,
+            challenge_id=challenge_id,
+            is_existing=not is_new,
+            flow="login" if not is_new else "register",
+            expires_in_seconds=OTP_TTL_SECONDS,
+            cooldown_remaining_seconds=RESEND_COOLDOWN_SECONDS,
+            attempts_left=MAX_ATTEMPTS,
+        )
+
+    async def create_credential_account(
+        self, phone: str, connection: AsyncConnection | None = None
+    ) -> PartnerCredentialCreatedResult:
+        """Create a login-capable identity for a newly registered partner (ADR-0010, #245).
+
+        Called synchronously by the ``partner`` module inside the same
+        transaction as partner registration, so a partner's phone-OTP login
+        works the moment they register. Unlike ``register_patient`` this does
+        NOT issue a challenge or grant a role: the identity is created
+        ``[Unverified]`` with no ``partner`` role grant, so a later activation
+        (T03, #246) is the gated step that grants the role and unlocks
+        patient-facing scope.
+
+        ``connection`` lets the caller (the ``partner`` facade) share its own
+        open transaction so the identity insert commits atomically with the
+        partner profile and the partner module's ``partner.registered``
+        (ADR-0010: "in the same registration transaction boundary"). The
+        ``partner.registered`` event is MOD-002's, so the iam seam emits no
+        same-key event here - the registry's one-shape-per-name contract holds
+        (internal-modules §4.2, producer MOD-002). When omitted the
+        method opens its own transaction, preserving the standalone seam shape
+        the iam tests exercise. Concurrency converges via the unique
+        ``phone_e164`` index (``INSERT ... ON CONFLICT DO NOTHING`` then a
+        re-read, never SELECT-then-INSERT).
+        """
+        phone_e164 = normalize_phone(phone)
+
+        async def _run(connection: AsyncConnection) -> int:
+            await connection.execute(
+                postgresql_insert(iam_identities)
+                .values(phone_e164=phone_e164)
+                .on_conflict_do_nothing(index_elements=["phone_e164"])
+            )
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
+                )
+            ).scalar_one()
+            return int(identity_id)
+
+        if connection is not None:
+            identity_id = await _run(connection)
+        else:
+            async with self._engine.begin() as connection:
+                identity_id = await _run(connection)
+
+        return PartnerCredentialCreatedResult(identity_id=identity_id, phone_e164=phone_e164)
+
+    async def create_operator_account(
+        self,
+        phone: str,
+        invited_by_identity_id: int,
+        tier: str = "operator",
+        connection: AsyncConnection | None = None,
+    ) -> OperatorInvitedResult:
+        """Invite a new operator: create a credentialed, MFA-bound account (T07, #250).
+
+        Operators are a trusted closed group that never self-registers - the
+        only way to grow the queue-running group is an admin inviting a new
+        phone. The invited identity is created ``[Unverified]`` and immediately
+        granted an ``Active`` ``operator`` role, so a session can be issued only
+        after the invited phone completes MFA at first login (the second factor
+        precedes session minting in ``issue_operator_session``).
+
+        ``tier`` is the authority the invite grants (``admin`` / ``operator``,
+        spec #761) and defaults to the non-admin tier, so privilege is always
+        deliberate. Unlike ``create_credential_account`` (a partner is
+        login-capable with no role until activation), the operator role grant is
+        handed over at invite time - MFA, not a separate activation step, is the
+        gate that binds the account. ``invited_by_identity_id`` names the
+        inviting admin for the ``operator.invited`` audit event, emitted in the
+        same transaction as the identity insert. ``connection`` lets the caller
+        share an open transaction; when omitted the method opens its own,
+        preserving the standalone seam shape the iam tests exercise. Concurrency
+        converges via the unique ``phone_e164`` index (``INSERT ... ON CONFLICT
+        DO NOTHING`` then a re-read); a duplicate phone resolves to the existing
+        identity with the role grant still ensured and no duplicate event. A
+        duplicate invite never changes an existing profile's tier.
+        """
+        phone_e164 = normalize_phone(phone)
+
+        async def _run(connection: AsyncConnection) -> int:
+            inserted = await connection.execute(
+                postgresql_insert(iam_identities)
+                .values(phone_e164=phone_e164)
+                .on_conflict_do_nothing(index_elements=["phone_e164"])
+            )
+            identity_id = (
+                await connection.execute(
+                    select(iam_identities.c.id).where(iam_identities.c.phone_e164 == phone_e164)
+                )
+            ).scalar_one()
+            await grant_operator_role(connection, identity_id)
+            # Every operator carries a profile; a new invite starts at the
+            # requested tier, defaulting to the non-admin ``operator`` tier
+            # (spec #761). ON CONFLICT keeps a duplicate invite from changing an
+            # existing admin's authority.
+            created_by_val = (
+                invited_by_identity_id
+                if invited_by_identity_id and invited_by_identity_id != 0
+                else None
+            )
+            updated_by_val = created_by_val
+            # Only set if inviter actually exists to satisfy FK
+            if created_by_val is not None:
+                inviter_row = await connection.execute(
+                    select(iam_identities.c.id).where(iam_identities.c.id == created_by_val)
+                )
+                if inviter_row.scalar_one_or_none() is None:
+                    created_by_val = None
+                    updated_by_val = None
+            await connection.execute(
+                postgresql_insert(iam_operator_profiles)
+                .values(
+                    identity_id=identity_id,
+                    tier=tier,
+                    is_active=True,
+                    created_by=created_by_val,
+                    updated_by=updated_by_val,
+                )
+                .on_conflict_do_nothing(index_elements=["identity_id"])
+            )
+            if inserted.rowcount == 1:
+                await write_outbox(
+                    connection,
+                    _IAM_SCHEMA,
+                    IAM_OUTBOX_TABLE,
+                    events.operator_invited_envelope(
+                        identity_id=identity_id,
+                        phone_e164=phone_e164,
+                        invited_by_identity_id=invited_by_identity_id,
+                        tier=tier,
+                    ),
+                )
+            return int(identity_id)
+
+        if connection is not None:
+            identity_id = await _run(connection)
+        else:
+            async with self._engine.begin() as connection:
+                identity_id = await _run(connection)
+
+        return OperatorInvitedResult(identity_id=identity_id, phone_e164=phone_e164)
+
+    async def list_operators(
+        self, connection: AsyncConnection | None = None
+    ) -> list[OperatorSummary]:
+        """List operators for the admin user-management view (spec #761, #768).
+
+        Reads the operator profiles joined to their identities, with the MFA
+        factor left-joined so an invited operator who has not enrolled yet
+        still appears (``mfa_enabled`` false). Phones are masked here, in the
+        same transaction that reads them, so no caller can accidentally serve
+        the canonical number. Ordered oldest-first so the list is stable across
+        requests. ``connection`` lets a caller share an open transaction; when
+        omitted the read opens its own.
+        """
+
+        async def _run(connection: AsyncConnection) -> list[OperatorSummary]:
+            rows = await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.phone_e164,
+                    iam_identities.c.created_at,
+                    iam_operator_profiles.c.tier,
+                    iam_operator_profiles.c.is_active,
+                    func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                )
+                .select_from(
+                    iam_operator_profiles.join(
+                        iam_identities,
+                        iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                    ).outerjoin(
+                        iam_operator_mfa,
+                        iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                    )
+                )
+                .order_by(iam_identities.c.created_at, iam_identities.c.id)
+            )
+            return [
+                OperatorSummary(
+                    identity_id=int(row[0]),
+                    phone_masked=mask_phone(str(row[1])),
+                    tier=str(row[3]),
+                    is_active=bool(row[4]),
+                    mfa_enabled=bool(row[5]),
+                    created_at=row[2],
+                )
+                for row in rows
+            ]
+
+        if connection is not None:
+            return await _run(connection)
+        async with self._engine.connect() as connection:
+            return await _run(connection)
+
+    async def update_operator_tier(
+        self,
+        identity_id: int,
+        tier: Literal["admin", "operator"],
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's tier (promote or demote).
+
+        Admin-only action. Demotion and self-demotion are guarded:
+        - An operator cannot change their own tier.
+        - The last active admin cannot be demoted.
+        - Every change revokes the operator's active sessions and emits an
+          ``operator.tier_changed`` audit event.
+        """
+        if identity_id == actor_identity_id:
+            raise OperatorSelfChangeError("an operator cannot change their own tier")
+
+        async def _run(connection: AsyncConnection) -> OperatorSummary:
+            # Check if target is the last active admin
+            if tier == "operator":
+                active_admin_count = await connection.execute(
+                    select(func.count(iam_operator_profiles.c.identity_id)).where(
+                        (iam_operator_profiles.c.tier == "admin")
+                        & (iam_operator_profiles.c.is_active.is_(True))
+                    )
+                )
+                count = active_admin_count.scalar_one()
+                target_is_admin = await connection.execute(
+                    select(iam_operator_profiles.c.tier).where(
+                        iam_operator_profiles.c.identity_id == identity_id
+                    )
+                )
+                target_tier = target_is_admin.scalar_one_or_none()
+                if target_tier == "admin" and count <= 1:
+                    raise OperatorLastAdminError("cannot demote the last active admin operator")
+
+            # Update tier
+            await connection.execute(
+                update(iam_operator_profiles)
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(tier=tier, updated_by=actor_identity_id)
+            )
+
+            # Revoke sessions by deleting their refresh tokens
+            await connection.execute(
+                iam_sessions.delete().where(
+                    (iam_sessions.c.identity_id == identity_id)
+                    & (iam_sessions.c.scope == "operator")
+                )
+            )
+
+            # Emit audit event
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.operator_tier_changed_envelope(
+                    identity_id=identity_id,
+                    new_tier=tier,
+                    changed_by_identity_id=actor_identity_id,
+                ),
+            )
+
+            # Return updated operator summary
+            rows = await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.phone_e164,
+                    iam_identities.c.created_at,
+                    iam_operator_profiles.c.tier,
+                    iam_operator_profiles.c.is_active,
+                    func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                )
+                .select_from(
+                    iam_operator_profiles.join(
+                        iam_identities,
+                        iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                    ).outerjoin(
+                        iam_operator_mfa,
+                        iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                    )
+                )
+                .where(iam_identities.c.id == identity_id)
+            )
+            row = rows.first()
+            if row is None:
+                raise IamError(f"operator {identity_id} not found after tier update")
+            return OperatorSummary(
+                identity_id=int(row[0]),
+                phone_masked=mask_phone(str(row[1])),
+                tier=str(row[3]),
+                is_active=bool(row[4]),
+                mfa_enabled=bool(row[5]),
+                created_at=row[2],
+            )
+
+        if connection is not None:
+            return await _run(connection)
+        async with self._engine.begin() as connection:
+            return await _run(connection)
+
+    async def update_operator_active(
+        self,
+        identity_id: int,
+        is_active: bool,
+        actor_identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> OperatorSummary:
+        """Update an operator's active state (deactivate or reactivate).
+
+        Admin-only action. Deactivation and self-deactivation are guarded:
+        - An operator cannot change their own active state.
+        - The last active admin cannot be deactivated.
+        - Deactivation revokes the operator's active sessions and blocks login;
+          reactivation restores access.
+        - Every change emits an ``operator.active_changed`` audit event.
+        """
+        if identity_id == actor_identity_id:
+            raise OperatorSelfChangeError("an operator cannot change their own active state")
+
+        async def _run(connection: AsyncConnection) -> OperatorSummary:
+            # Check if target is the last active admin
+            if not is_active:
+                active_admin_count = await connection.execute(
+                    select(func.count(iam_operator_profiles.c.identity_id)).where(
+                        (iam_operator_profiles.c.tier == "admin")
+                        & (iam_operator_profiles.c.is_active.is_(True))
+                    )
+                )
+                count = active_admin_count.scalar_one()
+                target_is_active_admin = await connection.execute(
+                    select(iam_operator_profiles.c.tier, iam_operator_profiles.c.is_active).where(
+                        iam_operator_profiles.c.identity_id == identity_id
+                    )
+                )
+                target = target_is_active_admin.first()
+                if target and target.tier == "admin" and target.is_active and count <= 1:
+                    raise OperatorLastAdminError("cannot deactivate the last active admin operator")
+
+            # Update active state
+            await connection.execute(
+                update(iam_operator_profiles)
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(is_active=is_active, updated_by=actor_identity_id)
+            )
+
+            # Revoke sessions if deactivating
+            if not is_active:
+                await connection.execute(
+                    iam_sessions.delete().where(
+                        (iam_sessions.c.identity_id == identity_id)
+                        & (iam_sessions.c.scope == "operator")
+                    )
+                )
+
+            # Emit audit event
+            await write_outbox(
+                connection,
+                _IAM_SCHEMA,
+                IAM_OUTBOX_TABLE,
+                events.operator_active_changed_envelope(
+                    identity_id=identity_id,
+                    is_active=is_active,
+                    changed_by_identity_id=actor_identity_id,
+                ),
+            )
+
+            # Return updated operator summary
+            rows = await connection.execute(
+                select(
+                    iam_identities.c.id,
+                    iam_identities.c.phone_e164,
+                    iam_identities.c.created_at,
+                    iam_operator_profiles.c.tier,
+                    iam_operator_profiles.c.is_active,
+                    func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                )
+                .select_from(
+                    iam_operator_profiles.join(
+                        iam_identities,
+                        iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                    ).outerjoin(
+                        iam_operator_mfa,
+                        iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                    )
+                )
+                .where(iam_identities.c.id == identity_id)
+            )
+            row = rows.first()
+            if row is None:
+                raise IamError(f"operator {identity_id} not found after active update")
+            return OperatorSummary(
+                identity_id=int(row[0]),
+                phone_masked=mask_phone(str(row[1])),
+                tier=str(row[3]),
+                is_active=bool(row[4]),
+                mfa_enabled=bool(row[5]),
+                created_at=row[2],
+            )
+
+        if connection is not None:
+            return await _run(connection)
+        async with self._engine.begin() as connection:
+            return await _run(connection)
+
+    async def get_operator_profile(self, identity_id: int) -> OperatorProfileView:
+        """Read the caller's own operator profile (self-service, #869).
+
+        Resolves from the operator profile row joined to the identity and the
+        MFA factor. A missing or inactive profile (or an inactive identity)
+        raises :class:`OperatorProfileNotFoundError`; no row is ever created.
+        """
+        async with self._engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    select(
+                        iam_operator_profiles.c.identity_id,
+                        iam_operator_profiles.c.tier,
+                        iam_operator_profiles.c.is_active,
+                        iam_operator_profiles.c.name,
+                        iam_operator_profiles.c.photo_ref,
+                        iam_identities.c.status,
+                        iam_identities.c.phone_e164,
+                        iam_identities.c.created_at,
+                        func.coalesce(iam_operator_mfa.c.mfa_enabled, False),
+                    )
+                    .select_from(
+                        iam_operator_profiles.join(
+                            iam_identities,
+                            iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                        ).outerjoin(
+                            iam_operator_mfa,
+                            iam_operator_mfa.c.identity_id == iam_operator_profiles.c.identity_id,
+                        )
+                    )
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                )
+            ).first()
+        if row is None or not bool(row[2]) or str(row[5]) != "Active":
+            raise OperatorProfileNotFoundError(identity_id)
+        return OperatorProfileView(
+            identity_id=int(row[0]),
+            name=row[3],
+            phone=str(row[6]),
+            tier=str(row[1]),
+            mfa_enabled=bool(row[8]),
+            photo_ref=row[4],
+            created_at=row[7],
+        )
+
+    async def update_operator_profile_name(
+        self, identity_id: int, name: str | None
+    ) -> OperatorProfileView:
+        """Set or clear the caller's display name (#869).
+
+        Trims surrounding whitespace; empty-after-trim becomes ``None``. Bumps
+        ``updated_at`` only on a real change. A missing/inactive profile raises
+        :class:`OperatorProfileNotFoundError`.
+        """
+        normalised = name.strip() if isinstance(name, str) else name
+        if normalised == "":
+            normalised = None
+        async with self._engine.begin() as connection:
+            locked = (
+                await connection.execute(
+                    select(
+                        iam_operator_profiles.c.tier,
+                        iam_operator_profiles.c.is_active,
+                        iam_operator_profiles.c.name,
+                        iam_operator_profiles.c.photo_ref,
+                        iam_identities.c.status,
+                        iam_identities.c.phone_e164,
+                        iam_identities.c.created_at,
+                    )
+                    .select_from(
+                        iam_operator_profiles.join(
+                            iam_identities,
+                            iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                        )
+                    )
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .with_for_update()
+                )
+            ).first()
+            if locked is None or not bool(locked[1]) or str(locked[4]) != "Active":
+                raise OperatorProfileNotFoundError(identity_id)
+            if locked[2] != normalised:
+                await connection.execute(
+                    update(iam_operator_profiles)
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .values(name=normalised, updated_at=self._clock())
+                )
+            mfa_row = (
+                await connection.execute(
+                    select(func.coalesce(iam_operator_mfa.c.mfa_enabled, False)).where(
+                        iam_operator_mfa.c.identity_id == identity_id
+                    )
+                )
+            ).first()
+            tier = locked[0]
+            photo_ref = locked[3]
+            phone = locked[5]
+            created_at = locked[6]
+            mfa_enabled = bool(mfa_row[0]) if mfa_row is not None else False
+        return OperatorProfileView(
+            identity_id=identity_id,
+            name=normalised,
+            phone=str(phone),
+            tier=tier,
+            mfa_enabled=bool(mfa_enabled),
+            photo_ref=photo_ref,
+            created_at=created_at,
+        )
+
+    async def save_operator_photo(
+        self,
+        *,
+        identity_id: int,
+        data: bytes,
+        media_type: str | None,
+    ) -> OperatorProfilePhotoView:
+        """Upload or replace the caller's operator profile photo (#869).
+
+        Validates type and size first, saves the new object, locks the profile
+        row, swaps ``photo_ref`` + ``updated_at``, commits, then deletes the
+        previous object. Any failure after the save deletes the new object and
+        re-raises so the previous photo survives.
+        """
+        if self._media_store is None:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store is not configured"
+            )
+        try:
+            validate_profile_photo(media_type, data, max_bytes=self._photo_max_bytes)
+        except ProfilePhotoValidationError as exc:
+            raise OperatorProfilePhotoValidationError(str(exc)) from exc
+        media_store = self._media_store
+        try:
+            try:
+                new_key = await media_store.save(
+                    data=data,
+                    subject_id=identity_id,
+                    prefix=OPERATOR_PREFIX,
+                )
+            except ProfileMediaStoreError as exc:
+                if getattr(exc, "retries_exhausted", False):
+                    raise OperatorProfilePhotoTransferError(
+                        "operator profile photo upload failed"
+                    ) from exc
+                raise OperatorProfilePhotoStoreUnavailableError(
+                    "operator profile media store is unavailable"
+                ) from exc
+            except InvalidTag as exc:
+                raise OperatorProfilePhotoStoreUnavailableError(
+                    "operator profile media store returned unreadable data"
+                ) from exc
+            except OSError as exc:
+                raise OperatorProfilePhotoTransferError(
+                    "operator profile photo upload failed"
+                ) from exc
+            try:
+                previous_key = await self._set_operator_photo_ref(identity_id, new_key)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    await media_store.delete(object_key=new_key)
+                raise
+        except OperatorProfileNotFoundError:
+            raise
+        # Delete the previous object only after the swap committed.
+        if previous_key is not None and previous_key != new_key:
+            with contextlib.suppress(Exception):
+                await media_store.delete(object_key=previous_key)
+        # Invalidate profile cache? operator profile has no redis cache currently.
+        return OperatorProfilePhotoView(photo_ref=new_key)
+
+    async def get_operator_photo(self, identity_id: int) -> PhotoContent:
+        """Stream the caller's operator profile photo (#869)."""
+        media_store = self._media_store
+        if media_store is None:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store is not configured"
+            )
+        profile = await self.get_operator_profile(identity_id)
+        if profile.photo_ref is None:
+            raise OperatorProfilePhotoNotFoundError(identity_id)
+        try:
+            data = await media_store.read(object_key=profile.photo_ref)
+        except FileNotFoundError as exc:
+            raise OperatorProfilePhotoNotFoundError(identity_id) from exc
+        except ProfileMediaStoreError as exc:
+            if getattr(exc, "retries_exhausted", False):
+                raise OperatorProfilePhotoTransferError(
+                    "operator profile photo read failed"
+                ) from exc
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store is unavailable"
+            ) from exc
+        except InvalidTag as exc:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store returned unreadable data"
+            ) from exc
+        except OSError as exc:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile photo storage read failed"
+            ) from exc
+        return PhotoContent(data=data, media_type=_sniff_image_media_type(data))
+
+    async def delete_operator_photo(self, identity_id: int) -> None:
+        """Remove the caller's operator profile photo (#869). Idempotent."""
+        media_store = self._media_store
+        if media_store is None:
+            raise OperatorProfilePhotoStoreUnavailableError(
+                "operator profile media store is not configured"
+            )
+        # Validate profile exists/active.
+        await self.get_operator_profile(identity_id)
+        # Lock + clear.
+        old_key: str | None = None
+        async with self._engine.begin() as connection:
+            locked = (
+                await connection.execute(
+                    select(iam_operator_profiles.c.photo_ref, iam_operator_profiles.c.is_active)
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .with_for_update()
+                )
+            ).first()
+            if locked is None or not bool(locked[1]):
+                raise OperatorProfileNotFoundError(identity_id)
+            old_key = locked[0]
+            if old_key is not None:
+                await connection.execute(
+                    update(iam_operator_profiles)
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .values(photo_ref=None, updated_at=self._clock())
+                )
+        if old_key is not None:
+            with contextlib.suppress(Exception):
+                await media_store.delete(object_key=old_key)
+
+    async def _set_operator_photo_ref(self, identity_id: int, photo_ref: str) -> str | None:
+        """Persist ``photo_ref`` on operator profile row under lock (#869).
+
+        Returns the previous photo_ref (or None).
+        """
+        async with self._engine.begin() as connection:
+            locked = (
+                await connection.execute(
+                    select(
+                        iam_operator_profiles.c.is_active,
+                        iam_operator_profiles.c.photo_ref,
+                        iam_identities.c.status,
+                    )
+                    .select_from(
+                        iam_operator_profiles.join(
+                            iam_identities,
+                            iam_identities.c.id == iam_operator_profiles.c.identity_id,
+                        )
+                    )
+                    .where(iam_operator_profiles.c.identity_id == identity_id)
+                    .with_for_update()
+                )
+            ).first()
+            if locked is None or not bool(locked[0]) or str(locked[2]) != "Active":
+                raise OperatorProfileNotFoundError(identity_id)
+            previous = locked[1]
+            await connection.execute(
+                update(iam_operator_profiles)
+                .where(iam_operator_profiles.c.identity_id == identity_id)
+                .values(photo_ref=photo_ref, updated_at=self._clock())
+            )
+        return str(previous) if previous is not None else None
+
+    async def save_patient_profile(
+        self,
+        identity_id: int,
+        profile: PatientProfile,
+        connection: AsyncConnection | None = None,
+    ) -> PatientProfile:
+        """Idempotently upsert the patient's profile-completion data (#482).
+
+        One row per identity: ``INSERT ... ON CONFLICT (identity_id) DO UPDATE``
+        replaces the whole profile on every save (never SELECT-then-INSERT), so
+        a returning patient is asked only once and a repeat PUT with the same
+        payload converges to the same row. ``connection`` lets a caller share an
+        open transaction - the dual-seam discipline: the write commits
+        atomically with whatever else that transaction carries; when omitted
+        the method opens its own, preserving the standalone seam shape the
+        route and tests exercise. Touches only the ``iam`` schema (ADR-0003).
+        """
+        now = self._clock()
+        columns: dict[str, Any] = {
+            "name": profile.name,
+            "age": profile.age,
+            "gender": profile.gender,
+            "preferred_language": profile.preferred_language,
+            "area": profile.area,
+            "emergency_contact": profile.emergency_contact,
+            "photo_ref": profile.photo_ref,
+        }
+
+        async def _run(connection: AsyncConnection) -> None:
+            await connection.execute(
+                postgresql_insert(iam_patient_profiles)
+                .values(identity_id=identity_id, **columns)
+                .on_conflict_do_update(
+                    index_elements=["identity_id"],
+                    set_={**columns, "updated_at": now},
+                )
+            )
+
+        _owns_transaction = connection is None
+        if connection is not None:
+            await _run(connection)
+        else:
+            async with self._engine.begin() as connection:
+                await _run(connection)
+
+        if _owns_transaction:
+            with contextlib.suppress(Exception):
+                _client = get_redis_client()
+                if _client is not None:
+                    await invalidate(
+                        _client,
+                        _PROFILE_CACHE_NAMESPACE,
+                        key=identity_id,
+                    )
+        return profile
+
+    async def get_patient_profile(
+        self,
+        identity_id: int,
+        connection: AsyncConnection | None = None,
+    ) -> PatientProfile | None:
+        """Read the patient's saved profile, or ``None`` when it is not set (#482).
+
+        ``None`` is the typed "not set" the GET route wraps; a returned profile
+        is the last committed save. Scoped to ``identity_id`` - callers (the
+        route) pass the authenticated principal's subject id, so one identity
+        never reads another's row. ``connection`` mirrors ``save_patient_profile``:
+        an in-transaction caller reads the same snapshot it wrote instead of
+        opening a competing transaction. Read-only.
+        """
+
+        async def _read(connection: AsyncConnection) -> PatientProfile | None:
+            result = await connection.execute(
+                select(iam_patient_profiles).where(
+                    iam_patient_profiles.c.identity_id == identity_id
+                )
+            )
+            row = result.mappings().first()
+            if row is None:
+                return None
+            return PatientProfile(
+                name=row["name"],
+                age=row["age"],
+                gender=row["gender"],
+                preferred_language=row["preferred_language"],
+                area=row["area"],
+                emergency_contact=row["emergency_contact"],
+                photo_ref=row["photo_ref"],
+            )
+
+        _ttl = _profile_cache_ttl(self)
+        _caller_connection = connection is not None
+        _client = None
+        _settings = None
+        if not _caller_connection and _ttl > 0:
+            try:
+                _client = get_redis_client()
+                _settings = get_settings()
+            except Exception:
+                _client = None
+                _settings = None
+
+        # Cache read (bypassed entirely when the caller supplied a connection).
+        if not _caller_connection and _client is not None:
+            try:
+                cached = await get_cached(
+                    _client,
+                    _PROFILE_CACHE_NAMESPACE,
+                    key=identity_id,
+                    settings=_settings,
+                    phi=True,
+                )
+            except Exception:
+                cached = None
+            if isinstance(cached, dict):
+                if cached.get(_PROFILE_NOT_SET_MARKER_KEY):
+                    return None
+                try:
+                    return PatientProfile(**cached)
+                except Exception:
+                    # Malformed/incompatible payload -> treat as a miss.
+                    cached = None
+            elif cached is not None:
+                # Unexpected typed payload: fall through to SQL.
+                cached = None
+
+        if connection is not None:
+            result = await _read(connection)
+        else:
+            async with self._engine.begin() as _conn:
+                result = await _read(_conn)
+
+        # Cache write (bypassed entirely when the caller supplied a connection).
+        if not _caller_connection and _client is not None:
+            value = result.model_dump() if result is not None else _PROFILE_NOT_SET_MARKER
+            with contextlib.suppress(Exception):
+                await set_cached(
+                    _client,
+                    _PROFILE_CACHE_NAMESPACE,
+                    key=identity_id,
+                    value=value,
+                    settings=_settings,
+                    phi=True,
+                    ttl_seconds=_ttl,
+                )
+        return result
+
+    async def get_patient_profiles(
+        self,
+        identity_ids: Sequence[int],
+    ) -> dict[int, PatientProfile]:
+        """Read many patients' saved profiles in one query (#903).
+
+        The batched sibling of :meth:`get_patient_profile`: one
+        ``identity_id IN (...)`` SELECT for the whole id set, so a caller
+        enriching a page of rows costs one round trip instead of one per
+        patient. Ids with no saved profile row are simply absent from the
+        result (the same typed "not set" ``None`` answers per id). Read-only;
+        opens its own transaction and always reads SQL directly - the Redis
+        per-id cache serves the single-id seam, while the batch read stays
+        fresh by construction and touches no cache state.
+
+        Touches only the ``iam`` schema (ADR-0003).
+        """
+        ids = sorted({int(identity_id) for identity_id in identity_ids})
+        if not ids:
+            return {}
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                select(iam_patient_profiles).where(iam_patient_profiles.c.identity_id.in_(ids))
+            )
+            return {
+                int(row["identity_id"]): PatientProfile(
+                    name=row["name"],
+                    age=row["age"],
+                    gender=row["gender"],
+                    preferred_language=row["preferred_language"],
+                    area=row["area"],
+                    emergency_contact=row["emergency_contact"],
+                    photo_ref=row["photo_ref"],
+                )
+                for row in result.mappings()
+            }
+
+    async def save_patient_photo(
+        self,
+        *,
+        identity_id: int,
+        data: bytes,
+        media_type: str | None,
+    ) -> PatientProfile:
+        """Upload or replace the caller's profile photo (US-20, ticket #533).
+
+        Enforces the photo contract (JPEG/PNG/WebP only, within the configured
+        ceiling, GIF refused), writes the bytes to the private ``profile-media``
+        store under the ``patient/`` prefix, and persists only the returned
+        opaque object key on the caller's ``iam_patient_profiles`` row
+        (ADR-0020 D2: refs only in SQL, never the bytes and never a public URL).
+        An existing photo is replaced: the old object is deleted so it is not
+        orphaned. The photo is bound to ``identity_id`` - the route passes the
+        authenticated subject id, so one identity can never overwrite another's
+        photo.
+
+        The store write rides an upload-retry ladder (NFR-PERF-002, mirroring
+        the intake upload): transient :class:`OSError` is retried up to
+        ``MAX_PROFILE_PHOTO_ATTEMPTS`` before giving up. The validation step
+        runs before any store or database work, so a bad upload never files
+        anything.
+
+        Returns the updated profile (its ``photo_ref`` now names the new key).
+
+        Raises :class:`ProfilePhotoValidationError` on a content-type/size
+        violation, :class:`PatientProfileNotSetError` when there is no profile
+        row to carry the key yet, and :class:`ProfilePhotoTransferError` when
+        every store-write attempt fails.
+        """
+        if self._media_store is None:
+            raise IamError("profile media store is not configured")
+        validate_profile_photo(media_type, data, max_bytes=self._photo_max_bytes)
+        profile = await self.get_patient_profile(identity_id)
+        if profile is None:
+            raise PatientProfileNotSetError(
+                "set the patient profile before uploading a profile photo"
+            )
+        new_key = await self._store_photo(data, identity_id)
+        try:
+            await self._set_patient_photo_ref(identity_id, new_key)
+        except Exception:
+            # The reference never landed: drop the freshly filed object so the
+            # store is not orphaned (the profile still points at the old photo).
+            with contextlib.suppress(Exception):
+                await self._media_store.delete(object_key=new_key)
+            raise
+        if profile.photo_ref is not None and profile.photo_ref != new_key:
+            # Replace: the superseded object is deleted best-effort - the
+            # profile already references the new key, so a leftover ciphertext
+            # here is a logged-invisible orphan, never a broken reference.
+            with contextlib.suppress(Exception):
+                await self._media_store.delete(object_key=profile.photo_ref)
+        profile.photo_ref = new_key
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _PROFILE_CACHE_NAMESPACE, key=identity_id)
+        return profile
+
+    async def get_patient_photo(self, *, identity_id: int) -> PhotoContent | None:
+        """Stream the caller's stored profile photo, or ``None`` when unset.
+
+        Reads the profile row's ``photo_ref`` and decrypts the object through
+        the store - never a public URL. ``None`` is the typed "no photo" answer
+        (no profile row, no key, or a dangling key whose object is gone), which
+        the GET route turns into a 404 for the session owner. Scoped to
+        ``identity_id``: only the owning patient reaches the bytes here; a
+        doctor's read of a patient photo is later consent-gated work (#540).
+        """
+        if self._media_store is None:
+            raise IamError("profile media store is not configured")
+        profile = await self.get_patient_profile(identity_id)
+        if profile is None or profile.photo_ref is None:
+            return None
+        try:
+            data = await self._media_store.read(object_key=profile.photo_ref)
+        except FileNotFoundError:
+            # A dangling key (object deleted out-of-band) means "no photo"
+            # rather than a 500 - the owner simply has nothing to preview.
+            return None
+        return PhotoContent(data=data, media_type=_sniff_image_media_type(data))
+
+    async def delete_patient_photo(self, *, identity_id: int) -> PatientProfile:
+        """Remove the caller's profile photo: clear the key and delete the object.
+
+        Clears ``photo_ref`` on the ``iam_patient_profiles`` row first - the
+        contract is "removal clears the stored key" (US-20) - then deletes the
+        ciphertext best-effort so a removed photo is not orphaned. Idempotent:
+        a profile with no photo returns unchanged. Scoped to ``identity_id``.
+
+        Raises :class:`PatientProfileNotSetError` when the caller has no
+        profile row (nothing to carry the cleared key).
+        """
+        if self._media_store is None:
+            raise IamError("profile media store is not configured")
+        profile = await self.get_patient_profile(identity_id)
+        if profile is None:
+            raise PatientProfileNotSetError(
+                "set the patient profile before removing a profile photo"
+            )
+        if profile.photo_ref is None:
+            return profile
+        old_key = profile.photo_ref
+        await self._set_patient_photo_ref(identity_id, None)
+        with contextlib.suppress(Exception):
+            await self._media_store.delete(object_key=old_key)
+        profile.photo_ref = None
+        with contextlib.suppress(Exception):
+            _client = get_redis_client()
+            if _client is not None:
+                await invalidate(_client, _PROFILE_CACHE_NAMESPACE, key=identity_id)
+        return profile
+
+    async def _store_photo(self, data: bytes, identity_id: int) -> str:
+        """Run one profile-photo write through the upload-resilience ladder.
+
+        On a transient failure it backs off and retries up to
+        ``MAX_PROFILE_PHOTO_ATTEMPTS`` (3) attempts, then raises
+        :class:`ProfilePhotoTransferError` - a failed upload never silently
+        leaves the profile photo absent (NFR-PERF-002).
+        """
+        media_store = self._media_store
+        if media_store is None:
+            raise IamError("profile media store is not configured")
+        object_key: str | None = None
+        last_error: OSError | None = None
+        for attempt in range(1, MAX_PROFILE_PHOTO_ATTEMPTS + 1):
+            if attempt > 1:
+                await self._sleep(_profile_photo_backoff_delay(attempt))
+            try:
+                object_key = await media_store.save(
+                    data=data,
+                    subject_id=identity_id,
+                    prefix=PATIENT_PREFIX,
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+        if object_key is None:
+            raise ProfilePhotoTransferError(
+                f"profile photo upload failed after {MAX_PROFILE_PHOTO_ATTEMPTS} "
+                f"attempts for patient {identity_id}"
+            ) from last_error
+        return object_key
+
+    async def _set_patient_photo_ref(self, identity_id: int, photo_ref: str | None) -> None:
+        """Persist ``photo_ref`` on the caller's profile row (or refuse).
+
+        A targeted single-column update (never a whole-row upsert, so the
+        photo surface works without re-writing the profile's other fields).
+        Raises :class:`PatientProfileNotSetError` when no row matches - the
+        profile must exist before a photo key can live on it.
+        """
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                update(iam_patient_profiles)
+                .where(iam_patient_profiles.c.identity_id == identity_id)
+                .values(photo_ref=photo_ref, updated_at=self._clock())
+            )
+        if result.rowcount == 0:
+            raise PatientProfileNotSetError(
+                "set the patient profile before changing the profile photo"
+            )

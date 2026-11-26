@@ -1,0 +1,129 @@
+# CareSetu OpenTelemetry collector - cardinality firewall (#749, spec #717
+# decisions 37/38). One collector receives every signal from the app
+# (OTEL_EXPORTER_OTLP_ENDPOINT -> 127.0.0.1:4318) and the free-tier series
+# ceiling (ADR-0024) is protected here, never in the application.
+#
+# Enforcement, locked by apps/backend/scripts/check_otel_collector_config.py:
+#   1. Pipeline order: memory_limiter first, batch last, firewall in between.
+#   2. transform/cardinality_firewall collapses response status into exactly
+#      three classes (success / client-error / server-error, the #727
+#      taxonomy), normalises the HTTP method vocabulary, and deletes every
+#      raw path/URL/Host label before export.
+#   3. Histograms export as native histograms (NHCB): one series per label
+#      set instead of one series per bucket.
+# Secrets come from the environment (see README.md); none are committed.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  # First in every pipeline (OTel component requirement).
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 256
+    spike_limit_mib: 64
+
+  # Last in every pipeline: exports are coarse-grained batches.
+  batch: {}
+
+  transform/cardinality_firewall:
+    # Log-and-continue on statement errors; every statement is guarded, so a
+    # logged error would mean the config drifted from the data.
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          # The FastAPI instrumentor (old semconv) records http.status_code;
+          # the app's own middleware records http.response.status_code. Merge
+          # the old key into the new one first, then one comparison set
+          # covers both producers.
+          - 'set(attributes["http.response.status_code"], attributes["http.status_code"]) where not IsNil(attributes["http.status_code"])'
+          # Exactly three status classes (#727): 1xx/2xx/3xx -> success,
+          # 400-499 -> client-error, >=500 -> server-error. IsInt() guards
+          # every comparison so datapoints without a status are untouched.
+          - 'set(attributes["http.status_class"], "success") where IsInt(attributes["http.response.status_code"]) and attributes["http.response.status_code"] < 400'
+          - 'set(attributes["http.status_class"], "client-error") where IsInt(attributes["http.response.status_code"]) and attributes["http.response.status_code"] >= 400 and attributes["http.response.status_code"] < 500'
+          - 'set(attributes["http.status_class"], "server-error") where IsInt(attributes["http.response.status_code"]) and attributes["http.response.status_code"] >= 500'
+          # Bounded method vocabulary. The instrumentor sanitises its own
+          # http.method, but the app's middleware records the raw request
+          # verb, and any custom verb would mint a new series per verb.
+          - 'set(attributes["http.method"], "UNKNOWN") where not IsNil(attributes["http.method"]) and not IsMatch(attributes["http.method"], "^(GET|HEAD|POST|PUT|DELETE|CONNECT|OPTIONS|TRACE|PATCH)$")'
+          - 'set(attributes["http.request.method"], "UNKNOWN") where not IsNil(attributes["http.request.method"]) and not IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|DELETE|CONNECT|OPTIONS|TRACE|PATCH)$")'
+          # Raw status values are deleted once classified: http.status_class
+          # is the only status dimension allowed to reach the vendor.
+          - 'delete_key(attributes, "http.status_code")'
+          - 'delete_key(attributes, "http.response.status_code")'
+          # Raw path/URL/Host labels are deleted: they carry ids, query
+          # strings and attacker-controlled Host headers. http.target and
+          # http.route survive because the ASGI layer only reports
+          # route-templated values for them (bounded by the route table).
+          - 'delete_key(attributes, "http.host")'
+          - 'delete_key(attributes, "http.server_name")'
+          - 'delete_key(attributes, "http.url")'
+          - 'delete_key(attributes, "url.full")'
+          - 'delete_key(attributes, "url.path")'
+          - 'delete_key(attributes, "url.query")'
+          # Listener address labels add nothing for a single service and
+          # scale with probe traffic if a proxy rewrites the scope.
+          - 'delete_key(attributes, "net.host.name")'
+          - 'delete_key(attributes, "net.host.port")'
+
+extensions:
+  basicauth/grafana_cloud:
+    client:
+      username: ${env:GRAFANA_CLOUD_USER}
+      password: ${env:GRAFANA_CLOUD_API_KEY}
+
+exporters:
+  # Metrics: Prometheus remote write into Grafana Cloud Mimir. Explicit-bucket
+  # histograms are converted to native histograms (NHCB) at export, so each
+  # label set is one series rather than one series per bucket; classic
+  # _bucket/_sum/_count series are not emitted at all.
+  prometheus_remote_write/grafana:
+    endpoint: ${env:GRAFANA_PROMETHEUS_URL}
+    auth:
+      authenticator: basicauth/grafana_cloud
+    convert_explicit_histograms_to_nhcb: true
+    keep_classic_histograms: false
+
+  # Traces and logs pass through untouched (no series cardinality); the app
+  # has a single OTLP endpoint, so both signals must land somewhere.
+  otlphttp/grafana:
+    endpoint: ${env:GRAFANA_OTLP_URL}
+    auth:
+      authenticator: basicauth/grafana_cloud
+
+service:
+  extensions:
+    - basicauth/grafana_cloud
+  pipelines:
+    metrics:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - transform/cardinality_firewall
+        - batch
+      exporters:
+        - prometheus_remote_write/grafana
+    traces:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - otlphttp/grafana
+    logs:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - otlphttp/grafana

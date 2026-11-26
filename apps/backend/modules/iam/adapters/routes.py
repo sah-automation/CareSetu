@@ -1,35 +1,51 @@
 """MOD-001: HTTP adapters for the iam module (PHASE-2 T3/T4/T5, tickets #54, #55, #56).
 
-Endpoints are thin adapters (api-standards §1): parse the typed request, call
+Endpoints are thin adapters (api-standards A1): parse the typed request, call
 the module facade, return the typed result. Every expected failure answers the
-shared error envelope at the top level (api-standards §2): a stable
+shared error envelope at the top level (api-standards A2): a stable
 ``SCREAMING_SNAKE`` code, a human-safe message, a trace id, and details.
 ``register_error_handlers`` maps iam domain errors to that envelope; the route
 itself carries no business logic. The auth routes sit behind the gateway
 middleware stack in ``app.main`` - the rate-limit policy for the OTP/auth
 surface is a Phase 2 gateway ticket. The register/verify/resend/session
 mutations honour the edge's ``Idempotency-Key`` contract
-(api-standards §5, PHASE-2 REM T11, #80) via ``_run_idempotent``: a duplicate
+(api-standards A5, PHASE-2 REM T11, #80) via ``run_idempotent``: a duplicate
 key replays the stored result instead of re-executing.
 """
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Awaitable, Callable
-from typing import TypeVar, cast
+import re
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
-from fastapi import APIRouter, FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, File, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import Settings
-from app.gateway.idempotency import IdempotencyStore
-from app.gateway.trace import resolve_trace_id
+from app.gateway.errors import error_response
+from app.gateway.idempotency import run_idempotent
+from app.gateway.principal import Principal
+from app.gateway.rbac import require_admin, require_operator
+from modules.iam.adapters.sms import mask_phone
 from modules.iam.domain.exceptions import (
     IamError,
+    InvalidOperatorCodeError,
     InvalidPhoneError,
+    OperatorLastAdminError,
+    OperatorMfaError,
+    OperatorMfaLockedError,
+    OperatorProfileNotFoundError,
+    OperatorProfilePhotoNotFoundError,
+    OperatorProfilePhotoStoreUnavailableError,
+    OperatorProfilePhotoTransferError,
+    OperatorProfilePhotoValidationError,
+    OperatorSelfChangeError,
+    PatientProfileNotSetError,
+    ProfilePhotoTransferError,
+    ProfilePhotoValidationError,
     RefreshTokenExpiredError,
     RefreshTokenRevokedError,
     RefreshTokenUnknownError,
@@ -37,16 +53,36 @@ from modules.iam.domain.exceptions import (
     SmsDeliveryError,
 )
 from modules.iam.facade import (
+    EnrollMfaResult,
     IamFacade,
+    OperatorInvitedResult,
+    OperatorProfilePhotoView,
+    OperatorProfileView,
+    OperatorSummary,
+    PartnerLoginOtpResult,
+    PartnerVerifyOtpResult,
     RegisterPatientResult,
     ResendOtpResult,
     SessionResult,
     VerifyOtpResult,
 )
 
+if TYPE_CHECKING:
+    from modules.partner.facade import PartnerFacade
+
+
+class OperatorProfileUpdateRequest(BaseModel):
+    """Body of ``PUT /v1/operator/profile``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=200)
+
+
 router = APIRouter(prefix="/v1/auth", tags=["iam"])
 
-logger = logging.getLogger(__name__)
+# Dedicated self-service operator profile router (#869). Mounted at /v1/operator.
+operator_profile_router = APIRouter(prefix="/v1/operator", tags=["iam"])
 
 
 class RegisterPatientRequest(BaseModel):
@@ -77,6 +113,26 @@ class ResendOtpRequest(BaseModel):
     phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
 
 
+class PartnerLoginRequest(BaseModel):
+    """Body of ``POST /v1/auth/partner/login`` (ADR-0016, F014-T02 #462)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+
+
+class PartnerVerifyRequest(BaseModel):
+    """Body of ``POST /v1/auth/partner/verify`` (ADR-0016, F014-T03 #463)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    otp: str = Field(
+        pattern=r"^[0-9]{6}$",
+        description="The 6-digit code the partner received; only well-formed guesses count",
+    )
+
+
 class IssueSessionRequest(BaseModel):
     """Body of ``POST /v1/auth/session``: the verified phone to mint a session for."""
 
@@ -92,6 +148,54 @@ class RefreshSessionRequest(BaseModel):
 
     refresh_token: str = Field(
         min_length=1, description="Opaque refresh token from a previous session"
+    )
+
+
+class OperatorInviteRequest(BaseModel):
+    """Body of ``POST /v1/auth/operator/invite`` (S9, #262; spec #761, #768)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    tier: Literal["admin", "operator"] = Field(
+        default="operator",
+        description="Authority to grant; defaults to the non-admin operator tier",
+    )
+
+
+class OperatorTierUpdateRequest(BaseModel):
+    """Body of ``PATCH /v1/auth/operator/users/{identity_id}/tier`` (spec #761, #769)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tier: Literal["admin", "operator"] = Field(description="New authority tier for the operator")
+
+
+class OperatorActiveUpdateRequest(BaseModel):
+    """Body of ``PATCH /v1/auth/operator/users/{identity_id}/active`` (spec #761, #769)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool = Field(description="New active state for the operator")
+
+
+class OperatorListResponse(BaseModel):
+    """Shape of ``GET /v1/auth/operator/users`` - operators wrapped, not a bare list."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operators: list[OperatorSummary]
+
+
+class OperatorLoginRequest(BaseModel):
+    """Body of ``POST /v1/auth/operator/login`` (S9, #262)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(min_length=1, description="10-digit Indian mobile number, or with 91 prefix")
+    code: str = Field(
+        pattern=r"^[0-9]{6}$",
+        description="The 6-digit RFC-6238 TOTP code from the enrolled MFA factor",
     )
 
 
@@ -126,47 +230,6 @@ def _set_jwt_cookie(response: Response, jwt_value: str, ttl_seconds: int, *, sec
     )
 
 
-class ErrorEnvelope(BaseModel):
-    """The single error shape every CareSetu endpoint answers (api-standards §2)."""
-
-    code: str
-    message: str
-    trace_id: str
-    details: dict[str, object]
-
-
-_T = TypeVar("_T")
-
-
-async def _run_idempotent(
-    request: Request,
-    call: Callable[[], Awaitable[_T]],
-) -> _T:
-    """Execute ``call`` once per ``Idempotency-Key`` (api-standards §5).
-
-    With the header present, the edge's in-process store (PHASE-2 REM T11, #80)
-    is checked first: a replayed key returns the stored result of the first
-    execution and the facade is not called again, so a client retry after a lost
-    response cannot double-issue an OTP or double-consume a challenge. Only a
-    completed call is stored - an expected failure (error envelope) or a 5xx is
-    never cached, so a retry re-executes. The key is namespaced by the request
-    path so one client key cannot collide across endpoints. A missing or blank
-    header passes straight through exactly as before - no store read or write.
-    """
-    raw_key = request.headers.get("Idempotency-Key")
-    if raw_key is None or not raw_key.strip():
-        return await call()
-    key = raw_key.strip()
-    store = cast(IdempotencyStore, request.app.state.idempotency_store)
-    cache_key = f"{request.url.path}:{key}"
-    cached = store.get(cache_key)
-    if cached is not None:
-        return cast(_T, cached)
-    result = await call()
-    store.put(cache_key, result)
-    return result
-
-
 @router.post(
     "/register",
     response_model=RegisterPatientResult,
@@ -184,10 +247,10 @@ async def register_patient(
     PWA drives (is-existing notice, countdown, resend cooldown, attempts
     left). An existing phone inside the resend cooldown, the brute-force
     lockout, or Suspended is refused with the matching outcome and no code is
-    sent (spec #51 §2.4).
+    sent (spec #51 A2.4).
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(request, lambda: facade.register_patient(body.phone))
+    return await run_idempotent(request, lambda: facade.register_patient(body.phone))
 
 
 @router.post(
@@ -207,7 +270,7 @@ async def verify_otp(
     ``locked`` with the lockout countdown.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(request, lambda: facade.verify_otp(body.phone, body.otp))
+    return await run_idempotent(request, lambda: facade.verify_otp(body.phone, body.otp))
 
 
 @router.post(
@@ -228,7 +291,7 @@ async def resend_otp(
     cooldown and the brute-force lockout.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    return await _run_idempotent(request, lambda: facade.resend_otp(body.phone))
+    return await run_idempotent(request, lambda: facade.resend_otp(body.phone))
 
 
 @router.post(
@@ -252,7 +315,146 @@ async def issue_session(
     Next.js middleware route protection.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    result = await _run_idempotent(request, lambda: facade.issue_session(body.phone))
+    result = await run_idempotent(request, lambda: facade.issue_session(body.phone))
+    response = Response(
+        content=result.model_dump_json(),
+        media_type="application/json",
+        status_code=status.HTTP_200_OK,
+    )
+    _set_jwt_cookie(
+        response,
+        result.jwt,
+        result.expires_in_seconds,
+        secure=_is_secure_cookie(request),
+    )
+    return response
+
+
+@router.post(
+    "/partner/login",
+    response_model=PartnerLoginOtpResult,
+    status_code=status.HTTP_200_OK,
+    summary="Begin partner phone-OTP login",
+)
+async def partner_login(
+    request: Request,
+    body: PartnerLoginRequest,
+) -> PartnerLoginOtpResult:
+    """Start a returning partner's phone-OTP login (ADR-0016, F014-T02 #462).
+
+    Issues a fresh OTP challenge ONLY for a phone that already has a partner
+    profile (doctor/lab/chemist). A phone with no partner account - including a
+    patient-only phone - is refused with the ``no_account`` outcome pointing to
+    registration: no identity is ever created and no SMS is sent. Cooldown /
+    brute-force lockout / suspended refusals behave exactly as on the patient
+    OTP surface (``cooldown``/``locked`` with countdown/``suspended``).
+
+    The partner-profile gate is resolved at the composition boundary (WI-3,
+    #336): the route wires the partner facade's non-throwing
+    ``resolve_partner_id_by_identity`` seam into the iam facade as a port, then
+    hands it to ``partner_login`` - iam itself never reaches into the partner
+    module (no cross-schema import, ADR-0003). The challenge issuance reuses
+    the shared OTP machine unchanged and registers no new event name
+    (ADR-0016 AEvents): only ``otp.sent``.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
+
+    async def _partner_profile(identity_id: int) -> int | None:
+        return await partner_facade.resolve_partner_id_by_identity(identity_id)
+
+    return await run_idempotent(request, lambda: facade.partner_login(body.phone, _partner_profile))
+
+
+@router.post(
+    "/partner/verify",
+    response_model=PartnerVerifyOtpResult,
+    status_code=status.HTTP_200_OK,
+    summary="Verify a partner login OTP code",
+)
+async def partner_verify(
+    request: Request,
+    body: PartnerVerifyRequest,
+) -> PartnerVerifyOtpResult:
+    """Submit the partner's 6-digit code: consume the challenge, mark the phone verified.
+
+    The partner completes login (ADR-0016, F014-T03 #463): a correct code
+    consumes the challenge and marks the identity phone-verified in the same
+    transaction, silently - no patient role grant, no ``patient.verified``
+    event, and no identity lifecycle transition, so logging in as a partner
+    never makes the phone a patient account. Returns the outcome the staff
+    login page renders - ``verified``, ``wrong_code`` with the remaining
+    attempts, ``expired``/``spent`` ("request a new code"), or ``locked`` with
+    the lockout countdown - precisely as on the patient OTP surface.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await run_idempotent(request, lambda: facade.partner_verify(body.phone, body.otp))
+
+
+@router.post(
+    "/partner/session",
+    response_model=SessionResult,
+    status_code=status.HTTP_200_OK,
+    summary="Issue a partner-scoped session for a registered partner",
+)
+async def issue_partner_session(
+    request: Request,
+    body: IssueSessionRequest,
+) -> Response:
+    """Mint a partner-scoped access JWT for a registered (pre-activation) partner.
+
+    The gap-plan loop needs the partner to submit credentials and read their
+    own pending status immediately after registration. The partner identity is
+    ``[Unverified]`` with no role grant (ADR-0010), so the standard
+    ``POST /v1/auth/session`` (patient-only) always refuses 409
+    ``SESSION_REFUSED``. This endpoint instead gates on the existence of a
+    partner profile and a phone-verified identity for the phone (F014-T04,
+    #464) and mints a ``partner``-scoped JWT (self-service surface only).
+    Identity-state refusals (unknown phone, no partner profile, identity not
+    phone-verified) stay 409 ``SESSION_REFUSED``.
+
+    The partner-profile gate is verified here at the composition boundary (WI-3,
+    #336): the route resolves the identity for the phone through the iam facade,
+    asks the partner facade for that identity's profile (the non-throwing
+    ``resolve_partner_id_by_identity`` seam - no cross-schema import), then hands
+    the already-verified ``partner_id`` to the mint. iam itself never reaches
+    into the partner module, so the two facades construct independently with no
+    post-construction glue. The ``phone_verified`` gate is enforced inside the
+    mint under the identity row lock (the marker read atomically, #464), and the
+    ``require_partner`` RBAC dependency on the partner self-service routes keeps
+    enforcing the minted scope downstream.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
+
+    async def _verify_partner_profile(connection: AsyncConnection, partner_id: int) -> None:
+        """Atomic safety-net re-check of profile existence under the iam row lock (#342).
+
+        The upstream pre-check (this route) is a fast path; between it and the
+        mint a concurrent deletion could remove the profile, which would otherwise
+        mint a partner-scoped token for a now-patient-only phone. Re-run the check
+        against iam's open connection so it is atomic with the mint. The partner
+        facade answers whether the profile still exists; absence becomes the
+        session-refused 409 contract.
+        """
+        exists = await partner_facade.verify_partner_exists(connection, partner_id)
+        if not exists:
+            raise SessionIssuanceError(
+                f"partner profile {partner_id} no longer exists at session mint"
+            )
+
+    async def _issue_verified_partner_session(phone: str) -> SessionResult:
+        identity_id = await facade.resolve_identity_id_by_phone(phone)
+        partner_id = await partner_facade.resolve_partner_id_by_identity(identity_id)
+        if partner_id is None:
+            raise SessionIssuanceError(
+                f"identity {identity_id} has no partner profile; this is a patient-only phone"
+            )
+        return await facade.issue_partner_session(
+            phone, partner_id=partner_id, verify_partner_exists=_verify_partner_profile
+        )
+
+    result = await run_idempotent(request, lambda: _issue_verified_partner_session(body.phone))
     response = Response(
         content=result.model_dump_json(),
         media_type="application/json",
@@ -284,9 +486,40 @@ async def refresh_session(
     existing session. A revoked or expired token is refused with the matching
     error envelope. The rotated JWT is also set as an httpOnly cookie for
     Next.js middleware route protection.
+
+    A ``partner``-scoped renewal re-confirms the partner profile still exists
+    at the composition boundary before re-deriving the scope (F014-T05, #465):
+    the route wires the partner facade seam as the same callback pattern the
+    session mint uses, so iam never reads the partner schema. A deleted profile
+    refuses with the refresh envelope (``REFRESH_TOKEN_REVOKED``).
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
-    result = await facade.refresh_session(body.refresh_token)
+    partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
+
+    async def _verify_partner_profile(connection: AsyncConnection, identity_id: int) -> None:
+        """Re-confirm the identity's partner profile still exists at renewal (#465).
+
+        Runs against iam's lock-held transaction connection, mirroring the mint's
+        atomic re-check (#342): resolves the profile for the identity through the
+        partner facade (composition boundary, no cross-schema import, ADR-0003)
+        and confirms it still exists. Absence or deletion refuses the rotation
+        with the refresh envelope so a now-patient-only phone can never renew a
+        partner-scoped session.
+        """
+        partner_id = await partner_facade.resolve_partner_id_on_connection(connection, identity_id)
+        if partner_id is None:
+            raise RefreshTokenRevokedError(
+                f"identity {identity_id} has no partner profile; refusing to refresh"
+            )
+        exists = await partner_facade.verify_partner_exists(connection, partner_id)
+        if not exists:
+            raise RefreshTokenRevokedError(
+                f"partner profile {partner_id} no longer exists at session renewal"
+            )
+
+    result = await facade.refresh_session(
+        body.refresh_token, verify_partner_profile=_verify_partner_profile
+    )
     response = Response(
         content=result.model_dump_json(),
         media_type="application/json",
@@ -301,82 +534,400 @@ async def refresh_session(
     return response
 
 
-def _error_response(
+@router.get(
+    "/operator/users",
+    response_model=OperatorListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List operators (admin only)",
+)
+async def list_operators(
     request: Request,
-    status_code: int,
-    code: str,
-    message: str,
-    *,
-    details: dict[str, object] | None = None,
-) -> JSONResponse:
-    """One error envelope for every expected iam failure (api-standards §2).
+    admin: Annotated[Principal, Depends(require_admin)],
+) -> OperatorListResponse:
+    """List the operator group for user management (spec #761, #768).
 
-    Records the failure as a structured log line keyed by the same request
-    scoped trace id the envelope carries, so a reported 409/422/502/5xx is
-    reproducible from logs alone (error-handling-observability §3).
+    Admin-only (``require_admin``): the operator role alone is not enough - a
+    non-admin operator, a patient or partner caller, and a token with a missing
+    or unknown tier all receive the shared 403 envelope. Every row carries the
+    masked phone, tier, active state, MFA state, and the identity's creation
+    date; the facade masks the phone before the value leaves the module, so the
+    canonical number is never in the response.
     """
-    trace_id = resolve_trace_id(request)
-    logger.warning("iam_rejection code=%s status=%d trace_id=%s", code, status_code, trace_id)
-    envelope = ErrorEnvelope(
-        code=code,
-        message=message,
-        trace_id=trace_id,
-        details=details if details is not None else {},
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    operators = await facade.list_operators()
+    return OperatorListResponse(operators=operators)
+
+
+@router.post(
+    "/operator/invite",
+    response_model=OperatorInvitedResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="Invite a new operator (admin only)",
+)
+async def invite_operator(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_admin)],
+    body: OperatorInviteRequest,
+) -> OperatorInvitedResult:
+    """Grow the trusted queue-running group (US-22; admin only, spec #761).
+
+    Admin-scoped (``require_admin``): only an admin-tier operator can invite
+    another phone. The invited identity is created ``[Unverified]`` with an
+    ``Active`` ``operator`` role grant, so the invited phone completes MFA at
+    first login. ``tier`` chooses the authority and defaults to the non-admin
+    ``operator`` tier, so privilege is granted deliberately. The requesting
+    admin is recorded as the inviter on the ``operator.invited`` audit event.
+    Duplicate phones resolve to the existing identity (idempotent by phone,
+    plus the edge ``Idempotency-Key``) and never rewrite the existing tier.
+    """
+    invited_by = int(operator.subject_id)
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await run_idempotent(
+        request,
+        lambda: facade.create_operator_account(
+            body.phone, invited_by_identity_id=invited_by, tier=body.tier
+        ),
     )
-    return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
+
+
+@router.patch(
+    "/operator/users/{identity_id}/tier",
+    response_model=OperatorSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Update an operator's tier (admin only)",
+)
+async def update_operator_tier(
+    request: Request,
+    identity_id: int,
+    admin: Annotated[Principal, Depends(require_admin)],
+    body: OperatorTierUpdateRequest,
+) -> OperatorSummary:
+    """Promote or demote an operator (spec #761, #769).
+
+    Admin-only (``require_admin``): only an admin-tier operator can change
+    another operator's tier. Self-demotion is refused. Demoting the last
+    active admin is refused. Every change revokes the operator's active
+    sessions and emits an ``operator.tier_changed`` audit event.
+    """
+    actor_id = int(admin.subject_id)
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.update_operator_tier(identity_id, body.tier, actor_identity_id=actor_id)
+
+
+@router.patch(
+    "/operator/users/{identity_id}/active",
+    response_model=OperatorSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Update an operator's active state (admin only)",
+)
+async def update_operator_active(
+    request: Request,
+    identity_id: int,
+    admin: Annotated[Principal, Depends(require_admin)],
+    body: OperatorActiveUpdateRequest,
+) -> OperatorSummary:
+    """Deactivate or reactivate an operator (spec #761, #769).
+
+    Admin-only (``require_admin``): only an admin-tier operator can change
+    another operator's active state. Self-deactivation is refused.
+    Deactivating the last active admin is refused. Deactivation revokes the
+    operator's active sessions and blocks login; reactivation restores
+    access. Every change emits an ``operator.active_changed`` audit event.
+    """
+    actor_id = int(admin.subject_id)
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.update_operator_active(
+        identity_id, body.is_active, actor_identity_id=actor_id
+    )
+
+
+@router.post(
+    "/operator/login",
+    response_model=SessionResult,
+    status_code=status.HTTP_200_OK,
+    summary="MFA-gated operator login",
+)
+async def operator_login(
+    request: Request,
+    body: OperatorLoginRequest,
+) -> Response:
+    """Log an operator in with the MFA second factor (US-15, S8).
+
+    Accepts the phone and an RFC-6238 TOTP code. A wrong or absent second
+    factor is refused with a 401 ``SESSION_MFA_REQUIRED`` envelope - an
+    operator can never land an operator-scoped session on the phone alone.
+    Identity-state refusals (unknown/not-Active phone, no operator role) stay
+    409 ``SESSION_REFUSED``. On success the operator-scoped JWT is returned and
+    set as the httpOnly session cookie.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    result = await facade.issue_operator_session(body.phone, body.code)
+    response = Response(
+        content=result.model_dump_json(),
+        media_type="application/json",
+        status_code=status.HTTP_200_OK,
+    )
+    _set_jwt_cookie(
+        response,
+        result.jwt,
+        result.expires_in_seconds,
+        secure=_is_secure_cookie(request),
+    )
+    return response
+
+
+@router.post(
+    "/operator/mfa/enroll",
+    response_model=EnrollMfaResult,
+    status_code=status.HTTP_200_OK,
+    summary="Enroll an operator's TOTP MFA factor",
+)
+async def enroll_operator_mfa(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+) -> EnrollMfaResult:
+    """Enroll the authenticated operator's TOTP MFA factor (US-15, P1 #272).
+
+    Operator-scoped (``require_operator``): only an authenticated operator can
+    enroll their own factor. Generates a fresh base32 secret, encrypts it at
+    rest, and returns the plaintext secret + provisioning URI exactly once so
+    the operator can add the factor to an authenticator app. The operator can
+    then complete login with a TOTP code from that factor.
+    """
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await run_idempotent(request, lambda: facade.enroll_mfa(int(operator.subject_id)))
+
+
+_E164_IN_MESSAGE = re.compile(r"\+[0-9]{6,15}")
+
+
+def _redact_phone(message: str) -> str:
+    """Mask any full E.164 phone embedded in a message (security-phii: no PII).
+
+    Belt-and-suspenders defense on the error envelope: the facades already
+    mask phones in their messages (S1, #275), but a message from any other
+    raise site must never surface a complete number to the client. Only the
+    ``+<cc>`` and the last two digits survive.
+    """
+    return _E164_IN_MESSAGE.sub(
+        lambda m: mask_phone(m.group(0)),
+        message,
+    )
+
+
+@operator_profile_router.get(
+    "/profile",
+    response_model=OperatorProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Read the caller's operator profile",
+)
+async def get_operator_profile(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+) -> OperatorProfileView:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    return await facade.get_operator_profile(int(operator.subject_id))
+
+
+@operator_profile_router.put(
+    "/profile",
+    response_model=OperatorProfileView,
+    status_code=status.HTTP_200_OK,
+    summary="Update the caller's operator display name",
+)
+async def update_operator_profile(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    body: OperatorProfileUpdateRequest,
+) -> OperatorProfileView:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    identity_id = int(operator.subject_id)
+    return await run_idempotent(
+        request,
+        lambda: facade.update_operator_profile_name(identity_id, body.name),
+        namespace=f"operator:{identity_id}",
+    )
+
+
+@operator_profile_router.put(
+    "/profile/photo",
+    response_model=OperatorProfilePhotoView,
+    status_code=status.HTTP_200_OK,
+    summary="Upload or replace the caller's operator photo",
+)
+async def upload_operator_profile_photo(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+    file: UploadFile = File(...),  # noqa: B008
+) -> OperatorProfilePhotoView:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    identity_id = int(operator.subject_id)
+    data = await file.read()
+    return await run_idempotent(
+        request,
+        lambda: facade.save_operator_photo(
+            identity_id=identity_id, data=data, media_type=file.content_type
+        ),
+        namespace=f"operator:{identity_id}",
+    )
+
+
+@operator_profile_router.get(
+    "/profile/photo",
+    status_code=status.HTTP_200_OK,
+    summary="Stream the caller's operator photo",
+)
+async def get_operator_profile_photo(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+) -> Response:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    photo = await facade.get_operator_photo(identity_id=int(operator.subject_id))
+    return Response(
+        content=photo.data,
+        media_type=photo.media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@operator_profile_router.delete(
+    "/profile/photo",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove the caller's operator photo",
+)
+async def delete_operator_profile_photo(
+    request: Request,
+    operator: Annotated[Principal, Depends(require_operator)],
+) -> Response:
+    facade = cast(IamFacade, request.app.state.iam_facade)
+    identity_id = int(operator.subject_id)
+    await run_idempotent(
+        request,
+        lambda: facade.delete_operator_photo(identity_id=identity_id),
+        namespace=f"operator:{identity_id}",
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def register_error_handlers(app: FastAPI) -> None:
-    """Attach the MOD-001 error envelope to every expected iam failure."""
+    """Attach the MOD-001 error envelope to every expected iam failure.
+
+    Two buckets, never mixed (error-handling-observability A1): ``iam_rejection``
+    is the client/policy class - a bad phone, a refused session, a rejected
+    photo - and ``iam_upstream_failure`` is the third-party/degradation class,
+    used by the two 502s where an external dependency (the SMS provider, the
+    profile-media store) is what failed. Same envelope and status either way;
+    only the log label tells an operator which one to page on.
+    """
 
     async def _invalid_phone(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request, status.HTTP_422_UNPROCESSABLE_CONTENT, "PHONE_INVALID", str(exc)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "PHONE_INVALID",
+            _redact_phone(str(exc)),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _sms_failed(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request, status.HTTP_502_BAD_GATEWAY, "SMS_DELIVERY_FAILED", str(exc)
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "SMS_DELIVERY_FAILED",
+            _redact_phone(str(exc)),
+            log_tag="iam_upstream_failure",
+            request=request,
         )
 
     async def _session_refused(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_409_CONFLICT,
             "SESSION_REFUSED",
+            _redact_phone(str(exc)),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _operator_mfa_failed(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_401_UNAUTHORIZED,
+            "SESSION_MFA_REQUIRED",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _invalid_operator_code(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_401_UNAUTHORIZED,
+            "INVALID_OPERATOR_CODE",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _operator_mfa_locked(request: Request, exc: Exception) -> JSONResponse:
+        locked = cast(OperatorMfaLockedError, exc)
+        return error_response(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "OPERATOR_MFA_LOCKED",
+            "operator login is locked after too many MFA failures",
+            headers={"Retry-After": str(locked.remaining_seconds)},
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _operator_self_change(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "OPERATOR_SELF_CHANGE",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _operator_last_admin(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "OPERATOR_LAST_ADMIN",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _refresh_token_unknown(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_401_UNAUTHORIZED,
             "REFRESH_TOKEN_UNKNOWN",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _refresh_token_expired(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_401_UNAUTHORIZED,
             "REFRESH_TOKEN_EXPIRED",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _refresh_token_revoked(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_401_UNAUTHORIZED,
             "REFRESH_TOKEN_REVOKED",
             str(exc),
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _iam_failed(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "IAM_INTERNAL",
             "Internal identity error",
+            log_tag="iam_rejection",
+            request=request,
         )
 
     async def _validation_failed(request: Request, exc: Exception) -> JSONResponse:
@@ -390,19 +941,107 @@ def register_error_handlers(app: FastAPI) -> None:
                 for error in validation_errors
             ]
         }
-        return _error_response(
-            request,
+        return error_response(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "VALIDATION_ERROR",
             "Request validation failed",
+            log_tag="iam_rejection",
+            request=request,
             details=details,
+        )
+
+    async def _profile_photo_invalid(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "PROFILE_PHOTO_INVALID",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _profile_not_set(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "PROFILE_NOT_SET",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _photo_transfer_failed(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "PROFILE_PHOTO_TRANSFER_FAILED",
+            str(exc),
+            log_tag="iam_upstream_failure",
+            request=request,
+        )
+
+    async def _op_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "OPERATOR_PROFILE_NOT_FOUND",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _op_photo_not_found(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_404_NOT_FOUND,
+            "OPERATOR_PROFILE_PHOTO_NOT_FOUND",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _op_photo_invalid(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "OPERATOR_PROFILE_PHOTO_INVALID",
+            str(exc),
+            log_tag="iam_rejection",
+            request=request,
+        )
+
+    async def _op_photo_transfer_failed(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "OPERATOR_PROFILE_PHOTO_TRANSFER_FAILED",
+            str(exc),
+            log_tag="iam_upstream_failure",
+            request=request,
+        )
+
+    async def _op_photo_store_unavailable(request: Request, exc: Exception) -> JSONResponse:
+        return error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "OPERATOR_PROFILE_PHOTO_STORE_UNAVAILABLE",
+            str(exc),
+            log_tag="iam_upstream_failure",
+            request=request,
         )
 
     app.add_exception_handler(InvalidPhoneError, _invalid_phone)
     app.add_exception_handler(SmsDeliveryError, _sms_failed)
     app.add_exception_handler(SessionIssuanceError, _session_refused)
+    app.add_exception_handler(OperatorMfaError, _operator_mfa_failed)
+    app.add_exception_handler(OperatorMfaLockedError, _operator_mfa_locked)
+    app.add_exception_handler(InvalidOperatorCodeError, _invalid_operator_code)
+    app.add_exception_handler(OperatorSelfChangeError, _operator_self_change)
+    app.add_exception_handler(OperatorLastAdminError, _operator_last_admin)
     app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
     app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
     app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)
+    app.add_exception_handler(OperatorProfileNotFoundError, _op_profile_not_found)
+    app.add_exception_handler(OperatorProfilePhotoNotFoundError, _op_photo_not_found)
+    app.add_exception_handler(OperatorProfilePhotoValidationError, _op_photo_invalid)
+    app.add_exception_handler(OperatorProfilePhotoTransferError, _op_photo_transfer_failed)
+    app.add_exception_handler(
+        OperatorProfilePhotoStoreUnavailableError, _op_photo_store_unavailable
+    )
+    app.add_exception_handler(ProfilePhotoValidationError, _profile_photo_invalid)
+    app.add_exception_handler(PatientProfileNotSetError, _profile_not_set)
+    app.add_exception_handler(ProfilePhotoTransferError, _photo_transfer_failed)
     app.add_exception_handler(IamError, _iam_failed)
     app.add_exception_handler(RequestValidationError, _validation_failed)
