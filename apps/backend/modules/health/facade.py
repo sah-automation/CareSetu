@@ -28,14 +28,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 # Type-only import to avoid circular dependency at runtime
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, func, not_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
-from typing import Protocol
 
 from app.config import Settings
 from app.db import AsyncEngineLike

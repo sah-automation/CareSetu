@@ -431,11 +431,10 @@ describe("splitMobileTabs", () => {
     ]);
   });
 
-  // Operator nav now has 9 observability leaf destinations (business, product,
-  // usage, reliability, health, cost, quality, security, evals) each with
-  // mobileOverflow: true, plus settings/profile in the regular list. Capacity
-  // is 5 (TABBAR_MAX_DESTINATIONS, no center item), so the first 5 regular
-  // items stay on the bar and the rest go to overflow.
+  // Operator nav: 4 Work items (home, verifications, disputes, audit) fit on the
+  // bar (capacity 5, no center). The 9 observability metrics have mobileOverflow
+  // so they pin to More; settings and profile are regular items but fall after
+  // the capacity, so they also go to More.
   it("pins observability metrics and excess regular items into More", () => {
     const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.operator);
 
@@ -444,7 +443,6 @@ describe("splitMobileTabs", () => {
       "verifications",
       "disputes",
       "audit",
-      "settings",
     ]);
     expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
     expect(hasMore).toBe(true);
@@ -458,6 +456,7 @@ describe("splitMobileTabs", () => {
       "quality",
       "security",
       "evals",
+      "settings",
       "profile",
     ]);
   });

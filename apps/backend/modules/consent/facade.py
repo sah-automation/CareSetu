@@ -32,14 +32,12 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
-from typing import Protocol
 
 from app.config import Settings
 from app.db import AsyncEngineLike
