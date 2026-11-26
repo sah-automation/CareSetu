@@ -27,6 +27,9 @@ class DirectoryEntry(BaseModel):
     ``experience_years``, ``languages``, ``address_line``, and ``city`` from
     the doctor's declared profile band so the card can render real data
     instead of placeholders.
+
+    Never exposed: artifact refs (photo and credential bytes stay in private
+    object storage, ADR-0020).
     """
 
     partner_id: int
@@ -37,7 +40,6 @@ class DirectoryEntry(BaseModel):
     distance_km: float
     verified: bool
     consultation_fee: int | None = None
-    photo_ref: str | None = None
     # --- #964: directory card widening ---------------------------------------
     clinic_name: str | None = None
     experience_years: int | None = None
@@ -135,7 +137,6 @@ class ProviderProfileView(BaseModel):
     verified: bool
     credentials: list[ProviderCredential]
     consultation_fee: int | None = None
-    photo_ref: str | None = None
     # --- the declared band (#613) -------------------------------------------
     # The building the practice is in, distinct from ``practice_name`` which is
     # the doctor's own name and the only patient-searchable name.

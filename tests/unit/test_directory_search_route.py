@@ -123,7 +123,6 @@ def test_search_answers_typed_view_with_items() -> None:
                 "distance_km": 1.2,
                 "verified": True,
                 "consultation_fee": 50000,
-                "photo_ref": None,
                 # #964: directory card widening fields with defaults.
                 "clinic_name": None,
                 "experience_years": None,
