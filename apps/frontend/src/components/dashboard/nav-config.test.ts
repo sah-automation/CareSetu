@@ -431,11 +431,12 @@ describe("splitMobileTabs", () => {
     ]);
   });
 
-  // #746: a disclosure parent (an item carrying `children`) is not a flat tab -
-  // a tab column cannot expand a group - so the pinned-overflow rule sends it
-  // into the More sheet. The operator bar keeps the four Work destinations plus
-  // More; the parent and its nine sub-destinations live in the sheet.
-  it("pins the operator's disclosure parent into More (#746)", () => {
+  // Operator nav now has 9 observability leaf destinations (business, product,
+  // usage, reliability, health, cost, quality, security, evals) each with
+  // mobileOverflow: true, plus settings/profile in the regular list. Capacity
+  // is 5 (TABBAR_MAX_DESTINATIONS, no center item), so the first 5 regular
+  // items stay on the bar and the rest go to overflow.
+  it("pins observability metrics and excess regular items into More", () => {
     const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.operator);
 
     expect(tabs.map((item) => item.key)).toEqual([
@@ -443,10 +444,22 @@ describe("splitMobileTabs", () => {
       "verifications",
       "disputes",
       "audit",
+      "settings",
     ]);
     expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
     expect(hasMore).toBe(true);
-    expect(overflow.map((item) => item.key)).toEqual(["observability"]);
+    expect(overflow.map((item) => item.key)).toEqual([
+      "business",
+      "product",
+      "usage",
+      "reliability",
+      "health",
+      "cost",
+      "quality",
+      "security",
+      "evals",
+      "profile",
+    ]);
   });
 
   it("keeps the first five destinations visible and pushes the rest into More", () => {
