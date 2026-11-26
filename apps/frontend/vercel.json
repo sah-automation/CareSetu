@@ -56,6 +56,6 @@
     }
   ],
   "installCommand": "npm ci --prefix ..",
-  "buildCommand": "npm run build --prefix apps/frontend",
+  "buildCommand": "npm run build --prefix ..",
   "framework": "nextjs"
 }
