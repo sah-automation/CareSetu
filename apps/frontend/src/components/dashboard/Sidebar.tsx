@@ -66,6 +66,14 @@ import {
 import type { NavItemDef, SidebarSection } from "./nav-config";
 import type { Role } from "./types";
 
+function useAuthOrNull() {
+  try {
+    return useAuth();
+  } catch {
+    return null;
+  }
+}
+
 interface SidebarProps {
   role: Role;
   collapsed: boolean;

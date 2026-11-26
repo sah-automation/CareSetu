@@ -11,6 +11,7 @@
 
 import type { ComponentType } from "react";
 import {
+  Activity,
   BadgeCheck,
   BarChart3,
   Boxes,
@@ -23,6 +24,7 @@ import {
   History,
   Home,
   Inbox,
+  LayoutDashboard,
   Mic,
   Package,
   Scale,

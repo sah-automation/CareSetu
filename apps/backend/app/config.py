@@ -1452,6 +1452,22 @@ def _env_decimal(name: str, default: Decimal) -> Decimal:
         raise ValueError(f"{name} must be a decimal number; got {raw!r}") from exc
 
 
+def _env_decimal(name: str, default: Decimal) -> Decimal:
+    """Parse a decimal environment variable, falling back to ``default``.
+
+    Decimal rather than float because the thresholds that use it are RATIOS
+    compared for equality against a rolled figure: a float would carry a
+    binary approximation into a comparison the operator reads as exact.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return Decimal(raw.strip())
+    except InvalidOperation as exc:
+        raise ValueError(f"{name} must be a decimal number; got {raw!r}") from exc
+
+
 def _env_csv(name: str) -> tuple[str, ...]:
     """Parse a comma-separated environment variable into trimmed entries.
 

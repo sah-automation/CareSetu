@@ -431,6 +431,24 @@ describe("splitMobileTabs", () => {
     ]);
   });
 
+  // #746: a disclosure parent (an item carrying `children`) is not a flat tab -
+  // a tab column cannot expand a group - so the pinned-overflow rule sends it
+  // into the More sheet. The operator bar keeps the four Work destinations plus
+  // More; the parent and its nine sub-destinations live in the sheet.
+  it("pins the operator's disclosure parent into More (#746)", () => {
+    const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.operator);
+
+    expect(tabs.map((item) => item.key)).toEqual([
+      "home",
+      "verifications",
+      "disputes",
+      "audit",
+    ]);
+    expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
+    expect(hasMore).toBe(true);
+    expect(overflow.map((item) => item.key)).toEqual(["observability"]);
+  });
+
   it("keeps the first five destinations visible and pushes the rest into More", () => {
     const synthetic: NavItemDef[] = Array.from({ length: 7 }, (_, i) => ({
       key: `dest-${i}`,
