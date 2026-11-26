@@ -1,15 +1,15 @@
 """MOD-001: HTTP adapters for the iam module (PHASE-2 T3/T4/T5, tickets #54, #55, #56).
 
-Endpoints are thin adapters (api-standards §1): parse the typed request, call
+Endpoints are thin adapters (api-standards A1): parse the typed request, call
 the module facade, return the typed result. Every expected failure answers the
-shared error envelope at the top level (api-standards §2): a stable
+shared error envelope at the top level (api-standards A2): a stable
 ``SCREAMING_SNAKE`` code, a human-safe message, a trace id, and details.
 ``register_error_handlers`` maps iam domain errors to that envelope; the route
 itself carries no business logic. The auth routes sit behind the gateway
 middleware stack in ``app.main`` - the rate-limit policy for the OTP/auth
 surface is a Phase 2 gateway ticket. The register/verify/resend/session
 mutations honour the edge's ``Idempotency-Key`` contract
-(api-standards §5, PHASE-2 REM T11, #80) via ``run_idempotent``: a duplicate
+(api-standards A5, PHASE-2 REM T11, #80) via ``run_idempotent``: a duplicate
 key replays the stored result instead of re-executing.
 """
 
@@ -247,7 +247,7 @@ async def register_patient(
     PWA drives (is-existing notice, countdown, resend cooldown, attempts
     left). An existing phone inside the resend cooldown, the brute-force
     lockout, or Suspended is refused with the matching outcome and no code is
-    sent (spec #51 §2.4).
+    sent (spec #51 A2.4).
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
     return await run_idempotent(request, lambda: facade.register_patient(body.phone))
@@ -355,7 +355,7 @@ async def partner_login(
     hands it to ``partner_login`` - iam itself never reaches into the partner
     module (no cross-schema import, ADR-0003). The challenge issuance reuses
     the shared OTP machine unchanged and registers no new event name
-    (ADR-0016 §Events): only ``otp.sent``.
+    (ADR-0016 AEvents): only ``otp.sent``.
     """
     facade = cast(IamFacade, request.app.state.iam_facade)
     partner_facade = cast("PartnerFacade", request.app.state.partner_facade)
@@ -812,7 +812,7 @@ async def delete_operator_profile_photo(
 def register_error_handlers(app: FastAPI) -> None:
     """Attach the MOD-001 error envelope to every expected iam failure.
 
-    Two buckets, never mixed (error-handling-observability §1): ``iam_rejection``
+    Two buckets, never mixed (error-handling-observability A1): ``iam_rejection``
     is the client/policy class - a bad phone, a refused session, a rejected
     photo - and ``iam_upstream_failure`` is the third-party/degradation class,
     used by the two 502s where an external dependency (the SMS provider, the
@@ -977,18 +977,6 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
-    app.add_exception_handler(InvalidPhoneError, _invalid_phone)
-    app.add_exception_handler(SmsDeliveryError, _sms_failed)
-    app.add_exception_handler(SessionIssuanceError, _session_refused)
-    app.add_exception_handler(OperatorMfaError, _operator_mfa_failed)
-    app.add_exception_handler(OperatorMfaLockedError, _operator_mfa_locked)
-    app.add_exception_handler(InvalidOperatorCodeError, _invalid_operator_code)
-    app.add_exception_handler(OperatorSelfChangeError, _operator_self_change)
-    app.add_exception_handler(OperatorLastAdminError, _operator_last_admin)
-    app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
-    app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
-    app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)
-
     async def _op_profile_not_found(request: Request, exc: Exception) -> JSONResponse:
         return error_response(
             status.HTTP_404_NOT_FOUND,
@@ -1034,6 +1022,17 @@ def register_error_handlers(app: FastAPI) -> None:
             request=request,
         )
 
+    app.add_exception_handler(InvalidPhoneError, _invalid_phone)
+    app.add_exception_handler(SmsDeliveryError, _sms_failed)
+    app.add_exception_handler(SessionIssuanceError, _session_refused)
+    app.add_exception_handler(OperatorMfaError, _operator_mfa_failed)
+    app.add_exception_handler(OperatorMfaLockedError, _operator_mfa_locked)
+    app.add_exception_handler(InvalidOperatorCodeError, _invalid_operator_code)
+    app.add_exception_handler(OperatorSelfChangeError, _operator_self_change)
+    app.add_exception_handler(OperatorLastAdminError, _operator_last_admin)
+    app.add_exception_handler(RefreshTokenUnknownError, _refresh_token_unknown)
+    app.add_exception_handler(RefreshTokenExpiredError, _refresh_token_expired)
+    app.add_exception_handler(RefreshTokenRevokedError, _refresh_token_revoked)
     app.add_exception_handler(OperatorProfileNotFoundError, _op_profile_not_found)
     app.add_exception_handler(OperatorProfilePhotoNotFoundError, _op_photo_not_found)
     app.add_exception_handler(OperatorProfilePhotoValidationError, _op_photo_invalid)
