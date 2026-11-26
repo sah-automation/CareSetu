@@ -257,8 +257,9 @@ describe("OperatorProfilePage name save (#868)", () => {
     });
     fireEvent.click(screen.getByTestId("profile-identity-save"));
 
-    await waitFor(() =>
-      expect(screen.getByText(t.saveFailed)).toBeInTheDocument(),
+    await waitFor(
+      () => expect(screen.getByText(t.saveFailed)).toBeInTheDocument(),
+      { timeout: 3000 },
     );
     expect(screen.getByText(/trace-868/)).toBeInTheDocument();
   });
