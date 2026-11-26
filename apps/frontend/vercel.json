@@ -55,6 +55,7 @@
       ]
     }
   ],
-  "installCommand": "npm ci",
-  "buildCommand": "next build"
+  "installCommand": "cd .. && npm ci",
+  "buildCommand": "cd apps/frontend && next build",
+  "framework": "nextjs"
 }
