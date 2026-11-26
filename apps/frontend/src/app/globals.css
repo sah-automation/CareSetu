@@ -5,6 +5,12 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    /* Anchor nav (Doctors/Labs/Chemists, #how-it-works) scrolls smoothly;
+       the reduced-motion floor below forces it back to auto. */
+    scroll-behavior: smooth;
+  }
+
   body {
     font-family: var(--font-stack);
     line-height: 1.625; /* >= 1.6 for Devanagari matras, both locales */
@@ -42,5 +48,348 @@
       transition-duration: 0.01ms !important;
       scroll-behavior: auto !important;
     }
+  }
+}
+
+/* ==========================================================================
+   Homepage v2 (#961) - styles transcribed from
+   prototype/phase-2-6/homepage-resolved-v2.html so the shipped page matches
+   the binding prototype. All palette references are tokens.css variables; the
+   few one-off decorative hexes (#14b8a6, #ccfbf1, #5eead4, #0d9488) are
+   prototype-approved accents that are not brand tokens. Brand hexes stay in
+   tokens.css only (design-tokens gate).
+   ========================================================================== */
+
+/* Header wordmark tile: one-off decorative gradient behind the white mark. */
+.home-brand-tile {
+  background: linear-gradient(
+    145deg,
+    #14b8a6 0%,
+    var(--accent) 55%,
+    var(--accent-strong) 100%
+  );
+  color: var(--on-accent);
+  box-shadow:
+    0 4px 10px -3px rgba(15, 118, 110, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+/* Hero backdrop: teal wash top-left, warm hint top-right, soft fade down. */
+.home-hero-bg {
+  position: relative;
+  overflow: hidden;
+  background: radial-gradient(
+      56rem 28rem at 12% -10%,
+      rgba(15, 118, 110, 0.14),
+      transparent 60%
+    ),
+    radial-gradient(
+      44rem 24rem at 88% 0%,
+      rgba(234, 88, 12, 0.09),
+      transparent 55%
+    ),
+    linear-gradient(180deg, var(--accent-soft) 0%, var(--page-bg) 100%);
+}
+
+/* Eyebrow's success dot with its soft ring. */
+.home-hero-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18);
+}
+
+/* Clamp scales: `text-[clamp(...)]` fails the colour gate (not a length), so
+   the prototype's three clamped headings live here as classes. */
+.home-h1 {
+  max-width: 19ch;
+  font-size: clamp(2.1rem, 4.6vw, 3.35rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.12;
+}
+
+.home-h2 {
+  font-size: clamp(1.4rem, 2.4vw, 1.75rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.home-cta-h2 {
+  position: relative;
+  max-width: 22ch;
+  margin-inline: auto;
+  font-size: clamp(1.6rem, 3vw, 2.15rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.home-trust-h2 {
+  max-width: 26ch;
+  margin-inline: auto;
+  font-size: clamp(1.3rem, 2.2vw, 1.6rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+/* Search card: segmented pill-in-card with a native GET submit. */
+.home-search-card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 18px;
+  padding: 0.5rem;
+  box-shadow:
+    0 18px 50px -20px rgba(2, 6, 23, 0.25),
+    0 2px 6px rgba(2, 6, 23, 0.05);
+}
+
+.home-search-seg {
+  flex: 1;
+  min-width: 0;
+  padding: 0.55rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.home-search-seg + .home-search-seg {
+  border-inline-start: 1px solid var(--hairline-soft);
+}
+
+.home-search-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--txt-muted);
+  margin-bottom: 0.15rem;
+}
+
+.home-search-control {
+  border: 0;
+  outline: none;
+  background: transparent;
+  padding: 0;
+  font-size: 0.975rem;
+  font-weight: 500;
+  color: var(--txt);
+  width: 100%;
+}
+
+.home-search-control::placeholder {
+  color: var(--txt-muted);
+  font-weight: 400;
+}
+
+.home-search-seg:focus-within {
+  background: linear-gradient(180deg, transparent, rgba(15, 118, 110, 0.05));
+  border-radius: 12px;
+}
+
+.home-search-submit {
+  border: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 13px;
+  padding-inline: 1.6rem;
+  min-height: 48px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  font-size: 0.975rem;
+  box-shadow: 0 6px 16px -6px rgba(15, 118, 110, 0.5);
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.home-search-submit:hover {
+  background: var(--accent-strong);
+}
+
+.home-search-submit:active {
+  transform: translateY(1px);
+}
+
+.home-search-submit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Specialty tiles: tinted entry cards that lift on hover. */
+.home-spec-tile {
+  text-decoration: none;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: 16px;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.home-spec-tile:hover {
+  transform: translateY(-3px);
+  background: #ccfbf1; /* prototype hover tint (decorative, not a token) */
+  border-color: #5eead4; /* prototype hover border (decorative, not a token) */
+  box-shadow: 0 14px 30px -16px rgba(2, 6, 23, 0.22);
+}
+
+.home-spec-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Category tiles: white cards with a faint teal wash that scales on hover. */
+.home-cat-tile {
+  position: relative;
+  overflow: hidden;
+  text-decoration: none;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.home-cat-tile::after {
+  content: "";
+  position: absolute;
+  inset: auto -30% -55% auto;
+  width: 220px;
+  height: 220px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(15, 118, 110, 0.08),
+    transparent 70%
+  );
+  transition: transform 0.25s ease;
+}
+
+.home-cat-tile:hover {
+  transform: translateY(-4px);
+  border-color: var(--accent-border);
+  box-shadow: 0 18px 40px -18px rgba(2, 6, 23, 0.25);
+}
+
+.home-cat-tile:hover::after {
+  transform: scale(1.25);
+}
+
+.home-cat-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Trust panel: teal-to-white wash inside the accent border. */
+.home-trust-panel {
+  background: linear-gradient(180deg, var(--accent-soft), var(--surface));
+  border: 1px solid var(--accent-border);
+}
+
+/* How-it-works featured middle card: teal gradient, white text. */
+.home-how-featured {
+  background: linear-gradient(155deg, var(--accent-strong), var(--accent));
+  border-color: transparent;
+  color: var(--on-accent);
+}
+
+.home-how-featured strong {
+  color: var(--on-accent);
+}
+
+.home-how-featured-body {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* Final CTA: teal gradient panel with two soft decorative circles. */
+.home-cta-panel {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(
+    135deg,
+    var(--accent-strong) 0%,
+    var(--accent) 55%,
+    #0d9488 100% /* prototype end stop (decorative, not a token) */
+  );
+}
+
+.home-cta-panel::before,
+.home-cta-panel::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.home-cta-panel::before {
+  width: 340px;
+  height: 340px;
+  top: -160px;
+  right: -80px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.home-cta-panel::after {
+  width: 260px;
+  height: 260px;
+  bottom: -140px;
+  left: -60px;
+  background: rgba(234, 88, 12, 0.18);
+}
+
+/* Content sits above the decorative circles. */
+.home-cta-panel h2,
+.home-cta-panel > div {
+  position: relative;
+}
+
+/* Scroll reveal (prototype motion): hidden until the observer marks .in.
+   Two escapes keep content reachable without JS motion support. */
+.reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition:
+    opacity 0.5s ease,
+    transform 0.5s ease;
+}
+
+.reveal.in {
+  opacity: 1;
+  transform: none;
+}
+
+@media (scripting: none) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}
+
+/* Mobile: search card stacks with hairline separators between segments. */
+@media (max-width: 767px) {
+  .home-search-seg + .home-search-seg {
+    border-inline-start: 0;
+    border-top: 1px solid var(--hairline-soft);
+  }
+
+  .home-search-submit {
+    min-height: 50px;
+    margin-top: 0.35rem;
   }
 }

@@ -135,7 +135,16 @@ def _facade(
     )
 
 
-def _entry_row(*, partner_id: int, locality: Any = None) -> _Row:
+def _entry_row(
+    *,
+    partner_id: int,
+    locality: Any = None,
+    clinic_name: str | None = None,
+    experience_years: int | None = None,
+    languages: list[str] | None = None,
+    address_line: str | None = None,
+    city: str | None = None,
+) -> _Row:
     return _Row(
         partner_id=partner_id,
         practice_name=f"Practice {partner_id}",
@@ -149,6 +158,12 @@ def _entry_row(*, partner_id: int, locality: Any = None) -> _Row:
         # vocabulary row.
         declared_locality=locality,
         distance_km=3.5,
+        # #964: directory card widening fields from partner_profiles.
+        clinic_name=clinic_name,
+        experience_years=experience_years,
+        languages=languages or [],
+        address_line=address_line,
+        address_city=city,
     )
 
 
@@ -169,6 +184,12 @@ def _cached_entry(partner_id: int) -> dict[str, Any]:
         "area": "DALTONGANJ",
         "distance_km": 3.5,
         "verified": True,
+        # #964: directory card widening fields - cache stores full DirectoryEntry.
+        "clinic_name": None,
+        "experience_years": None,
+        "languages": [],
+        "address_line": None,
+        "city": None,
     }
 
 
@@ -205,6 +226,54 @@ async def test_search_directory_projects_rows_with_the_declared_locality() -> No
     outbox = _inserts(connection)
     assert len(outbox) == 1
     assert outbox[0].table.name == "partner_outbox"
+
+
+@pytest.mark.asyncio
+async def test_search_directory_projects_directory_card_widening_fields() -> None:
+    """#964: search projects clinic_name, experience_years, languages, address_line, city."""
+    connection = _connection(
+        [
+            _FakeResult(
+                rows=[
+                    _entry_row(
+                        partner_id=1,
+                        clinic_name="Shanti Clinic",
+                        experience_years=20,
+                        languages=["Hindi", "English"],
+                        address_line="12, Nehru Road",
+                        city="Daltonganj",
+                    ),
+                    _entry_row(
+                        partner_id=2,
+                        clinic_name=None,
+                        experience_years=None,
+                        languages=[],
+                        address_line=None,
+                        city=None,
+                    ),
+                ]
+            ),
+            _FakeResult(),  # directory.search analytics outbox write
+        ]
+    )
+    facade = _facade(connection)
+
+    view = await facade.search_directory()
+
+    assert view.fell_back is False
+    first, second = view.items
+    # Partner 1 has all widening fields declared.
+    assert first.clinic_name == "Shanti Clinic"
+    assert first.experience_years == 20
+    assert first.languages == ["Hindi", "English"]
+    assert first.address_line == "12, Nehru Road"
+    assert first.city == "Daltonganj"
+    # Partner 2 has none declared - nullable fields are None, list fields empty.
+    assert second.clinic_name is None
+    assert second.experience_years is None
+    assert second.languages == []
+    assert second.address_line is None
+    assert second.city is None
 
 
 @pytest.mark.asyncio

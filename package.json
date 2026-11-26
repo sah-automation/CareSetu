@@ -11,6 +11,7 @@
     "minimatch": "^11.0.4"
   },
   "scripts": {
+    "dev": "npm run dev -w @caresetu/frontend",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "npm run test:unit:backend && npm run test:unit:frontend",
     "test:unit:backend": "node scripts/py.cjs -m pytest -c apps/backend/pyproject.toml tests/unit -q",

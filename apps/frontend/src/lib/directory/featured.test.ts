@@ -4,6 +4,10 @@
 // `consultType`. Every returned row is verified by construction (ADR-0011),
 // so the mapping carries `area` through without filtering on `entry.verified`
 // - no invented strings.
+//
+// #965: the widened `DirectoryEntry` fields (clinic_name, experience_years,
+// languages, address_line, city) ride the mapping through so the homepage
+// card can render the full prototype anatomy from real payload data.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +23,11 @@ function directoryRow(overrides: Record<string, unknown> = {}) {
     distance_km: 1.2,
     verified: true,
     consultation_fee: null,
+    clinic_name: null,
+    experience_years: null,
+    languages: [],
+    address_line: null,
+    city: null,
     ...overrides,
   };
 }
@@ -58,12 +67,28 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         name: "Dr. A. Kumar",
         specialty: "General Physician",
         area: "Medininagar Rd",
+        distance_km: 1.2,
+        consultation_fee: null,
+        photo_ref: null,
+        clinic_name: null,
+        experience_years: null,
+        languages: [],
+        address_line: null,
+        city: null,
       },
       {
         id: 2,
         name: "Dr. A. Kumar",
         specialty: null,
         area: null,
+        distance_km: 1.2,
+        consultation_fee: null,
+        photo_ref: null,
+        clinic_name: null,
+        experience_years: null,
+        languages: [],
+        address_line: null,
+        city: null,
       },
     ]);
 
@@ -92,6 +117,14 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         name: "CareSetu provider",
         specialty: "General Physician",
         area: null,
+        distance_km: 1.2,
+        consultation_fee: null,
+        photo_ref: null,
+        clinic_name: null,
+        experience_years: null,
+        languages: [],
+        address_line: null,
+        city: null,
       },
     ]);
   });
@@ -113,6 +146,51 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
         name: "Dr. A. Kumar",
         specialty: "General Physician",
         area: "Medininagar Rd",
+        distance_km: 1.2,
+        consultation_fee: null,
+        photo_ref: null,
+        clinic_name: null,
+        experience_years: null,
+        languages: [],
+        address_line: null,
+        city: null,
+      },
+    ]);
+  });
+
+  it("carries the widened #965 fields through for the full card anatomy", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          fell_back: false,
+          items: [
+            directoryRow({
+              clinic_name: "City General Clinic",
+              experience_years: 12,
+              languages: ["Hindi", "English"],
+              address_line: "Medininagar Road",
+              city: "Daltonganj",
+            }),
+          ],
+        }),
+      ),
+    );
+
+    await expect(fetchFeaturedDoctors()).resolves.toEqual([
+      {
+        id: 1,
+        name: "Dr. A. Kumar",
+        specialty: "General Physician",
+        area: null,
+        distance_km: 1.2,
+        consultation_fee: null,
+        photo_ref: null,
+        clinic_name: "City General Clinic",
+        experience_years: 12,
+        languages: ["Hindi", "English"],
+        address_line: "Medininagar Road",
+        city: "Daltonganj",
       },
     ]);
   });
@@ -148,5 +226,59 @@ describe("fetchFeaturedDoctors (T05b - real search API wiring)", () => {
     await expect(fetchFeaturedDoctors()).rejects.toMatchObject({
       code: "NETWORK_ERROR",
     });
+  });
+});
+
+describe("fetchFeaturedDoctors (#962 - photo + featured slice)", () => {
+  it("passes the search payload photo_ref straight through", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          fell_back: false,
+          items: [
+            directoryRow({ partner_id: 1, photo_ref: "doctor/1/photo.jpg" }),
+            directoryRow({ partner_id: 2, photo_ref: null }),
+          ],
+        }),
+      ),
+    );
+
+    const cards = await fetchFeaturedDoctors();
+    expect(cards[0].photo_ref).toBe("doctor/1/photo.jpg");
+    // A null ref rides through as null (never invented) so the card can
+    // fall back to its initials avatar.
+    expect(cards[1].photo_ref).toBeNull();
+  });
+
+  it("caps the featured slice at the nearest 8, preserving search order", async () => {
+    const items = Array.from({ length: 12 }, (_, index) =>
+      directoryRow({
+        partner_id: index + 1,
+        distance_km: (index + 1) * 0.5,
+      }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ fell_back: false, items })),
+    );
+
+    const cards = await fetchFeaturedDoctors();
+    // The API already answers nearest-first (`distance_km asc`), so the cap
+    // keeps the eight closest doctors and "View all doctors" covers the rest.
+    expect(cards).toHaveLength(8);
+    expect(cards.map((card) => card.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("returns every row when the directory is already within the cap", async () => {
+    const items = Array.from({ length: 8 }, (_, index) =>
+      directoryRow({ partner_id: index + 1 }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ fell_back: false, items })),
+    );
+
+    await expect(fetchFeaturedDoctors()).resolves.toHaveLength(8);
   });
 });

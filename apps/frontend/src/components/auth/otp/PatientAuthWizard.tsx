@@ -75,55 +75,63 @@ function PhoneStep({ flow }: { flow: OtpFlow }) {
     state.phone.replace(/^\+91/, ""),
   );
   return (
-    <section className={stylesB.section}>
-      <h1 className={stylesB.title}>{t.verify}</h1>
-      <ul className={stylesB.props}>
-        <li>
-          <span className={stylesB.propIcon}>
-            <IconShield size={16} />
-          </span>
-          {t.valueProps[0]}
-        </li>
-        <li>
-          <span className={stylesB.propIcon}>
-            <IconHeart size={16} />
-          </span>
-          {t.valueProps[1]}
-        </li>
-        <li>
-          <span className={stylesB.propIcon}>
-            <IconPhone size={16} />
-          </span>
-          {t.valueProps[2]}
-        </li>
-      </ul>
-      <div className={stylesB.field}>
-        <FieldLabel>{t.phoneLabel}</FieldLabel>
-        <PhoneInput
-          value={phoneDraft}
-          onChange={setPhoneDraft}
-          placeholder={t.phonePlaceholder}
-        />
-      </div>
-      <NoticeMessage message={state.lastNotice} />
-      <ErrorMessage message={state.lastError} />
-      {state.cooldownRemaining > 0 && state.challenge !== "locked" && (
-        <p className={stylesB.attempts}>
-          {t.resendIn(state.cooldownRemaining)}
-        </p>
-      )}
-      {state.challenge === "locked" && (
-        <p className={stylesB.attempts}>
-          {t.lockout(Math.ceil(state.lockoutRemaining / 60))}
-        </p>
-      )}
-      <PrimaryButton
-        onClick={() => flow.submitPhone(phoneDraft)}
-        disabled={state.busy || state.challenge === "locked"}
-      >
-        {t.getCode}
-      </PrimaryButton>
-    </section>
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        flow.submitPhone(phoneDraft);
+      }}
+    >
+      <section className={stylesB.section}>
+        <h1 className={stylesB.title}>{t.verify}</h1>
+        <ul className={stylesB.props}>
+          <li>
+            <span className={stylesB.propIcon}>
+              <IconShield size={16} />
+            </span>
+            {t.valueProps[0]}
+          </li>
+          <li>
+            <span className={stylesB.propIcon}>
+              <IconHeart size={16} />
+            </span>
+            {t.valueProps[1]}
+          </li>
+          <li>
+            <span className={stylesB.propIcon}>
+              <IconPhone size={16} />
+            </span>
+            {t.valueProps[2]}
+          </li>
+        </ul>
+        <div className={stylesB.field}>
+          <FieldLabel>{t.phoneLabel}</FieldLabel>
+          <PhoneInput
+            value={phoneDraft}
+            onChange={setPhoneDraft}
+            placeholder={t.phonePlaceholder}
+            autoFocus={true}
+          />
+        </div>
+        <NoticeMessage message={state.lastNotice} />
+        <ErrorMessage message={state.lastError} />
+        {state.cooldownRemaining > 0 && state.challenge !== "locked" && (
+          <p className={stylesB.attempts}>
+            {t.resendIn(state.cooldownRemaining)}
+          </p>
+        )}
+        {state.challenge === "locked" && (
+          <p className={stylesB.attempts}>
+            {t.lockout(Math.ceil(state.lockoutRemaining / 60))}
+          </p>
+        )}
+        <PrimaryButton
+          type="submit"
+          disabled={state.busy || state.challenge === "locked"}
+        >
+          {t.getCode}
+        </PrimaryButton>
+      </section>
+    </form>
   );
 }
 
@@ -132,56 +140,66 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
   const lockout = state.challenge === "locked" || state.lockoutRemaining > 0;
   const blocked = lockout || state.busy;
   return (
-    <section className={stylesB.section}>
-      <h1 className={stylesB.title}>{t.verify}</h1>
-      <div className={stylesB.center}>
-        <div>
-          <p className={stylesB.sub}>{t.codeExpires}</p>
-          <CountdownRing seconds={state.expiresIn} />
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        flow.submitOtp();
+      }}
+    >
+      <section className={stylesB.section}>
+        <h1 className={stylesB.title}>{t.verify}</h1>
+        <div className={stylesB.center}>
+          <div>
+            <p className={stylesB.sub}>{t.codeExpires}</p>
+            <CountdownRing seconds={state.expiresIn} />
+          </div>
         </div>
-      </div>
-      <p className={stylesB.sub}>
-        {t.codeHint} <strong>{state.phone}</strong>
-      </p>
-      <NoticeMessage message={state.lastNotice} />
-      <OtpInput
-        value={state.otpDraft}
-        onChange={flow.setOtpDraft}
-        autoFocus
-        disabled={blocked}
-        label={t.codeLabel}
-      />
-      <div className={stylesB.resendRow}>
-        <GhostButton
-          onClick={flow.resendOtp}
-          disabled={blocked || state.cooldownRemaining > 0}
-        >
-          {t.resend}
-        </GhostButton>
-        <EditLinkButton onClick={flow.backToPhone}>
-          {t.backToEdit}
-        </EditLinkButton>
-      </div>
-      {state.cooldownRemaining > 0 && !lockout && (
-        <p className={stylesB.attempts}>
-          {t.resendIn(state.cooldownRemaining)}
+        <p className={stylesB.sub}>
+          {t.codeHint} <strong>{state.phone}</strong>
         </p>
-      )}
-      {state.challenge === "pending" && state.attemptsLeft > 0 && (
-        <p className={stylesB.attempts}>{t.attemptsLeft(state.attemptsLeft)}</p>
-      )}
-      {state.challenge === "pending" && state.attemptsLeft === 0 && (
-        <p className={stylesB.attempts}>{t.noAttempts}</p>
-      )}
-      <ErrorMessage message={state.lastError} />
-      <PrimaryButton
-        onClick={flow.submitOtp}
-        disabled={blocked}
-        pending={state.otpDraft.length !== 6}
-      >
-        {t.verify}
-      </PrimaryButton>
-    </section>
+        <NoticeMessage message={state.lastNotice} />
+        <OtpInput
+          value={state.otpDraft}
+          onChange={flow.setOtpDraft}
+          autoFocus={true}
+          disabled={blocked}
+          label={t.codeLabel}
+          onComplete={flow.submitOtp}
+        />
+        <div className={stylesB.resendRow}>
+          <GhostButton
+            onClick={flow.resendOtp}
+            disabled={blocked || state.cooldownRemaining > 0}
+          >
+            {t.resend}
+          </GhostButton>
+          <EditLinkButton onClick={flow.backToPhone}>
+            {t.backToEdit}
+          </EditLinkButton>
+        </div>
+        {state.cooldownRemaining > 0 && !lockout && (
+          <p className={stylesB.attempts}>
+            {t.resendIn(state.cooldownRemaining)}
+          </p>
+        )}
+        {state.challenge === "pending" && state.attemptsLeft > 0 && (
+          <p className={stylesB.attempts}>
+            {t.attemptsLeft(state.attemptsLeft)}
+          </p>
+        )}
+        {state.challenge === "pending" && state.attemptsLeft === 0 && (
+          <p className={stylesB.attempts}>{t.noAttempts}</p>
+        )}
+        <ErrorMessage message={state.lastError} />
+        <PrimaryButton
+          type="submit"
+          disabled={blocked}
+          pending={state.otpDraft.length !== 6}
+        >
+          {t.verify}
+        </PrimaryButton>
+      </section>
+    </form>
   );
 }
 

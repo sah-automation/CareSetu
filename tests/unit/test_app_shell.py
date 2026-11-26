@@ -142,6 +142,8 @@ def test_auth_routes_are_the_only_business_routes() -> None:
         # PHASE-6 T03 (#309): the public provider profile (FEAT-005) - open
         # surface, patients view a provider's verified-safe profile.
         "/v1/directory/providers/{partner_id}",
+        # #959: public partner profile photo stream.
+        "/v1/partners/{partner_id}/photo",
         # PHASE-6 T4 (#326): the public directory-pick ingest (FEAT-004) -
         # open surface, anonymous analytics, same gateway surface as search.
         "/v1/directory/select",

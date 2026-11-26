@@ -25,6 +25,7 @@ function doctorProfile() {
     specialty: "General Physician",
     area: "Daltonganj",
     verified: true,
+    consultation_fee: 50000,
     credentials: [
       {
         credential_type: "medical_registration",

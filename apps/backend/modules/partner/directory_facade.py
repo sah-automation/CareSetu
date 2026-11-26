@@ -303,7 +303,15 @@ class DirectoryFacade:
                 # does not widen it.
                 partner_profiles.c.address_locality.label("declared_locality"),
                 partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
+                partner_profiles.c.photo_ref.label("photo_ref"),
                 distance_km.label("distance_km"),
+                # #964: widen projection for directory card redesign - five declared
+                # profile fields so the card renders real data instead of placeholders.
+                partner_profiles.c.clinic_name,
+                partner_profiles.c.experience_years,
+                partner_profiles.c.languages,
+                partner_profiles.c.address_line,
+                partner_profiles.c.address_city,
             ).join(
                 partner_profiles,
                 partner_profiles.c.id == partner_directory_index.c.partner_id,
@@ -366,6 +374,15 @@ class DirectoryFacade:
                     distance_km=float(row.distance_km),
                     verified=True,
                     consultation_fee=_row_fee_paise(row),
+                    photo_ref=getattr(row, "photo_ref", None),
+                    # #964: directory card widening - five declared profile fields.
+                    clinic_name=(str(row.clinic_name) if row.clinic_name is not None else None),
+                    experience_years=(
+                        int(row.experience_years) if row.experience_years is not None else None
+                    ),
+                    languages=known_selection(row.languages, ConsultLanguage),
+                    address_line=row.address_line,
+                    city=row.address_city,
                 )
                 for row in rows
             ],
@@ -455,6 +472,7 @@ class DirectoryFacade:
                         partner_directory_index.c.specialty,
                         partner_profiles.c.practice_name,
                         partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
+                        partner_profiles.c.photo_ref.label("photo_ref"),
                         # The declared band (#613), all off the PROFILE ROW. The
                         # profile row is the source of truth for every one of
                         # these - it is what the four section writes land on -
@@ -559,6 +577,7 @@ class DirectoryFacade:
             # covers the credential band, never a declared field.
             verified=True,
             consultation_fee=_row_fee_paise(row),
+            photo_ref=getattr(row, "photo_ref", None),
             specialties=specialties,
             languages=known_selection(row.languages, ConsultLanguage),
             consulting_days=known_selection(row.consulting_days, ConsultingDay),

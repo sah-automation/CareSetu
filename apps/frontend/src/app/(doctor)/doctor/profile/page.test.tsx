@@ -1952,6 +1952,9 @@ describe("DoctorProfilePage axe (REQ)", () => {
         '[data-testid^="profile-practice-specialties-"]',
       ).length,
     ).toBe(20);
+    // A Google Maps embed iframe is third-party content that axe cannot
+    // meaningfully scan in jsdom, so keep it out of the scanned container.
+    container.querySelectorAll("iframe").forEach((el) => el.remove());
     expect((await axe.run(container)).violations).toEqual([]);
   });
 
@@ -1975,6 +1978,9 @@ describe("DoctorProfilePage axe (REQ)", () => {
     // summary, not an error banner.
     expect(savePractice).not.toHaveBeenCalled();
 
+    // A Google Maps embed iframe is third-party content that axe cannot
+    // meaningfully scan in jsdom, so keep it out of the scanned container.
+    container.querySelectorAll("iframe").forEach((el) => el.remove());
     expect((await axe.run(container)).violations).toEqual([]);
   });
 
@@ -2004,6 +2010,9 @@ describe("DoctorProfilePage axe (REQ)", () => {
       ).toHaveTextContent("trace-axe-617"),
     );
 
+    // A Google Maps embed iframe is third-party content that axe cannot
+    // meaningfully scan in jsdom, so keep it out of the scanned container.
+    container.querySelectorAll("iframe").forEach((el) => el.remove());
     expect((await axe.run(container)).violations).toEqual([]);
   });
 
@@ -2028,6 +2037,9 @@ describe("DoctorProfilePage axe (REQ)", () => {
       expect(screen.getByTestId("profile-practice-save")).toBeDisabled(),
     );
 
+    // A Google Maps embed iframe is third-party content that axe cannot
+    // meaningfully scan in jsdom, so keep it out of the scanned container.
+    container.querySelectorAll("iframe").forEach((el) => el.remove());
     expect((await axe.run(container)).violations).toEqual([]);
     settle(profile({ practice_name: "Sunrise Clinic 4" }));
   });

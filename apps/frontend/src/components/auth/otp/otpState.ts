@@ -14,7 +14,7 @@
 //   - +91-only E.164 normalization
 //   - Suspended is NOT the lockout; lockout is a temporary counter
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { STRINGS, type AuthStrings } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
@@ -131,6 +131,9 @@ function errorString(error: unknown, t: AuthStrings): string {
 export function useOtpFlow(): OtpFlow {
   const { lang } = useLang();
   const [state, setState] = useState<OtpState>(initialState);
+  // Latest OTP draft, kept in sync synchronously so submitOtp can read the
+  // just-typed code even though the React state update is batched/async.
+  const otpDraftRef = useRef("");
 
   // Hydration gate: render nothing until we know whether a session is stored,
   // so a signed-in reload never flashes the auth form. The server and the
@@ -225,6 +228,7 @@ export function useOtpFlow(): OtpFlow {
               }));
               return;
             }
+            otpDraftRef.current = "";
             setState((s) => ({
               ...s,
               phone,
@@ -253,6 +257,7 @@ export function useOtpFlow(): OtpFlow {
       },
       submitOtp: () => {
         const s = state;
+        const code = otpDraftRef.current;
         if (s.lockoutRemaining > 0) {
           setState((prev) => ({
             ...prev,
@@ -264,18 +269,19 @@ export function useOtpFlow(): OtpFlow {
           setState((prev) => ({ ...prev, lastError: t.expiredOrUsed }));
           return;
         }
-        if (s.otpDraft.length !== 6) {
+        if (code.length !== 6) {
           setState((prev) => ({ ...prev, lastError: t.shortCode }));
           return;
         }
         setState((prev) => ({ ...prev, busy: true }));
-        void verifyOtp(s.phone, s.otpDraft)
+        void verifyOtp(s.phone, code)
           .then((result) => {
             if (result.outcome === "verified") {
               return issueSession(s.phone)
                 .then((sessionResult) => {
                   const stored = toStoredSession(sessionResult, s.phone);
                   saveSession(sessionResult, s.phone);
+                  otpDraftRef.current = "";
                   setState((prev) => ({
                     ...prev,
                     stage: "done",
@@ -298,6 +304,7 @@ export function useOtpFlow(): OtpFlow {
             }
             if (result.outcome === "wrong_code") {
               const attemptsLeft = result.attempts_left ?? s.attemptsLeft - 1;
+              otpDraftRef.current = "";
               setState((prev) => ({
                 ...prev,
                 attemptsLeft,
@@ -308,6 +315,7 @@ export function useOtpFlow(): OtpFlow {
               return;
             }
             if (result.outcome === "expired" || result.outcome === "spent") {
+              otpDraftRef.current = "";
               setState((prev) => ({
                 ...prev,
                 challenge: "spent",
@@ -319,6 +327,7 @@ export function useOtpFlow(): OtpFlow {
             }
             const lockoutSeconds =
               result.lockout_remaining_seconds ?? s.lockoutRemaining;
+            otpDraftRef.current = "";
             setState((prev) => ({
               ...prev,
               challenge: "locked",
@@ -357,6 +366,7 @@ export function useOtpFlow(): OtpFlow {
         void resendOtpRequest(s.phone)
           .then((result) => {
             if (result.outcome === "sent") {
+              otpDraftRef.current = "";
               setState((prev) => ({
                 ...prev,
                 challenge: "pending",
@@ -427,14 +437,17 @@ export function useOtpFlow(): OtpFlow {
       },
       setOtpDraft: (digits: string) => {
         const clean = digits.replace(/[^0-9]/g, "").slice(0, 6);
+        otpDraftRef.current = clean;
         setState((s) => ({ ...s, otpDraft: clean, lastError: null }));
       },
-      backToPhone: () =>
+      backToPhone: () => {
+        otpDraftRef.current = "";
         setState((s) => ({
           ...initialState(),
           isExisting: s.isExisting,
           hydrated: true,
-        })),
+        }));
+      },
       signOut: () => {
         clearSession();
         setState((s) => ({ ...initialState(), hydrated: true }));

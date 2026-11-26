@@ -208,6 +208,55 @@ async def _seed_locality(database_url: str, partner_id: int, locality: str) -> N
     )
 
 
+async def _seed_clinic_name(database_url: str, partner_id: int, clinic_name: str) -> None:
+    """Seed the doctor's declared clinic name (#964 directory card widening)."""
+    await _execute(
+        database_url,
+        "UPDATE partner.partner_profiles SET clinic_name = :clinic_name WHERE id = :partner_id",
+        {"partner_id": partner_id, "clinic_name": clinic_name},
+    )
+
+
+async def _seed_experience_years(database_url: str, partner_id: int, years: int) -> None:
+    """Seed the doctor's declared years of experience (#964 directory card widening)."""
+    await _execute(
+        database_url,
+        "UPDATE partner.partner_profiles SET experience_years = :years WHERE id = :partner_id",
+        {"partner_id": partner_id, "years": years},
+    )
+
+
+async def _seed_languages(database_url: str, partner_id: int, languages: list[str]) -> None:
+    """Seed the doctor's declared languages (#964 directory card widening)."""
+    sql = (
+        "UPDATE partner.partner_profiles SET languages = "
+        "CAST(:languages AS jsonb) WHERE id = :partner_id"
+    )
+    await _execute(
+        database_url,
+        sql,
+        {"partner_id": partner_id, "languages": json.dumps(languages)},
+    )
+
+
+async def _seed_address_line(database_url: str, partner_id: int, address_line: str) -> None:
+    """Seed the doctor's declared address line (#964 directory card widening)."""
+    await _execute(
+        database_url,
+        "UPDATE partner.partner_profiles SET address_line = :address_line WHERE id = :partner_id",
+        {"partner_id": partner_id, "address_line": address_line},
+    )
+
+
+async def _seed_city(database_url: str, partner_id: int, city: str) -> None:
+    """Seed the doctor's declared city (#964 directory card widening)."""
+    await _execute(
+        database_url,
+        "UPDATE partner.partner_profiles SET address_city = :city WHERE id = :partner_id",
+        {"partner_id": partner_id, "city": city},
+    )
+
+
 async def _expire_credentials(database_url: str, partner_id: int) -> None:
     """Stamp the partner's recorded ``expires_at`` far in the past (#459).
 
@@ -754,3 +803,53 @@ async def test_search_maps_area_from_the_declared_locality_not_the_service_area(
     assert recorded[hutar_id] == 2
     assert recorded[daltonganj_id] == daltonganj_area_id
     assert recorded[undeclared_id] == daltonganj_area_id
+
+
+@pytest.mark.asyncio
+async def test_search_directory_returns_directory_card_widening_fields(
+    database_url: str, clean_partner: None, tmp_path: Path
+) -> None:
+    """#964: search returns clinic_name, experience_years, languages, address_line, city."""
+    _, partner = _facade(database_url, tmp_path)
+
+    # Activate a doctor with all widening fields declared.
+    full_id = await _activate_partner(
+        database_url,
+        partner,
+        practice_name="Dr. Full Profile",
+        specialty="General Physician",
+    )
+    await _seed_clinic_name(database_url, full_id, "Shanti Clinic")
+    await _seed_experience_years(database_url, full_id, 20)
+    await _seed_languages(database_url, full_id, ["Hindi", "English"])
+    await _seed_address_line(database_url, full_id, "12, Nehru Road")
+    await _seed_city(database_url, full_id, "Daltonganj")
+
+    # Activate a doctor with no widening fields declared.
+    await _activate_partner(
+        database_url,
+        partner,
+        practice_name="Dr. Empty Profile",
+        specialty="General Physician",
+    )
+
+    view = await partner.search_directory()
+
+    assert view.fell_back is False
+    name_to_entry = {entry.practice_name: entry for entry in view.items}
+
+    # Doctor with all fields declared.
+    full = name_to_entry["Dr. Full Profile"]
+    assert full.clinic_name == "Shanti Clinic"
+    assert full.experience_years == 20
+    assert full.languages == ["Hindi", "English"]
+    assert full.address_line == "12, Nehru Road"
+    assert full.city == "Daltonganj"
+
+    # Doctor with no fields declared - nullable fields are None, list fields empty.
+    empty = name_to_entry["Dr. Empty Profile"]
+    assert empty.clinic_name is None
+    assert empty.experience_years is None
+    assert empty.languages == []
+    assert empty.address_line is None
+    assert empty.city is None

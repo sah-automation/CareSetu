@@ -1,8 +1,8 @@
-// PHASE-8.1 T11 (#449): the pick-a-doctor card suite. Shares DirectoryCard's
-// verified-truthfulness guarantee (ADR-0011: an unverified row renders no
-// card), renders the fee or the fee-not-set marker without ever blocking the
-// pick (US-10), shows the credentials-verified summary, deep-links to the
-// verified profile, and fires the Book CTA into the consent sheet.
+// PHASE-8.1 T11 (#966): the pick-a-doctor card suite, restyled to the
+// Phase-6 card visual language. Pins the left-panel anatomy (avatar, name,
+// credentials, practice, specialty + experience, rating, facts, verified tick,
+// distance) plus the pick-specific fee/verified footer and Book CTA, and the
+// verified-truthfulness gate (tick gone = card gone).
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -35,6 +35,12 @@ function entry(overrides: Partial<DirectoryEntry> = {}): DirectoryEntry {
     distance_km: 1.2,
     verified: true,
     consultation_fee: 50000,
+    clinic_name: "City General Clinic",
+    experience_years: 12,
+    languages: ["Hindi", "English"],
+    address_line: "Medininagar Road",
+    city: "Daltonganj",
+    photo_ref: null,
     ...overrides,
   };
 }
@@ -56,16 +62,26 @@ afterEach(() => {
 });
 
 describe("DoctorPickCard", () => {
-  it("renders verified tick, practice, meta, distance and the set fee", () => {
+  it("renders the left-panel anatomy: avatar, name, credentials, practice, specialty + experience", () => {
     render(<DoctorPickCard entry={entry()} {...labels} onBook={vi.fn()} />);
 
     expect(screen.getByTestId("pick-doctor-card")).toBeInTheDocument();
-    expect(screen.getByTestId("pick-verified")).toHaveTextContent("Verified");
+    expect(screen.getByText("AK")).toBeInTheDocument();
+    expect(screen.getByText("Dr. A. Kumar")).toBeInTheDocument();
+    expect(screen.getByText("City General Clinic")).toBeInTheDocument();
     expect(
-      screen.getByText("General Physician · Doctors · Medininagar Rd"),
+      screen.getByText(
+        /General Physician \u00b7 Doctors \u00b7 12 years experience/,
+      ),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("pick-verified")).toHaveTextContent("Verified");
     expect(screen.getByText("1.2 km")).toBeInTheDocument();
-    expect(screen.getByTestId("pick-fee")).toHaveTextContent("\u20B9500");
+  });
+
+  it("renders verified tick, distance and the set fee", () => {
+    render(<DoctorPickCard entry={entry()} {...labels} onBook={vi.fn()} />);
+
+    expect(screen.getByTestId("pick-fee")).toHaveTextContent("₹500");
     expect(screen.getByTestId("pick-credentials")).toHaveTextContent(
       "Verified",
     );

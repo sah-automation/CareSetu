@@ -51,9 +51,16 @@ export type Specialty = (typeof DIRECTORIES_SPECIALTIES)[number];
  * [Active] partner with valid credentials. `practice_name` is the display
  * name; `area` carries the partner's locality when present (card renders it
  * among non-null meta, never inventing a string when absent).
- * `consultation_fee` is in integer paise (null until the doctor sets one). */
+ * `consultation_fee` is in integer paise (null until the doctor sets one).
+ *
+ * #965 (backend #964): widened with the card-redesign band from the doctor's
+ * declared profile - `clinic_name`, `experience_years`, `languages`,
+ * `address_line` and `city` - so the interface mirrors the backend
+ * `DirectoryEntry` payload exactly and TypeScript catches any drift. */
 export interface DirectoryEntry {
   partner_id: number;
+  /** Opaque profile-media ref for the partner's photo, or null when none. */
+  photo_ref?: string | null;
   practice_name: string | null;
   partner_type: ProviderType;
   specialty: string | null;
@@ -61,6 +68,16 @@ export interface DirectoryEntry {
   distance_km: number;
   verified: boolean;
   consultation_fee: number | null;
+  /** Clinic or hospital the practice sits in, or null when undeclared. */
+  clinic_name: string | null;
+  /** Declared years of practice, or null when undeclared. */
+  experience_years: number | null;
+  /** Languages the partner consults in; empty list when none declared. */
+  languages: string[];
+  /** Street line of the declared address, or null when undeclared. */
+  address_line: string | null;
+  /** City of the declared address, or null when undeclared. */
+  city: string | null;
 }
 
 /** The public directory search response. `fell_back` marks the wider-area
@@ -83,6 +100,9 @@ function isDirectoryEntry(value: unknown): value is DirectoryEntry {
   const record = value as Record<string, unknown>;
   return (
     typeof record.partner_id === "number" &&
+    (record.photo_ref === undefined ||
+      record.photo_ref === null ||
+      typeof record.photo_ref === "string") &&
     (typeof record.practice_name === "string" ||
       record.practice_name === null) &&
     (record.partner_type === "doctor" ||
@@ -93,7 +113,14 @@ function isDirectoryEntry(value: unknown): value is DirectoryEntry {
     typeof record.distance_km === "number" &&
     typeof record.verified === "boolean" &&
     (typeof record.consultation_fee === "number" ||
-      record.consultation_fee === null)
+      record.consultation_fee === null) &&
+    (typeof record.clinic_name === "string" || record.clinic_name === null) &&
+    (typeof record.experience_years === "number" ||
+      record.experience_years === null) &&
+    Array.isArray(record.languages) &&
+    record.languages.every((language) => typeof language === "string") &&
+    (typeof record.address_line === "string" || record.address_line === null) &&
+    (typeof record.city === "string" || record.city === null)
   );
 }
 
