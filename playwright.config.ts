@@ -9,6 +9,7 @@ const BACKEND_ENV = {
   ...process.env,
   APP_ENVIRONMENT: "test",
   SMS_PROVIDER: "mock",
+  DEMO_MODE: "true",
   GATEWAY_JWT_VERIFY_ENABLED: "true",
   GATEWAY_JWT_SIGNING_KEY: "e2e-dev-only-signing-key",
   // The iam MFA needs a key to encrypt the bootstrap operator's TOTP secret; a
