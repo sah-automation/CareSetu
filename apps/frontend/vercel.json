@@ -55,7 +55,7 @@
       ]
     }
   ],
-  "installCommand": "npm ci --prefix ..",
-  "buildCommand": "npm run build --prefix ..",
+  "installCommand": "cd .. && npm ci",
+  "buildCommand": "cd .. && npm run build",
   "framework": "nextjs"
 }
