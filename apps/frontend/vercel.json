@@ -55,6 +55,6 @@
       ]
     }
   ],
-  "installCommand": "rm -f package-lock.json && npm install --legacy-peer-deps --force",
+  "installCommand": "npm ci",
   "buildCommand": "next build"
 }
