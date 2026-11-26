@@ -431,6 +431,36 @@ describe("splitMobileTabs", () => {
     ]);
   });
 
+  // Operator nav: 4 Work items (home, verifications, disputes, audit) fit on the
+  // bar (capacity 5, no center). The 9 observability metrics have mobileOverflow
+  // so they pin to More; settings and profile are regular items but fall after
+  // the capacity, so they also go to More.
+  it("pins observability metrics and excess regular items into More", () => {
+    const { tabs, overflow, hasMore } = splitMobileTabs(NAV_CONFIG.operator);
+
+    expect(tabs.map((item) => item.key)).toEqual([
+      "home",
+      "verifications",
+      "disputes",
+      "audit",
+    ]);
+    expect(tabs.length).toBeLessThanOrEqual(TABBAR_MAX_DESTINATIONS);
+    expect(hasMore).toBe(true);
+    expect(overflow.map((item) => item.key)).toEqual([
+      "business",
+      "product",
+      "usage",
+      "reliability",
+      "health",
+      "cost",
+      "quality",
+      "security",
+      "evals",
+      "settings",
+      "profile",
+    ]);
+  });
+
   it("keeps the first five destinations visible and pushes the rest into More", () => {
     const synthetic: NavItemDef[] = Array.from({ length: 7 }, (_, i) => ({
       key: `dest-${i}`,

@@ -32,12 +32,11 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import Settings
@@ -235,7 +234,20 @@ class _Lineage:
         return ConsentState(status=ConsentStatus(self.status), version=self.version)
 
 
-def _to_lineage(row: Row[Any]) -> _Lineage:
+class _LineageRow(Protocol):
+    id: Any
+    patient_id: Any
+    counterparty_type: Any
+    counterparty_id: Any
+    record_scope: Any
+    lineage_ref: Any | None
+    status: Any
+    version: Any
+    created_at: Any
+    updated_at: Any
+
+
+def _to_lineage(row: _LineageRow) -> _Lineage:
     # ``lineage_ref`` is briefly NULL inside the creating transaction; the
     # empty-string stand-in keeps the minting check falsy until it is set.
     return _Lineage(

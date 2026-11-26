@@ -28,12 +28,11 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 # Type-only import to avoid circular dependency at runtime
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, func, not_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import Settings
@@ -570,7 +569,14 @@ async def query_access_history(
     )
 
 
-def _metric_entry_from_row(row: Row[Any]) -> HealthBackgroundMetricEntry:
+class _MetricRow(Protocol):
+    id: Any
+    height_cm: Any | None
+    weight_kg: Any | None
+    recorded_at: Any
+
+
+def _metric_entry_from_row(row: _MetricRow) -> HealthBackgroundMetricEntry:
     """Concretize one ``health_background_metrics`` row as the typed entry.
 
     A ``Row[Any]`` proxy is genuinely required here (the columns are read off
