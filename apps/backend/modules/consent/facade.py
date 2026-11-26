@@ -235,7 +235,7 @@ class _Lineage:
         return ConsentState(status=ConsentStatus(self.status), version=self.version)
 
 
-def _to_lineage(row: Row[Any]) -> _Lineage:
+def _to_lineage(row: Row[Any] | tuple[Any, ...]) -> _Lineage:
     # ``lineage_ref`` is briefly NULL inside the creating transaction; the
     # empty-string stand-in keeps the minting check falsy until it is set.
     return _Lineage(

@@ -59,7 +59,6 @@ from pydantic import BaseModel
 from sqlalchemy import String, Table, column, delete, func, or_, select, text, update
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
-from sqlalchemy.sql.selectable import Select
 
 from bus.dispatch import dispatch
 from bus.envelope import Envelope
@@ -304,13 +303,18 @@ async def discover_outbox_tables(
     """
     if not schemas:
         return ()
-    statement: Select[tuple[str, str]] = (
+    statement = (
         select(column("table_schema", String), column("table_name", String))
         .select_from(text("information_schema.tables"))
         .where(column("table_schema", String).in_(list(schemas)))
         .where(column("table_name", String).like(r"%\_outbox"))
         .where(column("table_type", String) == "BASE TABLE")
         .order_by(column("table_schema", String), column("table_name", String))
+    )
+    result = await connection.execute(statement)
+    return tuple(
+        OutboxTable(schema=mapping["table_schema"], table_name=mapping["table_name"])
+        for mapping in result.mappings().all()
     )
     result = await connection.execute(statement)
     return tuple(
@@ -355,7 +359,7 @@ async def count_outbox_rows(
     counts: list[OutboxRowCounts] = []
     for target in tables:
         table = outbox_table(target.table_name, target.schema)
-        statement: Select[tuple[str, int]] = (
+        statement = (
             select(column("status", String), func.count().label("rows"))
             .select_from(table)
             .group_by(column("status", String))

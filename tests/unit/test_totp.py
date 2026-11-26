@@ -23,7 +23,7 @@ from modules.iam.domain.totp import (
 )
 
 _T0 = datetime(2026, 8, 31, 12, 0, 0, tzinfo=UTC)
-_SECRET = "JBSWY3DPEHPK3PXP"
+_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
 
 
 class _FixedClock:

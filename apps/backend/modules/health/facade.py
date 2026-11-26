@@ -570,7 +570,7 @@ async def query_access_history(
     )
 
 
-def _metric_entry_from_row(row: Row[Any]) -> HealthBackgroundMetricEntry:
+def _metric_entry_from_row(row: Row[Any] | tuple[Any, ...]) -> HealthBackgroundMetricEntry:
     """Concretize one ``health_background_metrics`` row as the typed entry.
 
     A ``Row[Any]`` proxy is genuinely required here (the columns are read off
