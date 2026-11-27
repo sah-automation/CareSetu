@@ -64,8 +64,25 @@ async function verifyOtp(
   number: string,
 ): Promise<void> {
   const code = await requireMockOtp(request, `+91${number}`);
-  await page.getByLabel("Verification code").fill(code);
-  await page.getByRole("button", { name: "Verify & continue" }).click();
+  console.log(`[verifyOtp] Got code: ${code}, filling into input`);
+  const otpInput = page.getByLabel("Verification code");
+  await otpInput.fill(code);
+  // Debug: check the actual input value after fill
+  const inputValue = await otpInput.inputValue();
+  console.log(`[verifyOtp] Input value after fill: '${inputValue}'`);
+  // Check if button is enabled
+  const verifyBtn = page.getByRole("button", { name: "Verify & continue" });
+  const isEnabled = await verifyBtn.isEnabled();
+  console.log(`[verifyOtp] Button enabled: ${isEnabled}`);
+  if (!isEnabled) {
+    // Force check the input's value attribute
+    const valueAttr = await otpInput.getAttribute("value");
+    console.log(`[verifyOtp] Input value attribute: '${valueAttr}'`);
+    // Check input validity
+    const validity = await otpInput.evaluate((el: HTMLInputElement) => el.validity);
+    console.log(`[verifyOtp] Input validity:`, validity);
+  }
+  await verifyBtn.click();
   await page.waitForURL("**/patient", { timeout: 15_000 });
 }
 
