@@ -167,165 +167,169 @@ function DoctorCard({
   if (tags.length < 2 && mock.tags[1]) tags.push(mock.tags[1]);
 
   return (
-    <Link
-      href={providerProfileHref(doctor.id)}
-      role="listitem"
-      className="group flex w-[330px] shrink-0 snap-start flex-col gap-2.5 rounded-2xl border border-hairline bg-surface p-5 transition-all duration-200 hover:-translate-y-[3px] hover:border-accent-border hover:shadow-[0_14px_30px_-16px_rgba(2,6,23,0.22)] max-[560px]:w-[285px]"
-    >
-      <div className="flex items-start gap-3">
-        <div className="relative h-[60px] w-[60px] shrink-0">
-          {photo.src ? (
-            <img
-              src={photo.src}
-              alt={doctor.name}
-              className="h-full w-full rounded-full border-2 border-accent-border object-cover"
-            />
-          ) : (
-            <span
-              aria-hidden="true"
-              className="flex h-full w-full items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
-            >
-              {initialsOf(doctor.name)}
-            </span>
-          )}
-          {mock.videoBadge && (
-            <span
-              data-testid="featured-card-video-badge"
-              aria-label="Video visits available"
-              className="absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-full border-2 border-surface bg-accent text-on-accent"
-            >
-              <Video className="h-3 w-3" aria-hidden="true" />
-            </span>
-          )}
-        </div>
-        <div className="flex min-w-0 flex-col gap-1">
-          {mock.highlightRibbon && (
-            <span
-              data-testid="featured-card-ribbon"
-              className="inline-block self-start text-[0.6875rem] font-semibold text-warm bg-warm-soft border border-[#fed7aa] rounded-full px-2 py-0.5 whitespace-nowrap"
-            >
-              {mock.highlightRibbon}
-            </span>
-          )}
-          <div className="flex items-baseline gap-1.5 flex-wrap min-w-0">
-            <span className="text-[1.05rem] font-bold leading-snug tracking-tight text-txt">
-              {doctor.name}
-            </span>
-            {mock.credentials && (
-              <span className="text-[0.8125rem] font-normal text-txt-muted truncate">
-                {mock.credentials}
+    <li className="w-[330px] shrink-0 snap-start max-[560px]:w-[285px]">
+      <Link
+        href={providerProfileHref(doctor.id)}
+        className="group flex h-full flex-col gap-2.5 rounded-2xl border border-hairline bg-surface p-5 transition-all duration-200 hover:-translate-y-[3px] hover:border-accent-border hover:shadow-[0_14px_30px_-16px_rgba(2,6,23,0.22)]"
+      >
+        <div className="flex items-start gap-3">
+          <div className="relative h-[60px] w-[60px] shrink-0">
+            {photo.src ? (
+              <img
+                src={photo.src}
+                alt={doctor.name}
+                className="h-full w-full rounded-full border-2 border-accent-border object-cover"
+              />
+            ) : (
+              <span
+                aria-hidden="true"
+                className="flex h-full w-full items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-lg font-semibold text-accent-strong"
+              >
+                {initialsOf(doctor.name)}
+              </span>
+            )}
+            {mock.videoBadge && (
+              <span
+                data-testid="featured-card-video-badge"
+                aria-label="Video visits available"
+                className="absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-full border-2 border-surface bg-accent text-on-accent"
+              >
+                <Video className="h-3 w-3" aria-hidden="true" />
               </span>
             )}
           </div>
-          {practiceLine && (
-            <span
-              data-testid="featured-card-practice"
-              className="text-sm font-medium text-txt-sub truncate"
-            >
-              {practiceLine}
-            </span>
-          )}
+          <div className="flex min-w-0 flex-col gap-1">
+            {mock.highlightRibbon && (
+              <span
+                data-testid="featured-card-ribbon"
+                className="inline-block self-start text-[0.6875rem] font-semibold text-warm bg-warm-soft border border-[#fed7aa] rounded-full px-2 py-0.5 whitespace-nowrap"
+              >
+                {mock.highlightRibbon}
+              </span>
+            )}
+            <div className="flex items-baseline gap-1.5 flex-wrap min-w-0">
+              <span className="text-[1.05rem] font-bold leading-snug tracking-tight text-txt">
+                {doctor.name}
+              </span>
+              {mock.credentials && (
+                <span className="text-[0.8125rem] font-normal text-txt-muted truncate">
+                  {mock.credentials}
+                </span>
+              )}
+            </div>
+            {practiceLine && (
+              <span
+                data-testid="featured-card-practice"
+                className="text-sm font-medium text-txt-sub truncate"
+              >
+                {practiceLine}
+              </span>
+            )}
+          </div>
         </div>
-      </div>
-      {specialtyLine && (
-        <span
-          data-testid="featured-card-specialty"
-          className="text-sm text-txt-muted"
+        {specialtyLine && (
+          <span
+            data-testid="featured-card-specialty"
+            className="text-sm text-txt-muted"
+          >
+            {specialtyLine}
+          </span>
+        )}
+        <div
+          data-testid="featured-card-rating"
+          className="flex items-center gap-1.5"
         >
-          {specialtyLine}
-        </span>
-      )}
-      <div
-        data-testid="featured-card-rating"
-        className="flex items-center gap-1.5"
-      >
-        <span
-          className="text-warm text-sm leading-none tracking-[1px]"
-          aria-hidden="true"
+          <span
+            className="text-warm text-sm leading-none tracking-[1px]"
+            aria-hidden="true"
+          >
+            {Array.from({ length: Math.floor(rating.stars) })
+              .map(() => "★")
+              .join("")}
+            {rating.stars % 1 >= 0.5 ? "☆" : ""}
+          </span>
+          <span className="text-txt-muted text-sm">
+            {`${rating.stars.toFixed(1)} (${dir.ratingReviews(
+              rating.reviewCount,
+            )})`}
+          </span>
+        </div>
+        <div data-testid="featured-card-facts" className="flex flex-wrap gap-3">
+          {mock.facts.map((fact, index) => {
+            const Icon = FACT_ICON[fact.icon];
+            return (
+              <span
+                key={index}
+                data-testid="featured-card-fact"
+                className="inline-flex items-center gap-1 text-txt-sub text-[0.8125rem]"
+              >
+                {Icon && (
+                  <Icon
+                    className="h-3.5 w-3.5 shrink-0 text-txt-muted"
+                    aria-hidden="true"
+                  />
+                )}
+                {fact.label}
+              </span>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-success-soft px-2.5 py-0.5 text-[0.7rem] font-bold uppercase tracking-wide text-success-text">
+            {featured.verified}
+          </span>
+          <span className="text-[0.8rem] font-medium text-txt-muted">
+            {distance} km
+          </span>
+        </div>
+        <div
+          data-testid="featured-card-tags"
+          className="flex flex-wrap gap-1.5"
         >
-          {Array.from({ length: Math.floor(rating.stars) })
-            .map(() => "★")
-            .join("")}
-          {rating.stars % 1 >= 0.5 ? "☆" : ""}
-        </span>
-        <span className="text-txt-muted text-sm">
-          {`${rating.stars.toFixed(1)} (${dir.ratingReviews(
-            rating.reviewCount,
-          )})`}
-        </span>
-      </div>
-      <div data-testid="featured-card-facts" className="flex flex-wrap gap-3">
-        {mock.facts.map((fact, index) => {
-          const Icon = FACT_ICON[fact.icon];
-          return (
+          {tags.map((tag, index) => (
             <span
               key={index}
-              data-testid="featured-card-fact"
-              className="inline-flex items-center gap-1 text-txt-sub text-[0.8125rem]"
+              data-testid="featured-card-tag"
+              className={`inline-flex min-h-6 items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                tag.variant === "accent"
+                  ? "border border-accent-border bg-accent-soft text-accent-strong"
+                  : "bg-hairline-soft text-txt-muted"
+              }`}
             >
-              {Icon && (
-                <Icon
-                  className="h-3.5 w-3.5 shrink-0 text-txt-muted"
-                  aria-hidden="true"
-                />
-              )}
-              {fact.label}
+              {tag.label}
             </span>
-          );
-        })}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-full bg-success-soft px-2.5 py-0.5 text-[0.7rem] font-bold uppercase tracking-wide text-success-text">
-          {featured.verified}
-        </span>
-        <span className="text-[0.8rem] font-medium text-txt-muted">
-          {distance} km
-        </span>
-      </div>
-      <div data-testid="featured-card-tags" className="flex flex-wrap gap-1.5">
-        {tags.map((tag, index) => (
-          <span
-            key={index}
-            data-testid="featured-card-tag"
-            className={`inline-flex min-h-6 items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-              tag.variant === "accent"
-                ? "border border-accent-border bg-accent-soft text-accent-strong"
-                : "bg-hairline-soft text-txt-muted"
-            }`}
-          >
-            {tag.label}
-          </span>
-        ))}
-      </div>
-      {addressLine && (
-        <div
-          data-testid="featured-card-location"
-          className="flex items-center gap-[0.3rem] text-txt-sub text-sm"
-        >
-          <MapPin
-            className="h-3.5 w-3.5 shrink-0 text-txt-muted"
-            aria-hidden="true"
-          />
-          {addressLine}
+          ))}
         </div>
-      )}
-      <div className="mt-auto flex items-center justify-between gap-2 border-t border-hairline-soft pt-2.5">
-        <span className="text-sm font-bold text-txt">
-          {feeRupees !== null ? (
-            <>
-              {"₹"}
-              {feeRupees}{" "}
-              <span className="text-xs font-normal text-txt-muted">
-                {featured.consultLabel}
-              </span>
-            </>
-          ) : null}
-        </span>
-        <span className="rounded-full border border-accent-border bg-accent-soft px-3 py-1 text-xs font-semibold text-accent-strong transition-colors group-hover:border-accent group-hover:bg-accent group-hover:text-on-accent">
-          {featured.viewProfile}
-        </span>
-      </div>
-    </Link>
+        {addressLine && (
+          <div
+            data-testid="featured-card-location"
+            className="flex items-center gap-[0.3rem] text-txt-sub text-sm"
+          >
+            <MapPin
+              className="h-3.5 w-3.5 shrink-0 text-txt-muted"
+              aria-hidden="true"
+            />
+            {addressLine}
+          </div>
+        )}
+        <div className="mt-auto flex items-center justify-between gap-2 border-t border-hairline-soft pt-2.5">
+          <span className="text-sm font-bold text-txt">
+            {feeRupees !== null ? (
+              <>
+                {"₹"}
+                {feeRupees}{" "}
+                <span className="text-xs font-normal text-txt-muted">
+                  {featured.consultLabel}
+                </span>
+              </>
+            ) : null}
+          </span>
+          <span className="rounded-full border border-accent-border bg-accent-soft px-3 py-1 text-xs font-semibold text-accent-strong transition-colors group-hover:border-accent group-hover:bg-accent group-hover:text-on-accent">
+            {featured.viewProfile}
+          </span>
+        </div>
+      </Link>
+    </li>
   );
 }
 
@@ -338,7 +342,7 @@ function FeaturedCarousel({
   doctors: FeaturedDoctor[];
   featured: CarouselStrings;
 }) {
-  const trackRef = useRef<HTMLDivElement | null>(null);
+  const trackRef = useRef<HTMLUListElement | null>(null);
   // Both ends start disabled: the track's real dimensions land in the mount
   // effect, so no arrow ever claims content that is not there.
   const [atStart, setAtStart] = useState(true);
@@ -381,17 +385,16 @@ function FeaturedCarousel({
 
   return (
     <div className="relative mt-5">
-      <div
+      <ul
         data-testid="featured-cards"
         ref={trackRef}
-        role="list"
         aria-label={featured.carouselLabel}
         className="flex items-stretch snap-x snap-mandatory gap-4 overflow-x-auto pb-4 pt-1 [scrollbar-color:var(--hairline)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:rounded-full [&::-webkit-scrollbar-thumb]:bg-hairline"
       >
         {doctors.map((doctor) => (
           <DoctorCard key={doctor.id} doctor={doctor} featured={featured} />
         ))}
-      </div>
+      </ul>
       <button
         type="button"
         data-testid="featured-prev"

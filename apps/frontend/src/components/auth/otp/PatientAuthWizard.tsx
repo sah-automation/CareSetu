@@ -196,7 +196,6 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
           type="submit"
           disabled={blocked}
           pending={state.otpDraft.length !== 6}
-          testId="patient-verify"
         >
           {t.verify}
         </PrimaryButton>

@@ -188,10 +188,12 @@ describe("FeaturedDoctors (gap G2)", () => {
     // No fake cards means no empty state either.
     expect(screen.queryByTestId("empty-state")).not.toBeInTheDocument();
     // Cards target provider profiles; view-all pre-seeds the directory.
-    // #962 gives each card role="listitem" (the carousel contract), so the
-    // deep link is asserted on the card element - it is still an <a href>.
+    // #962 keeps the carousel list contract with semantic <li> wrappers; the
+    // deep link lives on the <a> inside each item.
     expect(
-      screen.getAllByRole("listitem").map((card) => card.getAttribute("href")),
+      screen
+        .getAllByRole("listitem")
+        .map((item) => within(item).getByRole("link").getAttribute("href")),
     ).toEqual(["/providers/1", "/providers/2"]);
     expect(
       screen.getByRole("link", { name: "View all doctors" }),

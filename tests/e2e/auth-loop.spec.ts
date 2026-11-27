@@ -118,26 +118,11 @@ async function verifyOtp(
   number: string,
 ): Promise<void> {
   const code = await requireMockOtp(request, `+91${number}`);
-  console.log(`[verifyOtp] Got code: ${code}, filling into input`);
-  // Use testId for reliable selection (matches staff pattern)
-  const hiddenInput = page.getByTestId("patient-otp");
-  await hiddenInput.fill(code);
-  // Debug: check the actual input value after fill
-  const inputValue = await hiddenInput.inputValue();
-  console.log(`[verifyOtp] Input value after fill: '${inputValue}'`);
-  // Wait for button to be enabled (React state updates)
-  const verifyBtn = page.getByTestId("patient-verify");
-  // waitFor doesn't support "enabled" state; poll isEnabled()
-  for (let i = 0; i < 50; i++) {
-    if (await verifyBtn.isEnabled()) {
-      console.log(`[verifyOtp] Button is now enabled, clicking`);
-      await verifyBtn.click();
-      await page.waitForURL("**/patient", { timeout: 15_000 });
-      return;
-    }
-    await page.waitForTimeout(200);
-  }
-  throw new Error("Verify button never became enabled");
+  // OtpInput fires onComplete as soon as the sixth digit lands, so filling
+  // the code already submits the step and navigates. There is no verify button
+  // left to click here.
+  await page.getByTestId("patient-otp").fill(code);
+  await page.waitForURL("**/patient", { timeout: 30_000 });
 }
 
 // FEAT-014 T11 (#471): fetch the caller's identity with a Bearer JWT. Shared
@@ -274,8 +259,8 @@ async function partnerLogin(
     });
 
   const code = await requireMockOtp(request, `+91${number}`);
+  // OtpInput submits on the sixth digit; clicking Verify code races that submit.
   await page.getByTestId("partner-otp").fill(code);
-  await page.getByTestId("staff-submit").click();
   await page.waitForURL("**/partner/status/pending", { timeout: 60_000 });
   await expect(
     page.getByRole("heading", { name: "Your application is being verified" }),
@@ -478,8 +463,8 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
     timeout: 30_000,
   });
   const code = await requireMockOtp(request, `+91${returnPhone}`);
-  await page.getByLabel("Verification code").fill(code);
-  await page.getByRole("button", { name: "Verify & continue" }).click();
+  // The sixth digit completes the OTP and submits the step automatically.
+  await page.getByTestId("patient-otp").fill(code);
   await page.waitForURL(
     (url) =>
       url.pathname === "/patient" &&

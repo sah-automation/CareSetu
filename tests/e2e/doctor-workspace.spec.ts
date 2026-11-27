@@ -376,35 +376,14 @@ async function activeDoctorLogin(
     });
 
   const code = await requireMockOtp(request, `+91${number}`);
-  console.log(`[activeDoctorLogin] Got code: ${code}, filling into input`);
-  // The hidden input has pointer-events: none; click its parent wrapper to focus it
-  const hiddenInput = page.getByTestId("partner-otp");
-  const otpWrap = hiddenInput.locator(".."); // parent element (.otpWrap)
-  await otpWrap.click();
-  // Set value directly and dispatch input event to trigger React onChange
-  await hiddenInput.evaluate((el: HTMLInputElement, digits: string) => {
-    el.value = digits;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  }, code);
-  // Debug: check the actual input value after fill
-  const inputValue = await hiddenInput.inputValue();
-  console.log(`[activeDoctorLogin] Input value after fill: '${inputValue}'`);
-  // Wait for button to be enabled (React state updates)
-  const verifyBtn = page.getByTestId("staff-submit");
-  // waitFor doesn't support "enabled" state; poll isEnabled()
-  for (let i = 0; i < 50; i++) {
-    if (await verifyBtn.isEnabled()) {
-      console.log(`[activeDoctorLogin] Button is now enabled, clicking`);
-      await verifyBtn.click();
-      await page.waitForURL("**/doctor", { timeout: 60_000 });
-      await expect(page.getByTestId("review-queue")).toBeVisible({
-        timeout: 60_000,
-      });
-      return;
-    }
-    await page.waitForTimeout(200);
-  }
-  throw new Error("Verify button never became enabled");
+  // fill() fires a real input event so React's onChange updates otpDraft.
+  // OtpInput calls onComplete at six digits, which submits the staff step;
+  // clicking Verify code here would race that in-flight submit and detach.
+  await page.getByTestId("partner-otp").fill(code);
+  await page.waitForURL("**/doctor", { timeout: 60_000 });
+  await expect(page.getByTestId("review-queue")).toBeVisible({
+    timeout: 60_000,
+  });
 }
 
 test("the active doctor lands on /doctor and the review workspace renders with integer ids", async ({
@@ -698,15 +677,8 @@ test("the doctor declares their address and the public profile shows what they d
 
     // The address, part by part. The PIN that landed is the resolvable one: the
     // refused PIN never reached a column, so what the public page shows proves the
-    // refusal wrote nothing. These ids are `profile-declared-address-` plus the
-    // band's own FIELD name, and the field name is the address part's own name -
-    // hence the doubled word in the line. Spelled out rather than composed, so the
-    // doubling reads as deliberate instead of getting "fixed" into a locator that
-    // matches nothing.
-    const declaredAddress = declaredBand.getByTestId(
-      "profile-declared-address",
-    );
-    await expect(declaredAddress).toBeVisible({ timeout: 30_000 });
+    // refusal wrote nothing. The address rows are direct children of the declared
+    // band now, each carrying its own `profile-declared-address-<field>` id.
     for (const [testId, value] of [
       ["profile-declared-address-address-line", ADDRESS_LINE],
       ["profile-declared-address-landmark", LANDMARK],
@@ -714,7 +686,7 @@ test("the doctor declares their address and the public profile shows what they d
       ["profile-declared-address-city", CITY],
       ["profile-declared-address-pin-code", RESOLVABLE_PIN],
     ] as const) {
-      await expect(declaredAddress.getByTestId(testId)).toHaveText(value, {
+      await expect(declaredBand.getByTestId(testId)).toHaveText(value, {
         timeout: 30_000,
       });
     }
