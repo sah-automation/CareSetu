@@ -69,11 +69,8 @@ async function verifyOtp(
   const hiddenInput = page.getByLabel("Verification code");
   const otpWrap = hiddenInput.locator(".."); // parent element (.otpWrap)
   await otpWrap.click();
-  // Set value directly and dispatch input event to trigger React onChange
-  await hiddenInput.evaluate((el: HTMLInputElement, digits: string) => {
-    el.value = digits;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  }, code);
+  // After focus, fill() works on the focused element and triggers React onChange
+  await hiddenInput.fill(code);
   // Debug: check the actual input value after fill
   const inputValue = await hiddenInput.inputValue();
   console.log(`[verifyOtp] Input value after fill: '${inputValue}'`);
