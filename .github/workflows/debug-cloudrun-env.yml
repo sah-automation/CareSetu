@@ -1,0 +1,25 @@
+name: Debug Cloud Run env
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  describe:
+    runs-on: ubuntu-latest
+    steps:
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          project_id: '${{ vars.GCP_PROJECT_ID }}'
+      - name: Describe env bindings
+        run: |
+          gcloud run services describe caresetu-backend \
+            --region asia-south1 \
+            --format=json > service.json
+          jq '.spec.template.spec.containers[0].env[] | {name, hasValueFrom: (has("valueFrom")), hasValue: (has("value"))}' service.json
