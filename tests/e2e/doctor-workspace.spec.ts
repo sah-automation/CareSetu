@@ -378,8 +378,8 @@ async function activeDoctorLogin(
   const code = await requireMockOtp(request, `+91${number}`);
   console.log(`[activeDoctorLogin] Got code: ${code}, filling into input`);
   const otpInput = page.getByTestId("partner-otp");
-  // Use pressSequentially to trigger proper React onChange events
-  await otpInput.click();
+  // The OtpInput wrapper (otpWrap) intercepts clicks; focus the hidden input directly
+  await otpInput.focus();
   await otpInput.pressSequentially(code, { delay: 50 });
   // Debug: check the actual input value after fill
   const inputValue = await otpInput.inputValue();
