@@ -386,13 +386,20 @@ async function activeDoctorLogin(
   console.log(`[activeDoctorLogin] Input value after fill: '${inputValue}'`);
   // Wait for button to be enabled (React state updates)
   const verifyBtn = page.getByTestId("staff-submit");
-  await verifyBtn.waitFor({ state: "enabled", timeout: 10_000 });
-  console.log(`[activeDoctorLogin] Button is now enabled, clicking`);
-  await verifyBtn.click();
-  await page.waitForURL("**/doctor", { timeout: 60_000 });
-  await expect(page.getByTestId("review-queue")).toBeVisible({
-    timeout: 60_000,
-  });
+  // waitFor doesn't support "enabled" state; poll isEnabled()
+  for (let i = 0; i < 50; i++) {
+    if (await verifyBtn.isEnabled()) {
+      console.log(`[activeDoctorLogin] Button is now enabled, clicking`);
+      await verifyBtn.click();
+      await page.waitForURL("**/doctor", { timeout: 60_000 });
+      await expect(page.getByTestId("review-queue")).toBeVisible({
+        timeout: 60_000,
+      });
+      return;
+    }
+    await page.waitForTimeout(200);
+  }
+  throw new Error("Verify button never became enabled");
 }
 
 test("the active doctor lands on /doctor and the review workspace renders with integer ids", async ({

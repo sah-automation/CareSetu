@@ -128,10 +128,17 @@ async function verifyOtp(
   console.log(`[verifyOtp] Input value after fill: '${inputValue}'`);
   // Wait for button to be enabled (React state updates)
   const verifyBtn = page.getByRole("button", { name: "Verify & continue" });
-  await verifyBtn.waitFor({ state: "enabled", timeout: 10_000 });
-  console.log(`[verifyOtp] Button is now enabled, clicking`);
-  await verifyBtn.click();
-  await page.waitForURL("**/patient", { timeout: 15_000 });
+  // waitFor doesn't support "enabled" state; poll isEnabled()
+  for (let i = 0; i < 50; i++) {
+    if (await verifyBtn.isEnabled()) {
+      console.log(`[verifyOtp] Button is now enabled, clicking`);
+      await verifyBtn.click();
+      await page.waitForURL("**/patient", { timeout: 15_000 });
+      return;
+    }
+    await page.waitForTimeout(200);
+  }
+  throw new Error("Verify button never became enabled");
 }
 
 // FEAT-014 T11 (#471): fetch the caller's identity with a Bearer JWT. Shared
