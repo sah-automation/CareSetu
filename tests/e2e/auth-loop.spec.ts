@@ -274,7 +274,10 @@ async function partnerLogin(
 async function expectNoAxeViolations(page: Page, label: string): Promise<void> {
   const results = await new AxeBuilder({ page }).analyze();
   const failures = results.violations.map(
-    (v) => `${v.id} (${v.impact}): ${v.help}`,
+    (v) =>
+      `${v.id} (${v.impact}): ${v.help} [${v.nodes
+        .map((n) => n.target.join(" "))
+        .join(", ")}]`,
   );
   expect(
     failures,
@@ -481,6 +484,7 @@ test("the homepage, consent overlay, auth wizard and patient page pass the axe a
   // TEST-C2 (#131) + PHASE-2.6 T14 (#205, spec #191 decision 15): assert zero
   // axe violations on the resolved homepage, each wizard stage, the open
   // consent overlay, and the signed-in surface.
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
   await expect(
     page.getByRole("heading", {
