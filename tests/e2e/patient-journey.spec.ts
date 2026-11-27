@@ -65,17 +65,14 @@ async function verifyOtp(
 ): Promise<void> {
   const code = await requireMockOtp(request, `+91${number}`);
   console.log(`[verifyOtp] Got code: ${code}, filling into input`);
-  // The hidden input has pointer-events: none; click its parent wrapper to focus it
-  const hiddenInput = page.getByLabel("Verification code");
-  const otpWrap = hiddenInput.locator(".."); // parent element (.otpWrap)
-  await otpWrap.click();
-  // After focus, fill() works on the focused element and triggers React onChange
+  // Use testId for reliable selection (matches staff pattern)
+  const hiddenInput = page.getByTestId("patient-otp");
   await hiddenInput.fill(code);
   // Debug: check the actual input value after fill
   const inputValue = await hiddenInput.inputValue();
   console.log(`[verifyOtp] Input value after fill: '${inputValue}'`);
   // Wait for button to be enabled (React state updates)
-  const verifyBtn = page.getByRole("button", { name: "Verify & continue" });
+  const verifyBtn = page.getByTestId("patient-verify");
   // waitFor doesn't support "enabled" state; poll isEnabled()
   for (let i = 0; i < 50; i++) {
     if (await verifyBtn.isEnabled()) {

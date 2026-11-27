@@ -164,6 +164,7 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
           autoFocus={true}
           disabled={blocked}
           label={t.codeLabel}
+          testId="patient-otp"
           onComplete={flow.submitOtp}
         />
         <div className={stylesB.resendRow}>
@@ -195,6 +196,7 @@ function OtpStep({ flow }: { flow: OtpFlow }) {
           type="submit"
           disabled={blocked}
           pending={state.otpDraft.length !== 6}
+          testId="patient-verify"
         >
           {t.verify}
         </PrimaryButton>
