@@ -378,22 +378,16 @@ async function activeDoctorLogin(
   const code = await requireMockOtp(request, `+91${number}`);
   console.log(`[activeDoctorLogin] Got code: ${code}, filling into input`);
   const otpInput = page.getByTestId("partner-otp");
-  await otpInput.fill(code);
+  // Use pressSequentially to trigger proper React onChange events
+  await otpInput.click();
+  await otpInput.pressSequentially(code, { delay: 50 });
   // Debug: check the actual input value after fill
   const inputValue = await otpInput.inputValue();
   console.log(`[activeDoctorLogin] Input value after fill: '${inputValue}'`);
-  // Check if button is enabled
+  // Wait for button to be enabled (React state updates)
   const verifyBtn = page.getByTestId("staff-submit");
-  const isEnabled = await verifyBtn.isEnabled();
-  console.log(`[activeDoctorLogin] Button enabled: ${isEnabled}`);
-  if (!isEnabled) {
-    // Force check the input's value attribute
-    const valueAttr = await otpInput.getAttribute("value");
-    console.log(`[activeDoctorLogin] Input value attribute: '${valueAttr}'`);
-    // Check input validity
-    const validity = await otpInput.evaluate((el: HTMLInputElement) => el.validity);
-    console.log(`[activeDoctorLogin] Input validity:`, validity);
-  }
+  await verifyBtn.waitFor({ state: "enabled", timeout: 10_000 });
+  console.log(`[activeDoctorLogin] Button is now enabled, clicking`);
   await verifyBtn.click();
   await page.waitForURL("**/doctor", { timeout: 60_000 });
   await expect(page.getByTestId("review-queue")).toBeVisible({

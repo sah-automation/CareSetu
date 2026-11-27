@@ -120,22 +120,16 @@ async function verifyOtp(
   const code = await requireMockOtp(request, `+91${number}`);
   console.log(`[verifyOtp] Got code: ${code}, filling into input`);
   const otpInput = page.getByLabel("Verification code");
-  await otpInput.fill(code);
+  // Use pressSequentially to trigger proper React onChange events
+  await otpInput.click();
+  await otpInput.pressSequentially(code, { delay: 50 });
   // Debug: check the actual input value after fill
   const inputValue = await otpInput.inputValue();
   console.log(`[verifyOtp] Input value after fill: '${inputValue}'`);
-  // Check if button is enabled
+  // Wait for button to be enabled (React state updates)
   const verifyBtn = page.getByRole("button", { name: "Verify & continue" });
-  const isEnabled = await verifyBtn.isEnabled();
-  console.log(`[verifyOtp] Button enabled: ${isEnabled}`);
-  if (!isEnabled) {
-    // Force check the input's value attribute
-    const valueAttr = await otpInput.getAttribute("value");
-    console.log(`[verifyOtp] Input value attribute: '${valueAttr}'`);
-    // Check input validity
-    const validity = await otpInput.evaluate((el: HTMLInputElement) => el.validity);
-    console.log(`[verifyOtp] Input validity:`, validity);
-  }
+  await verifyBtn.waitFor({ state: "enabled", timeout: 10_000 });
+  console.log(`[verifyOtp] Button is now enabled, clicking`);
   await verifyBtn.click();
   await page.waitForURL("**/patient", { timeout: 15_000 });
 }
