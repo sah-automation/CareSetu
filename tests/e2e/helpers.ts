@@ -106,11 +106,14 @@ export async function readMockOtp(
     phone,
   })}`;
   const response = await request.get(url);
-  expect(response.status(), "dev mock-OTP read-back should answer 200").toBe(
-    200,
-  );
-  const body = (await response.json()) as { code: string | null };
-  return body.code;
+  const status = response.status();
+  const body = await response.json();
+  console.log(`[readMockOtp] phone=${phone} status=${status} body=`, JSON.stringify(body));
+  if (status !== 200) {
+    console.log(`[readMockOtp] FAILED: expected 200, got ${status}`);
+  }
+  expect(status, "dev mock-OTP read-back should answer 200").toBe(200);
+  return (body as { code: string | null }).code;
 }
 
 /** The mock OTP for `phone`, refusing when the provider sent no code. */
@@ -126,7 +129,9 @@ export async function requireMockOtp(
   let code: string | null = null;
   for (let attempt = 0; attempt < 5; attempt++) {
     code = await readMockOtp(request, phone);
+    console.log(`[requireMockOtp] attempt=${attempt + 1} phone=${phone} code=`, code);
     if (code && /^\d{6}$/.test(code)) {
+      console.log(`[requireMockOtp] SUCCESS: got valid code ${code} for ${phone}`);
       return code;
     }
     // Wait a bit before retrying (async task scheduling)
