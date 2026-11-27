@@ -377,12 +377,14 @@ async function activeDoctorLogin(
 
   const code = await requireMockOtp(request, `+91${number}`);
   console.log(`[activeDoctorLogin] Got code: ${code}, filling into input`);
-  const otpInput = page.getByTestId("partner-otp");
-  // The OtpInput wrapper (otpWrap) intercepts clicks; focus the hidden input directly
-  await otpInput.focus();
-  await otpInput.pressSequentially(code, { delay: 50 });
+  // The hidden input has pointer-events: none; click the visible .otpWrap to focus it
+  const otpWrap = page.locator(".otpWrap");
+  await otpWrap.click();
+  // Now type on the focused hidden input using keyboard
+  await page.keyboard.type(code, { delay: 50 });
   // Debug: check the actual input value after fill
-  const inputValue = await otpInput.inputValue();
+  const hiddenInput = page.getByTestId("partner-otp");
+  const inputValue = await hiddenInput.inputValue();
   console.log(`[activeDoctorLogin] Input value after fill: '${inputValue}'`);
   // Wait for button to be enabled (React state updates)
   const verifyBtn = page.getByTestId("staff-submit");
