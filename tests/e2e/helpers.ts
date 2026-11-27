@@ -118,7 +118,23 @@ export async function requireMockOtp(
   request: APIRequestContext,
   phone: string,
 ): Promise<string> {
-  const code = await readMockOtp(request, phone);
-  expect(code, `mock SMS should have sent a code to ${phone}`).not.toBeNull();
+  // Retry a few times to handle async delivery queue timing:
+  // the registration request enqueues the SMS, but the delivery queue
+  // processes it in a background task. The /v1/auth/dev/otp endpoint
+  // flushes the queue, but there can be a small window where the task
+  // hasn't been created yet.
+  let code: string | null = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = await readMockOtp(request, phone);
+    if (code && /^\d{6}$/.test(code)) {
+      return code;
+    }
+    // Wait a bit before retrying (async task scheduling)
+    await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+  }
+  expect(
+    code,
+    `mock SMS should have sent a valid 6-digit code to ${phone}`,
+  ).not.toBeNull();
   return code as string;
 }
