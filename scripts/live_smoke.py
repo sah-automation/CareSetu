@@ -547,59 +547,77 @@ def _script_srcs(html: str) -> list[str]:
 
 
 def _fetch_page_chunks(
-    frontend: str, path: str, *, no_retry: bool, settle: bool = False
+    frontend: str,
+    path: str,
+    *,
+    no_retry: bool,
+    settle: bool = False,
+    required_text: str | None = None,
 ) -> tuple[HttpResponse | None, list[str], list[CheckResult]]:
     """Fetch a page and return (response, js_chunk_texts, results).
 
-    When *settle* is True the first fetch waits up to FRONTEND_SETTLE_WINDOW
-    for a 200 (used for /patient which may not be ready yet after a deploy).
+    When *settle* is True, fetching waits up to FRONTEND_SETTLE_WINDOW for a
+    200 and for *required_text* (when given) to appear in the JS chunks. Vercel
+    can serve an older 200 bundle while a rebuild is still pending, so a page
+    that is merely available is not yet a settled deployment.
     Returns (None, [], [fail]) when the page never arrives.
     """
     deadline = time.monotonic() + (0 if no_retry or not settle else FRONTEND_SETTLE_WINDOW_SECONDS)
-    page: HttpResponse | None = None
-    last_observation = "no response yet"
-    while page is None and time.monotonic() < deadline:
-        try:
-            response = _request("GET", f"{frontend}{path}", origin=None)
-        except OSError as exc:
-            last_observation = f"connection failed: {exc}"
-        else:
-            if response.status == 200:
-                page = response
+    while True:
+        page: HttpResponse | None = None
+        last_observation = "no response yet"
+        attempted = False
+        while page is None and (not attempted or time.monotonic() < deadline):
+            attempted = True
+            try:
+                response = _request("GET", f"{frontend}{path}", origin=None)
+            except OSError as exc:
+                last_observation = f"connection failed: {exc}"
             else:
-                last_observation = f"answered HTTP {response.status}"
+                if response.status == 200:
+                    page = response
+                else:
+                    last_observation = f"answered HTTP {response.status}"
+            if page is None:
+                time.sleep(FRONTEND_POLL_SECONDS)
         if page is None:
-            time.sleep(FRONTEND_POLL_SECONDS)
-    if page is None:
-        return (
-            None,
-            [],
-            [
-                _fail(
-                    f"Vercel {path} serves 200",
-                    f"not served within the settle window (last: {last_observation})",
-                ),
-            ],
-        )
+            return (
+                None,
+                [],
+                [
+                    _fail(
+                        f"Vercel {path} serves 200",
+                        f"not served within the settle window (last: {last_observation})",
+                    ),
+                ],
+            )
 
-    results: list[CheckResult] = [_pass(f"Vercel {path} serves 200", "200 answered")]
-    scripts = _script_srcs(page.text)
-    if not scripts:
-        results.append(_fail(f"served JS chunk ({path})", "no script src found"))
-        return page, [], results
-    chunks: list[str] = []
-    for src in scripts:
-        url = urllib.parse.urljoin(frontend, src)
-        try:
-            chunk = _request("GET", url, origin=None)
-        except OSError as exc:
-            results.append(_fail(f"JS chunk {src}", f"connection failed: {exc}"))
-            continue
-        if chunk.status != 200:
-            results.append(_fail(f"JS chunk {src}", f"HTTP {chunk.status}"))
-            continue
-        chunks.append(chunk.text)
-    return page, chunks, results
+        results: list[CheckResult] = [_pass(f"Vercel {path} serves 200", "200 answered")]
+        scripts = _script_srcs(page.text)
+        if not scripts:
+            results.append(_fail(f"served JS chunk ({path})", "no script src found"))
+            return page, [], results
+        chunks: list[str] = []
+        for src in scripts:
+            url = urllib.parse.urljoin(frontend, src)
+            try:
+                chunk = _request("GET", url, origin=None)
+            except OSError as exc:
+                results.append(_fail(f"JS chunk {src}", f"connection failed: {exc}"))
+                continue
+            if chunk.status != 200:
+                results.append(_fail(f"JS chunk {src}", f"HTTP {chunk.status}"))
+                continue
+            chunks.append(chunk.text)
+        if (
+            required_text is None
+            or required_text in "\n".join(chunks)
+            or no_retry
+            or not settle
+            or time.monotonic() >= deadline
+        ):
+            return page, chunks, results
+        time.sleep(FRONTEND_POLL_SECONDS)
 
 
 def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[CheckResult, ...]:
@@ -619,12 +637,14 @@ def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[Chec
     without one both match.
     """
     results: list[CheckResult] = []
+    backend_normalized = backend.rstrip("/")
 
     patient_page, patient_chunks, patient_results = _fetch_page_chunks(
         frontend,
         "/patient",
         no_retry=no_retry,
         settle=True,
+        required_text=backend_normalized,
     )
     results.extend(patient_results)
     if patient_page is None:
@@ -641,7 +661,6 @@ def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[Chec
         return tuple(results)
 
     patient_joined = "\n".join(patient_chunks)
-    backend_normalized = backend.rstrip("/")
     if backend_normalized not in patient_joined:
         results.append(
             _fail(
@@ -656,6 +675,7 @@ def check_frontend(frontend: str, backend: str, *, no_retry: bool) -> tuple[Chec
         "/login",
         no_retry=no_retry,
         settle=True,
+        required_text="Demo OTP:",
     )
     results.extend(login_results)
 
