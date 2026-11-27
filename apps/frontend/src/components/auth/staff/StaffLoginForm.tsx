@@ -764,6 +764,18 @@ export function StaffLoginForm({
               (`PatientAuthWizard.tsx`). The page's "Sign in" heading names the
               page, not the step, and it stands down for the stages that own a
               heading of their own - the signal is `onOwnsHeadingChange`. */}
+              {partner.state.stage === "otp" &&
+                partner.demoOtp !== null &&
+                partner.state.otpSends > 0 && (
+                  // The notice treatment, not the error one, and still a live
+                  // region: the code arrives asynchronously, so the announcement
+                  // is the only thing that reaches a screen reader.
+                  <NoticeMessage
+                    message={t.demoOtp(partner.demoOtp)}
+                    role="status"
+                    testId="partner-demo-banner"
+                  />
+                )}
               <h1 className={stepStyles.title}>{t.codeStepTitle}</h1>
               <div className={stepStyles.center}>
                 <div>
@@ -787,6 +799,7 @@ export function StaffLoginForm({
                 <OtpInput
                   value={partner.state.otpDraft}
                   onChange={partner.setOtpDraft}
+                  autoFocus={true}
                   disabled={partnerBlocked}
                   testId="partner-otp"
                   label={t.codeLabel}
@@ -798,6 +811,7 @@ export function StaffLoginForm({
                   describedBy={
                     partner.state.lastError ? "partner-error" : undefined
                   }
+                  onComplete={partner.submitOtp}
                 />
               </FieldLabel>
               <div className={stepStyles.resendRow}>
@@ -871,18 +885,6 @@ export function StaffLoginForm({
               message={partner.state.lastNotice}
               testId="partner-notice"
             />
-            {partner.state.stage === "otp" &&
-              partner.demoOtp !== null &&
-              partner.state.otpSends > 0 && (
-                // The notice treatment, not the error one, and still a live
-                // region: the code arrives asynchronously, so the announcement
-                // is the only thing that reaches a screen reader.
-                <NoticeMessage
-                  message={t.demoOtp(partner.demoOtp)}
-                  role="status"
-                  testId="partner-demo-banner"
-                />
-              )}
           </div>
         </>
       )}

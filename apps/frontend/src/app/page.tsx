@@ -14,6 +14,10 @@
  * no disease-based program promises (gap G1); featured cards render live data
  * when supply exists, else the honest "Directory launching soon" empty state
  * (gap G2).
+ *
+ * #961: sections 3-9 ride the prototype's scroll-reveal (Reveal wrapper); the
+ * sticky header, hero and footer stay static so first paint and the sticky
+ * bar never depend on JS.
  */
 import type { Metadata } from "next";
 
@@ -25,7 +29,8 @@ import { HowItWorks } from "@/components/public/HowItWorks";
 import { ProvidersBand } from "@/components/public/ProvidersBand";
 import { PublicFooter } from "@/components/public/PublicFooter";
 import { PublicHeader } from "@/components/public/PublicHeader";
-import { SpecialtyChips } from "@/components/public/SpecialtyChips";
+import { Reveal } from "@/components/public/Reveal";
+import { SpecialtyTiles } from "@/components/public/SpecialtyTiles";
 import { TrustStrip } from "@/components/public/TrustStrip";
 
 export const metadata: Metadata = {
@@ -40,13 +45,27 @@ export default function MarketingHomepage() {
       <PublicHeader />
       <main>
         <HeroSearch />
-        <SpecialtyChips />
-        <CategoryTiles />
-        <FeaturedDoctors />
-        <HowItWorks />
-        <TrustStrip />
-        <ProvidersBand />
-        <FinalCtaBand />
+        <Reveal>
+          <SpecialtyTiles />
+        </Reveal>
+        <Reveal>
+          <CategoryTiles />
+        </Reveal>
+        <Reveal>
+          <FeaturedDoctors />
+        </Reveal>
+        <Reveal>
+          <HowItWorks />
+        </Reveal>
+        <Reveal>
+          <TrustStrip />
+        </Reveal>
+        <Reveal>
+          <ProvidersBand />
+        </Reveal>
+        <Reveal>
+          <FinalCtaBand />
+        </Reveal>
       </main>
       <PublicFooter />
     </>

@@ -89,7 +89,7 @@ from modules.observability.facade import ObservabilityFacade
 from modules.ops.adapters.routes import router as ops_router
 from modules.ops.facade import OpsFacade
 from modules.partner.adapters.artifact_store import build_artifact_store
-from modules.partner.adapters.routes import directory_router
+from modules.partner.adapters.routes import directory_router, partners_router
 from modules.partner.adapters.routes import (
     register_error_handlers as register_partner_error_handlers,
 )
@@ -874,6 +874,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if resolved_settings.module_partner_enabled:
         app.include_router(partner_router)
         app.include_router(directory_router)
+        app.include_router(partners_router)
     if resolved_settings.module_intake_enabled:
         app.include_router(intake_router)
     if resolved_settings.module_care_enabled:

@@ -22,7 +22,7 @@ import base64
 from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.errors import emit_access_denial, error_response
@@ -80,6 +80,11 @@ router = APIRouter(prefix="/v1/partner", tags=["partner"])
 # in (FEAT-004), so no auth dependency rides these routes. The gateway still
 # rate-limits them at the edge like the other public surfaces (api-standards).
 directory_router = APIRouter(prefix="/v1/directory", tags=["directory"])
+
+# The public partner photo surface (FEAT-004/005, #959): a NEW unauthenticated
+# router under ``/v1/partners`` - streams an active, verified partner's profile
+# photo bytes. No auth rides these routes (patients browse without logging in).
+partners_router = APIRouter(prefix="/v1/partners", tags=["partners"])
 
 
 @directory_router.get(
@@ -147,6 +152,24 @@ async def public_provider_profile(
     """
     facade = cast(PartnerFacade, request.app.state.partner_facade)
     return await facade.get_provider_profile(partner_id)
+
+
+@partners_router.get(
+    "/{partner_id}/photo",
+    status_code=status.HTTP_200_OK,
+    summary="Stream a public partner profile photo (open, no login required)",
+)
+async def public_partner_photo(
+    request: Request,
+    partner_id: int,
+) -> Response:
+    facade = cast(PartnerFacade, request.app.state.partner_facade)
+    photo = await facade.get_partner_photo(partner_id)
+    return Response(
+        content=photo.data,
+        media_type=photo.media_type,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 class PartnerSelectRequest(BaseModel):

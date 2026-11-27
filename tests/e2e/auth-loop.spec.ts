@@ -118,9 +118,11 @@ async function verifyOtp(
   number: string,
 ): Promise<void> {
   const code = await requireMockOtp(request, `+91${number}`);
-  await page.getByLabel("Verification code").fill(code);
-  await page.getByRole("button", { name: "Verify & continue" }).click();
-  await page.waitForURL("**/patient", { timeout: 15_000 });
+  // OtpInput fires onComplete as soon as the sixth digit lands, so filling
+  // the code already submits the step and navigates. There is no verify button
+  // left to click here.
+  await page.getByTestId("patient-otp").fill(code);
+  await page.waitForURL("**/patient", { timeout: 30_000 });
 }
 
 // FEAT-014 T11 (#471): fetch the caller's identity with a Bearer JWT. Shared
@@ -257,8 +259,8 @@ async function partnerLogin(
     });
 
   const code = await requireMockOtp(request, `+91${number}`);
+  // OtpInput submits on the sixth digit; clicking Verify code races that submit.
   await page.getByTestId("partner-otp").fill(code);
-  await page.getByTestId("staff-submit").click();
   await page.waitForURL("**/partner/status/pending", { timeout: 60_000 });
   await expect(
     page.getByRole("heading", { name: "Your application is being verified" }),
@@ -272,7 +274,10 @@ async function partnerLogin(
 async function expectNoAxeViolations(page: Page, label: string): Promise<void> {
   const results = await new AxeBuilder({ page }).analyze();
   const failures = results.violations.map(
-    (v) => `${v.id} (${v.impact}): ${v.help}`,
+    (v) =>
+      `${v.id} (${v.impact}): ${v.help} [${v.nodes
+        .map((n) => n.target.join(" "))
+        .join(", ")}]`,
   );
   expect(
     failures,
@@ -461,8 +466,8 @@ test("an unauthenticated attempt at the protected surface is denied", async ({
     timeout: 30_000,
   });
   const code = await requireMockOtp(request, `+91${returnPhone}`);
-  await page.getByLabel("Verification code").fill(code);
-  await page.getByRole("button", { name: "Verify & continue" }).click();
+  // The sixth digit completes the OTP and submits the step automatically.
+  await page.getByTestId("patient-otp").fill(code);
   await page.waitForURL(
     (url) =>
       url.pathname === "/patient" &&
@@ -479,6 +484,7 @@ test("the homepage, consent overlay, auth wizard and patient page pass the axe a
   // TEST-C2 (#131) + PHASE-2.6 T14 (#205, spec #191 decision 15): assert zero
   // axe violations on the resolved homepage, each wizard stage, the open
   // consent overlay, and the signed-in surface.
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
   await expect(
     page.getByRole("heading", {

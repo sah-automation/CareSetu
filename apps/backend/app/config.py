@@ -17,6 +17,67 @@ from modules.iam.domain.mfa_lockout import (
     DEFAULT_OPERATOR_MFA_LOCKOUT_THRESHOLD,
 )
 
+# Secret blob key name for consolidated secrets in Google Secret Manager
+APP_SECRETS_JSON_KEY = "APP_SECRETS_JSON"
+
+# Mapping from secret blob keys to Settings attribute names
+SECRET_BLOB_KEY_MAP: dict[str, str] = {
+    "database_url": "database_url",
+    "gateway_jwt_signing_key": "gateway_jwt_signing_key",
+    "iam_mfa_secret_key": "iam_mfa_secret_key",  # nosec B105 - key name, not a secret value
+    "langfuse_public_key": "langfuse_public_key",
+    "langfuse_secret_key": "langfuse_secret_key",  # nosec B105 - key name, not a secret value
+    "sentry_dsn": "sentry_dsn",
+    "otel_exporter_otlp_headers": "otel_exporter_otlp_headers",
+    "supabase_service_role_key": "supabase_service_role_key",
+    "intake_media_key": "intake_media_key",
+    "profile_media_key": "profile_media_key",
+    "ai_api_key": "ai_api_key",
+    "ai_fallback_api_key": "ai_fallback_api_key",
+    "ai_fallback_provider": "ai_fallback_provider",
+    "ai_fallback_base_url": "ai_fallback_base_url",
+    "ai_fallback_model": "ai_fallback_model",
+    "prometheus_remote_write_headers": "prometheus_remote_write_headers",
+}
+
+
+def parse_secret_blob(raw: str) -> dict[str, str]:
+    """Parse the APP_SECRETS_JSON environment variable into a dict.
+
+    The blob is expected to be a JSON object with keys matching SECRET_BLOB_KEY_MAP.
+    Missing keys are ignored (they fall back to individual env vars or defaults).
+    """
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"APP_SECRETS_JSON must be valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("APP_SECRETS_JSON must be a JSON object")
+    result: dict[str, str] = {}
+    for blob_key, attr_name in SECRET_BLOB_KEY_MAP.items():
+        value = data.get(blob_key)
+        if value is not None:
+            if not isinstance(value, str):
+                raise ValueError(f"APP_SECRETS_JSON[{blob_key!r}] must be a string")
+            result[attr_name] = value
+    return result
+
+
+def apply_secret_blob(settings: "Settings") -> None:
+    """Apply parsed secret blob values to a Settings instance.
+
+    Called from Settings.__post_init__ after all env vars are loaded.
+    Secret blob values take precedence over individual env vars.
+    """
+    raw = os.environ.get(APP_SECRETS_JSON_KEY)
+    if not raw:
+        return
+    parsed = parse_secret_blob(raw)
+    for attr_name, value in parsed.items():
+        if value is not None and value != "":
+            object.__setattr__(settings, attr_name, value)
+
+
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu"
 # Database connection pool settings (ARCH-P1 #813): the web app builds its primary
 # engine through the factory and disposes it on shutdown. Worker, script, and
@@ -854,6 +915,9 @@ class Settings:
     llm_judge_prompt_version: str = DEFAULT_LLM_JUDGE_PROMPT_VERSION
 
     def __post_init__(self) -> None:
+        # Apply consolidated secret blob from APP_SECRETS_JSON
+        apply_secret_blob(self)
+
         # Database connection pool validation (ARCH-P1 #813)
         if self.db_pool_size < 1:
             raise ValueError("db_pool_size must be >= 1")

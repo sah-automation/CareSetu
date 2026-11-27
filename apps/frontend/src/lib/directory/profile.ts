@@ -20,7 +20,7 @@
 // verified marker, and a profile the gate rejects stays a 404 with none of them.
 
 import { ApiError } from "@/lib/api-errors";
-import { guardShape, request } from "@/lib/request";
+import { guardShape, request, requestBlob } from "@/lib/request";
 
 import type { ProviderType } from "./links";
 
@@ -52,6 +52,8 @@ export interface ProviderCredential {
  */
 export interface ProviderProfile {
   partner_id: number;
+  /** Opaque profile-media ref for the partner's photo, or null when none. */
+  photo_ref?: string | null;
   practice_name: string | null;
   partner_type: ProviderType;
   specialty: string | null;
@@ -59,6 +61,10 @@ export interface ProviderProfile {
   verified: boolean;
   credentials: ProviderCredential[];
   // --- the declared band (#613) -------------------------------------------
+  /** Consultation fee in integer paise, null until the doctor sets one. The
+   * backend serves it on this route; it is a price the provider set, so it
+   * renders as a price and never carries a verified marker. */
+  consultation_fee: number | null;
   /** The building the practice is in, distinct from `practice_name`. */
   clinic_name: string | null;
   /** Every specialty the provider practises, not the one representative
@@ -162,6 +168,9 @@ function isProviderProfile(value: unknown): value is ProviderProfile {
   const record = value as Record<string, unknown>;
   return (
     typeof record.partner_id === "number" &&
+    (record.photo_ref === undefined ||
+      record.photo_ref === null ||
+      typeof record.photo_ref === "string") &&
     (typeof record.practice_name === "string" ||
       record.practice_name === null) &&
     (record.partner_type === "doctor" ||
@@ -180,8 +189,18 @@ function isProviderProfile(value: unknown): value is ProviderProfile {
       isDeclaredSelection(record[field]),
     ) &&
     (typeof record.experience_years === "number" ||
-      record.experience_years === null)
+      record.experience_years === null) &&
+    (typeof record.consultation_fee === "number" ||
+      record.consultation_fee === null)
   );
+}
+
+/**
+ * Stream a public partner's profile photo bytes. The partner must be visible in
+ * the directory (active + verified); the endpoint answers 404 otherwise.
+ */
+export async function fetchPartnerPhoto(partnerId: number): Promise<Blob> {
+  return requestBlob(`/v1/partners/${partnerId}/photo`);
 }
 
 export async function fetchProviderProfile(

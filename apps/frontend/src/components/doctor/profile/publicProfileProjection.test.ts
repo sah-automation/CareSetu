@@ -213,6 +213,7 @@ describe("projectPublicProfile", () => {
       "area",
       "city",
       "clinic_name",
+      "consultation_fee",
       "consulting_days",
       "consulting_hours",
       "credentials",

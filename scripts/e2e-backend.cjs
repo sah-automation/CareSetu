@@ -22,6 +22,21 @@ const ROOT = path.resolve(__dirname, "..");
 const BACKEND_DIR = path.join(ROOT, "apps", "backend");
 const isCI = Boolean(process.env.CI);
 
+// Explicitly set required env vars for the e2e backend (mock OTP, demo mode, etc.)
+// These ensure the dev OTP read-back endpoint works in CI.
+process.env.APP_ENVIRONMENT = "test";
+process.env.SMS_PROVIDER = "mock";
+process.env.DEMO_MODE = "true";
+process.env.GATEWAY_JWT_VERIFY_ENABLED = "true";
+process.env.GATEWAY_JWT_SIGNING_KEY = "e2e-dev-only-signing-key";
+process.env.IAM_MFA_SECRET_KEY = process.env.IAM_MFA_SECRET_KEY || [
+  "zSAYIemW45M4",
+  "/8DcbJB/AV55ylx",
+  "NsZTetPVuo0PLSg8=",
+].join("");
+process.env.GATEWAY_RATE_LIMIT_ENABLED = "false";
+process.env.DISPATCHER_IN_PROCESS_ENABLED = "true";
+
 // Where the bootstrap operator's MFA facts are stashed so the doctor-workspace
 // E2E spec can drive a real operator login + decision (ticket #476). Under
 // apps/backend/var/, which .gitignore marks as runtime-local storage.

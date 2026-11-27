@@ -34,7 +34,11 @@ function writeHintCookie(): void {
 }
 
 function expireHintCookie(): void {
-  document.cookie = `${HINT_COOKIE}=; Path=/; Max-Age=0`;
+  const secure =
+    typeof window !== "undefined" && window.location.protocol === "https:";
+  document.cookie = `${HINT_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax${
+    secure ? "; Secure" : ""
+  }`;
 }
 
 export interface StoredSession {

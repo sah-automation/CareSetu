@@ -7,8 +7,11 @@ import { defineConfig, devices } from "@playwright/test";
 // can still pass DATABASE_URL at the job level.
 const BACKEND_ENV = {
   ...process.env,
+  // Explicitly set required env vars for the e2e backend (mock OTP, demo mode, etc.)
+  // These ensure the dev OTP read-back endpoint works in CI.
   APP_ENVIRONMENT: "test",
   SMS_PROVIDER: "mock",
+  DEMO_MODE: "true",
   GATEWAY_JWT_VERIFY_ENABLED: "true",
   GATEWAY_JWT_SIGNING_KEY: "e2e-dev-only-signing-key",
   // The iam MFA needs a key to encrypt the bootstrap operator's TOTP secret; a

@@ -297,13 +297,20 @@ class DirectoryFacade:
                 #
                 # KNOWN, DELIBERATE: ``get_provider_profile`` is also patient-facing
                 # (no login) and still projects the vocabulary default with its
-                # Daltonganj fallback, so for now a card reads the doctor's locality
+                # Daltongaj fallback, so for now a card reads the doctor's locality
                 # and the public profile behind it reads the service area. #613 owns
                 # the public profile and is where the two are reconciled; this ticket
                 # does not widen it.
                 partner_profiles.c.address_locality.label("declared_locality"),
                 partner_profiles.c.consultation_fee_paise.label("consultation_fee"),
                 distance_km.label("distance_km"),
+                # #964: widen projection for directory card redesign - five declared
+                # profile fields so the card renders real data instead of placeholders.
+                partner_profiles.c.clinic_name,
+                partner_profiles.c.experience_years,
+                partner_profiles.c.languages,
+                partner_profiles.c.address_line,
+                partner_profiles.c.address_city,
             ).join(
                 partner_profiles,
                 partner_profiles.c.id == partner_directory_index.c.partner_id,
@@ -366,6 +373,14 @@ class DirectoryFacade:
                     distance_km=float(row.distance_km),
                     verified=True,
                     consultation_fee=_row_fee_paise(row),
+                    # #964: directory card widening - five declared profile fields.
+                    clinic_name=(str(row.clinic_name) if row.clinic_name is not None else None),
+                    experience_years=(
+                        int(row.experience_years) if row.experience_years is not None else None
+                    ),
+                    languages=known_selection(row.languages, ConsultLanguage),
+                    address_line=row.address_line,
+                    city=row.address_city,
                 )
                 for row in rows
             ],

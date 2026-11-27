@@ -13,6 +13,7 @@ import {
 } from "@/lib/directory/links";
 import { STRINGS } from "@/lib/i18n/dictionaries";
 import { useLang } from "@/lib/i18n/LangContext";
+import { useAuth } from "@/lib/auth/AuthContext";
 
 // The three find-a-X / register-a-X links mirror the tiles' ProviderType
 // presets.
@@ -20,7 +21,11 @@ const PROVIDER_TYPES: ProviderType[] = ["doctor", "lab", "chemist"];
 
 export function PublicFooter() {
   const { lang } = useLang();
+  const { isAuthenticated } = useAuth();
   const t = STRINGS[lang].home;
+  const operatorConsoleHref = isAuthenticated
+    ? "/operator"
+    : "/staff/login?role=operator";
 
   const findLabels: Record<ProviderType, string> = {
     doctor: t.footer.findDoctors,
@@ -110,10 +115,12 @@ export function PublicFooter() {
             </li>
           </ul>
         </div>
+        {/* #961: prototype's "Why CareSetu" blurb in the fourth column
+            (replaces the duplicated trust statements). */}
         <div>
-          <p className="text-sm leading-relaxed text-txt-muted">{t.trust.t1}</p>
-          <p className="mt-2 text-sm leading-relaxed text-txt-muted">
-            {t.trust.t2}
+          <h3 className="text-sm font-semibold text-txt">{t.footer.why}</h3>
+          <p className="mt-3 text-sm leading-relaxed text-txt-muted">
+            {t.footer.whyNote}
           </p>
         </div>
       </div>
@@ -121,7 +128,7 @@ export function PublicFooter() {
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-4 text-xs text-txt-muted">
           <span>{t.footer.meta}</span>
           <Link
-            href="/operator"
+            href={operatorConsoleHref}
             className="text-txt-muted hover:text-accent hover:underline"
           >
             {t.footer.operatorConsole}

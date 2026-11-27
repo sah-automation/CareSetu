@@ -41,6 +41,7 @@ import {
   ACCESS_TOKEN_TTL_SECONDS,
   PROACTIVE_REFRESH_RATIO,
 } from "@/lib/config";
+import { resolveRole, type Role } from "@/components/dashboard/types";
 
 const API_BASE_URL: string =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -402,6 +403,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [queryClient]);
 
   function logout() {
+    // Determine the redirect target from the user's current role BEFORE
+    // clearing the session, so we know which login surface to land on.
+    // Prefer an explicit staff role carried by the session over the selected
+    // shell, so a staff account logs back in to the staff surface even when
+    // its last active shell was the patient one (spec #956).
+    const roles = user?.roles ?? [];
+    const roleFromSession = roles.includes("operator")
+      ? "operator"
+      : roles.includes("partner")
+        ? "partner"
+        : roles.includes("doctor")
+          ? "doctor"
+          : roles.includes("patient")
+            ? "patient"
+            : null;
+    const currentRole: Role = resolveRole(roleFromSession ?? selectedRole);
+
     clearSession();
     clearSelectedRole();
     clearCachedSessionMe(queryClient);
@@ -412,7 +430,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     setUser(null);
     setSelectedRole(null);
-    router.replace("/");
+
+    let target = "/login";
+    if (currentRole === "operator") {
+      target = "/staff/login?role=operator";
+    } else if (currentRole === "partner" || currentRole === "doctor") {
+      target = "/staff/login";
+    }
+    router.replace(target);
   }
 
   return (

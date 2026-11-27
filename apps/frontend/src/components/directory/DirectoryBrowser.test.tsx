@@ -10,6 +10,7 @@ import {
   render as rtlRender,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useSyncExternalStore } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -196,11 +197,14 @@ describe("DirectoryBrowser loading the directory", () => {
     render(<DirectoryBrowser />);
 
     await screen.findByTestId("directory-cards");
+    // Specialty + type now live on the specialty line; the area renders in the
+    // practice line (clinic_name when declared, else area).
     expect(
-      screen.getByText(
-        /General Physician \u00b7 Doctors \u00b7 Medininagar Rd/,
-      ),
+      screen.getByText(/General Physician \u00b7 Doctors/),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("directory-card-practice")).toHaveTextContent(
+      "Medininagar Rd",
+    );
   });
 
   it("drops a false-tick row entirely - card and tick disappear together", async () => {
@@ -627,5 +631,200 @@ describe("DirectoryBrowser partner.selected emission (T6)", () => {
       partner_type: "lab",
       source: "search_card",
     });
+  });
+});
+
+describe("DirectoryBrowser sticky search, active chips, and FilterSheet (#967, FEAT-004)", () => {
+  function chipByKey(key: string): HTMLElement {
+    const chip = screen
+      .getAllByTestId("active-filter-chip")
+      .find((node) => node.dataset.filter === key);
+    if (!chip) throw new Error(`no active chip for ${key}`);
+    return chip;
+  }
+
+  it("renders the sticky search card (sticky ≤720px) with a Filters button that opens the sheet", async () => {
+    searchDirectory.mockResolvedValue(view([doctor(1, "Dr. A. Kumar")]));
+
+    render(<DirectoryBrowser presetType="doctor" />);
+    await screen.findByTestId("directory-cards");
+
+    const sticky = screen.getByTestId("search-sticky");
+    expect(sticky.className).toContain("max-[720px]:sticky");
+    expect(sticky.className).toContain("max-[720px]:top-16");
+
+    fireEvent.click(screen.getByTestId("open-filters"));
+
+    expect(await screen.findByTestId("filter-sheet")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("renders a dismissable chip for each committed param", () => {
+    searchDirectory.mockResolvedValue(view([doctor(1, "Dr. A. Kumar")]));
+    navigation.setParams(
+      new URLSearchParams(
+        "q=kumar&type=doctor&specialty=Pediatrician&location=Daltonganj",
+      ),
+    );
+
+    render(<DirectoryBrowser />);
+
+    // #966: the type is shown by the type chip row, not duplicated as an
+    // active-filter chip below the search bar.
+    expect(screen.getAllByTestId("active-filter-chip")).toHaveLength(3);
+    expect(within(chipByKey("q")).getByText("kumar")).toBeInTheDocument();
+    expect(screen.queryByTestId("dismiss-type")).not.toBeInTheDocument();
+    expect(
+      within(chipByKey("specialty")).getByText("Pediatrician"),
+    ).toBeInTheDocument();
+    expect(
+      within(chipByKey("location")).getByText("Daltonganj"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("group", { name: "Active filters" }),
+    ).toBeInTheDocument();
+  });
+
+  it("dismiss removes only that param from the URL and refetches", async () => {
+    searchDirectory.mockResolvedValue(view([doctor(1, "Dr. A. Kumar")]));
+    navigation.setParams(
+      new URLSearchParams(
+        "q=kumar&type=doctor&specialty=Pediatrician&location=Daltonganj",
+      ),
+    );
+
+    render(<DirectoryBrowser />);
+    await screen.findByTestId("directory-cards");
+    expect(searchDirectory).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("dismiss-specialty"));
+
+    expect(mockReplace).toHaveBeenCalledWith(
+      "/directory?q=kumar&type=doctor&location=Daltonganj",
+    );
+    await waitFor(() =>
+      expect(searchDirectory).toHaveBeenLastCalledWith({
+        q: "kumar",
+        partnerType: "doctor",
+        specialty: null,
+      }),
+    );
+    expect(screen.queryByTestId("dismiss-specialty")).not.toBeInTheDocument();
+    expect(screen.getByTestId("dismiss-location")).toBeInTheDocument();
+  });
+
+  it("integration: /doctors?specialty= returns filtered results; chip shows and dismiss works", async () => {
+    const all = [
+      doctor(1, "Dr. A. Kumar"),
+      doctor(2, "Dr. B. Singh", { specialty: "Pediatrician" }),
+    ];
+    // Backend-faithful mock: the specialty param actually narrows the result
+    // set, so the assertions prove filtering end to end through the URL.
+    searchDirectory.mockImplementation(async ({ specialty }) =>
+      view(all.filter((entry) => !specialty || entry.specialty === specialty)),
+    );
+    navigation.setParams(new URLSearchParams("specialty=General+Physician"));
+
+    render(<DirectoryBrowser presetType="doctor" />);
+    await screen.findByTestId("directory-cards");
+
+    expect(searchDirectory).toHaveBeenLastCalledWith({
+      q: "",
+      partnerType: "doctor",
+      specialty: "General Physician",
+    });
+    expect(screen.getByText("Dr. A. Kumar")).toBeInTheDocument();
+    expect(screen.queryByText("Dr. B. Singh")).not.toBeInTheDocument();
+    expect(
+      within(chipByKey("specialty")).getByText("General Physician"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("dismiss-specialty"));
+
+    expect(mockReplace).toHaveBeenCalledWith("/doctors");
+    await waitFor(() =>
+      expect(searchDirectory).toHaveBeenLastCalledWith({
+        q: "",
+        partnerType: "doctor",
+        specialty: null,
+      }),
+    );
+    expect(await screen.findByText("Dr. B. Singh")).toBeInTheDocument();
+    expect(screen.queryByTestId("active-filter-chip")).not.toBeInTheDocument();
+  });
+
+  it("specialty checkbox in the sheet commits ?specialty= and triggers a refetch", async () => {
+    searchDirectory.mockResolvedValue(
+      view([
+        doctor(1, "Dr. A. Kumar"),
+        doctor(2, "Dr. B. Singh", { specialty: "Pediatrician" }),
+      ]),
+    );
+
+    render(<DirectoryBrowser presetType="doctor" />);
+    await screen.findByTestId("directory-cards");
+
+    fireEvent.click(screen.getByTestId("open-filters"));
+    await screen.findByTestId("filter-sheet");
+
+    const dialog = within(screen.getByRole("dialog"));
+    const row = dialog
+      .getByText("Pediatrician")
+      .closest('[data-testid="filter-check-row"]') as HTMLElement;
+    fireEvent.click(within(row).getByTestId("filter-checkbox"));
+
+    expect(mockReplace).toHaveBeenCalledWith("/doctors?specialty=Pediatrician");
+    await waitFor(() =>
+      expect(searchDirectory).toHaveBeenLastCalledWith({
+        q: "",
+        partnerType: "doctor",
+        specialty: "Pediatrician",
+      }),
+    );
+    expect(screen.getByTestId("dismiss-specialty")).toBeInTheDocument();
+  });
+
+  it("Reset in the sheet clears q, specialty, and location", async () => {
+    searchDirectory.mockResolvedValue(view([doctor(1, "Dr. A. Kumar")]));
+    navigation.setParams(
+      new URLSearchParams("q=kumar&specialty=Pediatrician&location=Daltonganj"),
+    );
+
+    render(<DirectoryBrowser presetType="doctor" />);
+    await screen.findByTestId("directory-cards");
+
+    fireEvent.click(screen.getByTestId("open-filters"));
+    await screen.findByTestId("filter-sheet");
+    fireEvent.click(screen.getByTestId("filter-reset"));
+
+    expect(mockReplace).toHaveBeenCalledWith("/doctors");
+    await waitFor(() =>
+      expect(searchDirectory).toHaveBeenLastCalledWith({
+        q: "",
+        partnerType: "doctor",
+        specialty: null,
+      }),
+    );
+  });
+
+  it("Show in the sheet closes it and keeps the result count label", async () => {
+    searchDirectory.mockResolvedValue(
+      view([doctor(1, "Dr. A. Kumar"), doctor(2, "Dr. B. Singh")]),
+    );
+
+    render(<DirectoryBrowser presetType="doctor" />);
+    await screen.findByTestId("directory-cards");
+
+    fireEvent.click(screen.getByTestId("open-filters"));
+    await screen.findByTestId("filter-sheet");
+
+    expect(screen.getByTestId("filter-show")).toHaveTextContent(
+      "Show 2 doctors",
+    );
+
+    fireEvent.click(screen.getByTestId("filter-show"));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
   });
 });

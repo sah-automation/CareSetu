@@ -318,10 +318,6 @@ const en = {
       registerDoctor: "Doctor",
       registerLab: "Lab",
       registerChemist: "Chemist",
-      noRolePickerNote:
-        "No role picker here by design: at sign-in your role comes from your account, never chosen by hand. Patients use the phone OTP wizard instead.",
-      interimNote: "Interim staff entry stays until Phase 5:",
-      chooseRoleLink: "choose role",
       emailInvalid: "Enter a valid email address.",
       passwordRequired: "Enter your password.",
       summaryTitle: (n: number) =>
@@ -602,19 +598,24 @@ const en = {
       dashboard: "Dashboard",
     },
     hero: {
+      eyebrow: "Verified providers near you",
       h1: "Find trusted doctors, labs and chemists near you",
-      sub: "Book visits, share reports and keep every record in one place - shared only with your consent.",
+      sub: "Ready to be seen? Start searching below",
+      careLabel: "Care",
+      searchLabel: "Search",
       typeLabel: "Provider type",
       typeDoctor: "Doctor",
       typeLab: "Lab",
       typeChemist: "Chemist",
-      searchPlaceholder: "Search by name, specialty or test",
+      searchPlaceholder: "Condition, procedure or doctor name",
       locationLabel: "Location",
-      cta: "Search",
+      locationPlaceholder: "Daltonganj, JH",
+      cta: "Find care",
       getStarted: "Get started",
     },
     chips: {
       title: "Common needs",
+      headline: "Top-searched specialties",
       generalPhysician: "General Physician",
       pediatrician: "Pediatrician",
       gynecologist: "Gynecologist",
@@ -625,22 +626,36 @@ const en = {
       medicineDelivery: "Medicine delivery",
     },
     tiles: {
+      eyebrow: "Browse",
       title: "Browse by category",
       doctorsSub: "GP, Pediatrician, Gynecologist, Dentist",
       labsSub: "Blood tests, X-ray, full body checkup",
       chemistsSub: "Medicine delivery with e-prescription",
+      explore: "Explore doctors",
+      exploreLabs: "Explore labs",
+      exploreChemists: "Explore chemists",
     },
     featured: {
+      eyebrow: "Directory",
       title: "Featured doctors",
       viewAll: "View all doctors",
       verified: "Verified",
+      viewProfile: "View profile",
+      consultLabel: "consult",
+      carouselPrev: "Scroll cards left",
+      carouselNext: "Scroll cards right",
+      carouselLabel: "Featured doctors",
+      carouselHint: "Swipe or use the arrows to see more",
       emptyTitle: "Directory launching soon in Daltonganj",
       emptyBody:
         "We verify every provider before listing. No doctors are shown until their credentials clear verification.",
       emptyCta: "Get started as a patient",
     },
     how: {
+      eyebrow: "The care loop",
       title: "How CareSetu works",
+      sub: "Three steps from search to a record you control.",
+      aiTag: "AI assisted",
       s1t: "Find a provider",
       s1b: "Search verified doctors, labs and chemists near you.",
       s2t: "Share symptoms by voice",
@@ -649,12 +664,15 @@ const en = {
       s3b: "Prescriptions, reports and records live in your health record, shared only with your consent.",
     },
     trust: {
+      eyebrow: "Trust & consent",
+      title: "Built on consent, not surprises",
       t1: "Credentials verified before listing",
       t2: "Nothing is shared without your consent",
       t3: "Your records, your control - revocable anytime",
       privacy: "Privacy & terms",
     },
     providers: {
+      eyebrow: "Supply side",
       title: "Are you a provider?",
       sub: "Register now - our team verifies before you are listed.",
       doctorT: "Are you a doctor?",
@@ -673,6 +691,9 @@ const en = {
       patients: "Patients",
       providersCol: "Providers",
       companyLegal: "Company & legal",
+      why: "Why CareSetu",
+      whyNote:
+        "Verified providers, consent-first sharing, and one record for your whole family - built for Daltonganj and peri-urban care.",
       findDoctors: "Find doctors",
       findLabs: "Find labs",
       findChemists: "Find chemists",
@@ -869,6 +890,87 @@ const en = {
     errorTitle: "We could not load the directory",
     errorBody: "Check your connection and try again.",
     retry: "Try again",
+    experienceYears: (n: number) => `${n} years experience`,
+    clinic: "Clinic",
+    address: "Address",
+    fee: "Consultation fee",
+    rangeLabel: (start: string, end: string) => `${start} \u2013 ${end}`,
+    prevWeek: "Previous week",
+    nextWeek: "Next week",
+    more: "More",
+    viewAll: "View all",
+    appts: (n: number) => `${n} appts`,
+    slots: (n: number) => `${n} slots`,
+    windows: (n: number) => `${n} windows`,
+    videoVisit: "Video visits",
+    homeCollection: "Home collection",
+    delivery: "Delivery",
+    noAppts: "No appts",
+    noSlots: "No slots",
+    noWindows: "No windows",
+    today: "Today",
+    mon: "Mon",
+    tue: "Tue",
+    wed: "Wed",
+    thu: "Thu",
+    fri: "Fri",
+    sat: "Sat",
+    sun: "Sun",
+    monthNavPrev: "Previous month",
+    monthNavNext: "Next month",
+    ratingReviews: (n: number) => `${n} reviews`,
+    selectionOpen: "Open",
+    selectionClosed: "Closed",
+    selectionPast: "Past",
+    filtersCta: "Filters",
+    activeFiltersLabel: "Active filters",
+    clearQuery: "Clear query",
+    clearTypeFilter: "Clear type filter",
+    clearSpecialty: "Clear specialty",
+    clearLocation: "Clear location",
+    filterSheet: {
+      title: "Filters",
+      description: "Narrow the results with the filters below.",
+      locationLabel: "Location",
+      locationPlaceholder: "City or area",
+      specialtyLabel: "Specialty",
+      consultTypeLabel: "Consultation type",
+      consultAll: "All",
+      consultInClinic: "In-clinic",
+      consultOnline: "Online",
+      testTypeLabel: "Test type",
+      servicesLabel: "Services",
+      availabilityLabel: "Availability",
+      availabilityAnyTime: "Any time",
+      availabilityOpenNow: "Open now",
+      reset: "Reset",
+      showCount: (n: number, noun: string) => `Show ${n} ${noun}`,
+      nounDoctors: "doctors",
+      nounLabs: "labs",
+      nounChemists: "chemists",
+      filterHomeCollection: "Home collection",
+      filterNABL: "NABL accredited only",
+      filterHomeDelivery: "Home delivery",
+      filterEPrescription: "E-prescription delivery",
+      filterGeneric: "Generic medicines",
+      filterCountSuffix: (n: number) => `+${n}`,
+      labTestTypes: [
+        { id: "blood_tests", label: "Blood tests" },
+        { id: "x_ray", label: "X-ray" },
+        { id: "full_body", label: "Full body checkup" },
+        { id: "pathology", label: "Pathology" },
+        { id: "ecg", label: "ECG" },
+      ],
+      labServices: [
+        { id: "home_collection", label: "Home collection" },
+        { id: "nabl", label: "NABL accredited only" },
+      ],
+      chemistServices: [
+        { id: "home_delivery", label: "Home delivery" },
+        { id: "e_prescription", label: "E-prescription delivery" },
+        { id: "generic", label: "Generic medicines" },
+      ],
+    },
   },
 
   // providerProfile.* surface - PHASE-6 T06 (#312): the public provider
@@ -887,12 +989,112 @@ const en = {
     practiceDetailsHeading: "Practice details",
     detailsHeading: "Details",
     typeLabel: "Type",
-    // #619: the DECLARED band - what the provider says about itself, as opposed
-    // to the verified band above, which is what the platform checked. The copy has
-    // to make that split legible in words, because the section's dashed edge only
-    // makes it legible in shape: a patient must not have to infer which half of
-    // the page we are standing behind.
-    declaredHeading: "Declared by the provider",
+    // PHASE-6 profile redesign (#968): the two-column prototype layout's copy -
+    // the hero's price line, the trust cue's per-type titles, the details card's
+    // services row, the CTA titles, and the whole right rail (month grid + map).
+    trustDoctorTitle: "Council registration verified",
+    trustPartnerTitle: "License verified",
+    servicesHeading: "Services",
+    ctaDoctorTitle: "Book a consultation",
+    ctaPartnerTitle: "Book a test",
+    // #968 left-column completeness: the prototype's practice/details grid,
+    // hero fee label, OPD strip prefix, and per-type CTA notes.
+    consultationFeeLabel: "consultation fee",
+    opdLabel: "OPD",
+    specialtyLabel: "Specialty",
+    consultationTypesLabel: "Consultation types",
+    locationLabel: "Location",
+    accreditationLabel: "Accreditation",
+    serviceAreaLabel: "Service area",
+    homeCollectionLabel: "Home collection",
+    reportTurnaroundLabel: "Report turnaround",
+    ctaDoctorBody:
+      "Availability and slot booking will be available in a future phase.",
+    ctaPartnerBody:
+      "Test booking and report filing will be available in a future phase.",
+    availability: {
+      heading: "Availability",
+      ariaLabel: "Availability for the whole month",
+      sub: (kind: string) => `${kind} \u00b7 whole month in one view`,
+      kinds: {
+        doctor: "Consultation slots",
+        lab: "Home collection windows",
+        chemist: "Delivery windows",
+      },
+      prevMonth: "Previous month",
+      nextMonth: "Next month",
+      legendOpen: {
+        doctor: "Slots open",
+        lab: "Collection open",
+        chemist: "Delivery open",
+      },
+      legendClosed: {
+        doctor: "No slots",
+        lab: "Closed",
+        chemist: "Closed",
+      },
+      legendToday: "Today",
+      cellOpen: {
+        doctor: (n: number) => `${n} slots`,
+        lab: (n: number) => `${n} open`,
+        chemist: (n: number) => `${n} open`,
+      },
+      cellClosed: {
+        doctor: "No slots",
+        lab: "Closed",
+        chemist: "Closed",
+      },
+      cellAriaOpen: {
+        doctor: (n: number) => `${n} consultation slots`,
+        lab: (n: number) => `${n} home-collection windows`,
+        chemist: (n: number) => `${n} delivery windows`,
+      },
+      cellAriaClosed: {
+        doctor: "no slots",
+        lab: "closed",
+        chemist: "closed",
+      },
+      cellAriaPast: "past date",
+      selectedOpen: {
+        doctor: (label: string, n: number, hours: string | null) =>
+          hours
+            ? `${label} \u00b7 ${n} consultation slots \u00b7 ${hours}`
+            : `${label} \u00b7 ${n} consultation slots`,
+        lab: (label: string, n: number, hours: string | null) =>
+          hours
+            ? `${label} \u00b7 ${n} home-collection windows \u00b7 ${hours}`
+            : `${label} \u00b7 ${n} home-collection windows`,
+        chemist: (label: string, n: number, hours: string | null) =>
+          hours
+            ? `${label} \u00b7 ${n} delivery windows \u00b7 ${hours}`
+            : `${label} \u00b7 ${n} delivery windows`,
+      },
+      selectedClosed: {
+        doctor: (label: string) =>
+          `${label} \u00b7 No slots \u00b7 clinic closed`,
+        lab: (label: string) =>
+          `${label} \u00b7 Closed \u00b7 no home collection`,
+        chemist: (label: string) => `${label} \u00b7 Closed \u00b7 no delivery`,
+      },
+      selectedPast: (label: string) => `${label} \u00b7 Past date`,
+    },
+    map: {
+      heading: "Location & directions",
+      ariaLabel: "Location and directions",
+      ariaTravelMode: "Travel mode",
+      drive: "Drive",
+      walk: "Walk",
+      transit: "Transit",
+      getDirections: "Get directions",
+      openMap: "Open map",
+      addressMissing: "No address declared yet",
+    },
+    // #619: the DECLARED disclaimer - what the provider says about itself, as
+    // opposed to the verified band above, which is what the platform checked.
+    // It is now a one-line note on the details card (the #968 layout folds the
+    // declared fields into that card), and the copy still has to make the split
+    // legible in words: a patient must not have to infer which half of the page
+    // we are standing behind.
     declaredNote:
       "The provider's own details. CareSetu has not checked them - only the credentials above are verified.",
     declaredPracticeHeading: "Clinic",
@@ -3119,10 +3321,6 @@ export const STRINGS: Record<Lang, Dictionary> = {
         registerDoctor: "डॉक्टर",
         registerLab: "लैब",
         registerChemist: "केमिस्ट",
-        noRolePickerNote:
-          "यहाँ जानबूझकर कोई रोल पिकर नहीं है: साइन इन पर आपका रोल आपके खाते से तय होता है, हाथ से नहीं चुना जाता। मरीज़ फ़ोन OTP विज़ार्ड से साइन इन करते हैं।",
-        interimNote: "Phase 5 तक अंतरिम स्टाफ प्रवेश उपलब्ध रहेगा:",
-        chooseRoleLink: "रोल चुनें",
         emailInvalid: "एक सही ईमेल पता दर्ज करें।",
         passwordRequired: "अपना पासवर्ड दर्ज करें।",
         summaryTitle: (n) => `आगे बढ़ने से पहले ${n} फ़ील्ड में ध्यान देना है।`,
@@ -3741,19 +3939,24 @@ export const STRINGS: Record<Lang, Dictionary> = {
         dashboard: "डैशबोर्ड",
       },
       hero: {
+        eyebrow: "आपके आसपास सत्यापित प्रोवाइडर",
         h1: "अपने आसपास भरोसेमंद डॉक्टर, लैब और केमिस्ट खोजें",
-        sub: "अपॉइंटमेंट लें, रिपोर्ट साझा करें और हर रिकॉर्ड एक जगह रखें - सिर्फ़ आपकी सहमति से।",
+        sub: "दिखाने को तैयार? नीचे खोज शुरू करें",
+        careLabel: "केयर",
+        searchLabel: "खोजें",
         typeLabel: "प्रोवाइडर प्रकार",
         typeDoctor: "डॉक्टर",
         typeLab: "लैब",
         typeChemist: "केमिस्ट",
-        searchPlaceholder: "नाम, विशेषज्ञता या जाँच से खोजें",
+        searchPlaceholder: "शर्त, प्रक्रिया या डॉक्टर का नाम",
         locationLabel: "स्थान",
-        cta: "खोजें",
+        locationPlaceholder: "डालटनगंज, झा",
+        cta: "केयर खोजें",
         getStarted: "शुरू करें",
       },
       chips: {
         title: "आम ज़रूरतें",
+        headline: "सबसे ज़्यादा खोजी जाने वाली विशेषताएँ",
         generalPhysician: "जनरल फ़िज़िशियन",
         pediatrician: "बाल रोग विशेषज्ञ",
         gynecologist: "स्त्री रोग विशेषज्ञ",
@@ -3764,22 +3967,36 @@ export const STRINGS: Record<Lang, Dictionary> = {
         medicineDelivery: "दवाई डिलीवरी",
       },
       tiles: {
+        eyebrow: "ब्राउज़ करें",
         title: "श्रेणी से खोजें",
         doctorsSub: "जनरल फ़िज़िशियन, बाल रोग, स्त्री रोग, दंत",
         labsSub: "खून जाँच, एक्स-रे, फुल बॉडी चेकअप",
         chemistsSub: "ई-प्रिस्क्रिप्शन से दवाई डिलीवरी",
+        explore: "डॉक्टर देखें",
+        exploreLabs: "लैब देखें",
+        exploreChemists: "केमिस्ट देखें",
       },
       featured: {
+        eyebrow: "डायरेक्टरी",
         title: "चुनिंदा डॉक्टर",
         viewAll: "सभी डॉक्टर देखें",
         verified: "सत्यापित",
+        viewProfile: "प्रोफ़ाइल देखें",
+        consultLabel: "परामर्श",
+        carouselPrev: "कार्ड बाएँ स्क्रॉल करें",
+        carouselNext: "कार्ड दाएँ स्क्रॉल करें",
+        carouselLabel: "चुनिंदा डॉक्टर",
+        carouselHint: "और देखने के लिए स्वाइप करें या तीरों का उपयोग करें",
         emptyTitle: "डालटनगंज में डायरेक्टरी जल्द आ रही है",
         emptyBody:
           "लिस्ट होने से पहले हम हर प्रोवाइडर की जाँच करते हैं। जाँच पूरी होने तक कोई डॉक्टर नहीं दिखता।",
         emptyCta: "मरीज़ के तौर पर शुरू करें",
       },
       how: {
+        eyebrow: "केयर लूप",
         title: "CareSetu कैसे काम करता है",
+        sub: "खोज से लेकर आपके नियंत्रण वाले रिकॉर्ड तक - तीन कदम।",
+        aiTag: "AI सहायता",
         s1t: "प्रोवाइडर खोजें",
         s1b: "आसपास के जाँचे-परखे डॉक्टर, लैब और केमिस्ट खोजें।",
         s2t: "आवाज़ में बताएँ तकलीफ़",
@@ -3788,12 +4005,15 @@ export const STRINGS: Record<Lang, Dictionary> = {
         s3b: "प्रिस्क्रिप्शन, रिपोर्ट और रिकॉर्ड आपके हेल्थ रिकॉर्ड में - सिर्फ़ आपकी सहमति से साझा।",
       },
       trust: {
+        eyebrow: "भरोसा और सहमति",
+        title: "सहमति पर बना, झाँसे पर नहीं",
         t1: "लिस्टिंग से पहले दस्तावेज़ जाँचे जाते हैं",
         t2: "आपकी सहमति के बिना कुछ साझा नहीं होता",
         t3: "आपके रिकॉर्ड, आपका नियंत्रण - कभी भी वापस ले सकते हैं",
         privacy: "प्राइवेसी और शर्तें",
       },
       providers: {
+        eyebrow: "प्रोवाइडर पक्ष",
         title: "क्या आप प्रोवाइडर हैं?",
         sub: "अभी रजिस्टर करें - लिस्ट होने से पहले हमारी टीम जाँच करती है।",
         doctorT: "आप डॉक्टर हैं?",
@@ -3813,6 +4033,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
         patients: "मरीज़",
         providersCol: "प्रोवाइडर",
         companyLegal: "कंपनी और कानूनी",
+        why: "CareSetu क्यों",
+        whyNote:
+          "सत्यापित प्रोवाइडर, सहमति-पहले साझाकरण, और पूरे परिवार के लिए एक रिकॉर्ड - डालटनगंज और आसपास की देखभाल के लिए बना।",
         findDoctors: "डॉक्टर खोजें",
         findLabs: "लैब खोजें",
         findChemists: "केमिस्ट खोजें",
@@ -3960,6 +4183,87 @@ export const STRINGS: Record<Lang, Dictionary> = {
       errorTitle: "डायरेक्टरी लोड नहीं हो सकी",
       errorBody: "अपना कनेक्शन जाँचें और फिर कोशिश करें।",
       retry: "फिर कोशिश करें",
+      experienceYears: (n: number) => `${n} साल का अनुभव`,
+      clinic: "क्लिनिक",
+      address: "पता",
+      fee: "परामर्श शुल्क",
+      rangeLabel: (start: string, end: string) => `${start} \u2013 ${end}`,
+      prevWeek: "पिछला सप्ताह",
+      nextWeek: "अगला सप्ताह",
+      more: "और",
+      viewAll: "सभी देखें",
+      appts: (n: number) => `${n} अपॉइंटमेंट`,
+      slots: (n: number) => `${n} स्लॉट`,
+      windows: (n: number) => `${n} डिलीवरी विंडो`,
+      videoVisit: "वीडियो मुलाक़ात",
+      homeCollection: "होम कलेक्शन",
+      delivery: "डिलीवरी",
+      noAppts: "कोई अपॉइंटमेंट नहीं",
+      noSlots: "कोई स्लॉट नहीं",
+      noWindows: "कोई विंडो नहीं",
+      today: "आज",
+      mon: "सोम",
+      tue: "मंगल",
+      wed: "बुध",
+      thu: "गुरु",
+      fri: "शुक्र",
+      sat: "शनि",
+      sun: "रवि",
+      monthNavPrev: "पिछला महीना",
+      monthNavNext: "अगला महीना",
+      ratingReviews: (n: number) => `${n} समीक्षाएँ`,
+      selectionOpen: "खुला",
+      selectionClosed: "बंद",
+      selectionPast: "बीता",
+      filtersCta: "फ़िल्टर",
+      activeFiltersLabel: "सक्रिय फ़िल्टर",
+      clearQuery: "खोज हटाएँ",
+      clearTypeFilter: "प्रकार का फ़िल्टर हटाएँ",
+      clearSpecialty: "विशेषज्ञता हटाएँ",
+      clearLocation: "स्थान हटाएँ",
+      filterSheet: {
+        title: "फ़िल्टर",
+        description: "नीचे दिए गए फ़िल्टर से परिणाम सीमित करें।",
+        locationLabel: "स्थान",
+        locationPlaceholder: "शहर या इलाक़ा",
+        specialtyLabel: "विशेषज्ञता",
+        consultTypeLabel: "परामर्श का प्रकार",
+        consultAll: "सभी",
+        consultInClinic: "क्लिनिक में",
+        consultOnline: "ऑनलाइन",
+        testTypeLabel: "जाँच का प्रकार",
+        servicesLabel: "सेवाएँ",
+        availabilityLabel: "उपलब्धता",
+        availabilityAnyTime: "कभी भी",
+        availabilityOpenNow: "अभी खुला",
+        reset: "रीसेट करें",
+        showCount: (n: number, noun: string) => `${n} ${noun} दिखाएँ`,
+        nounDoctors: "डॉक्टर",
+        nounLabs: "लैब",
+        nounChemists: "केमिस्ट",
+        filterHomeCollection: "होम कलेक्शन",
+        filterNABL: "केवल नैबल मान्यता प्राप्त",
+        filterHomeDelivery: "होम डिलीवरी",
+        filterEPrescription: "ई-प्रिस्क्रिप्शन डिलीवरी",
+        filterGeneric: "जेनेरिक दवाइयाँ",
+        filterCountSuffix: (n: number) => `+${n}`,
+        labTestTypes: [
+          { id: "blood_tests", label: "ब्लड टेस्ट" },
+          { id: "x_ray", label: "एक्स-रे" },
+          { id: "full_body", label: "फुल बॉडी चेकअप" },
+          { id: "pathology", label: "पैथोलॉजी" },
+          { id: "ecg", label: "ईसीजी" },
+        ],
+        labServices: [
+          { id: "home_collection", label: "होम कलेक्शन" },
+          { id: "nabl", label: "केवल नैबल मान्यता प्राप्त" },
+        ],
+        chemistServices: [
+          { id: "home_delivery", label: "होम डिलीवरी" },
+          { id: "e_prescription", label: "ई-प्रिस्क्रिप्शन डिलीवरी" },
+          { id: "generic", label: "जेनेरिक दवाइयाँ" },
+        ],
+      },
     },
 
     providerProfile: {
@@ -3971,13 +4275,110 @@ export const STRINGS: Record<Lang, Dictionary> = {
       practiceDetailsHeading: "अभ्यास विवरण",
       detailsHeading: "विवरण",
       typeLabel: "प्रकार",
-      // #619: `specialtyLabel` and `areaLabel` are GONE from this namespace. The
+      // PHASE-6 profile redesign (#968): mirrors the en block above key for key
+      // - the bilingual parity gate fails on a reshaped or missing key, so this
+      // list is the same list in the same order.
+      trustDoctorTitle: "काउंसिल पंजीकरण सत्यापित",
+      trustPartnerTitle: "लाइसेंस सत्यापित",
+      servicesHeading: "सेवाएँ",
+      ctaDoctorTitle: "परामर्श बुक करें",
+      ctaPartnerTitle: "टेस्ट बुक करें",
+      consultationFeeLabel: "परामर्श शुल्क",
+      opdLabel: "ओपीडी",
+      specialtyLabel: "विशेषज्ञता",
+      consultationTypesLabel: "परामर्श के प्रकार",
+      locationLabel: "स्थान",
+      accreditationLabel: "मान्यता",
+      serviceAreaLabel: "सेवा क्षेत्र",
+      homeCollectionLabel: "होम कलेक्शन",
+      reportTurnaroundLabel: "रिपोर्ट टर्नअराउंड",
+      ctaDoctorBody: "उपलब्धता और स्लॉट बुकिंग भविष्य के चरण में उपलब्ध होंगी।",
+      ctaPartnerBody:
+        "टेस्ट बुकिंग और रिपोर्ट फाइलिंग भविष्य के चरण में उपलब्ध होंगी।",
+      availability: {
+        heading: "उपलब्धता",
+        ariaLabel: "पूरे महीने की उपलब्धता",
+        sub: (kind: string) => `${kind} \u00b7 पूरा महीना एक नज़र में`,
+        kinds: {
+          doctor: "परामर्श स्लॉट",
+          lab: "होम कलेक्शन विंडो",
+          chemist: "डिलीवरी विंडो",
+        },
+        prevMonth: "पिछला महीना",
+        nextMonth: "अगला महीना",
+        legendOpen: {
+          doctor: "स्लॉट खुले",
+          lab: "कलेक्शन खुला",
+          chemist: "डिलीवरी खुली",
+        },
+        legendClosed: {
+          doctor: "कोई स्लॉट नहीं",
+          lab: "बंद",
+          chemist: "बंद",
+        },
+        legendToday: "आज",
+        cellOpen: {
+          doctor: (n: number) => `${n} स्लॉट`,
+          lab: (n: number) => `${n} खुले`,
+          chemist: (n: number) => `${n} खुली`,
+        },
+        cellClosed: {
+          doctor: "कोई स्लॉट नहीं",
+          lab: "बंद",
+          chemist: "बंद",
+        },
+        cellAriaOpen: {
+          doctor: (n: number) => `${n} परामर्श स्लॉट`,
+          lab: (n: number) => `${n} होम कलेक्शन विंडो`,
+          chemist: (n: number) => `${n} डिलीवरी विंडो`,
+        },
+        cellAriaClosed: {
+          doctor: "कोई स्लॉट नहीं",
+          lab: "बंद",
+          chemist: "बंद",
+        },
+        cellAriaPast: "बीती तारीख",
+        selectedOpen: {
+          doctor: (label: string, n: number, hours: string | null) =>
+            hours
+              ? `${label} \u00b7 ${n} परामर्श स्लॉट \u00b7 ${hours}`
+              : `${label} \u00b7 ${n} परामर्श स्लॉट`,
+          lab: (label: string, n: number, hours: string | null) =>
+            hours
+              ? `${label} \u00b7 ${n} होम कलेक्शन विंडो \u00b7 ${hours}`
+              : `${label} \u00b7 ${n} होम कलेक्शन विंडो`,
+          chemist: (label: string, n: number, hours: string | null) =>
+            hours
+              ? `${label} \u00b7 ${n} डिलीवरी विंडो \u00b7 ${hours}`
+              : `${label} \u00b7 ${n} डिलीवरी विंडो`,
+        },
+        selectedClosed: {
+          doctor: (label: string) =>
+            `${label} \u00b7 कोई स्लॉट नहीं \u00b7 क्लिनिक बंद`,
+          lab: (label: string) => `${label} \u00b7 बंद \u00b7 होम कलेक्शन नहीं`,
+          chemist: (label: string) => `${label} \u00b7 बंद \u00b7 डिलीवरी नहीं`,
+        },
+        selectedPast: (label: string) => `${label} \u00b7 बीती तारीख`,
+      },
+      map: {
+        heading: "स्थान और दिशा",
+        ariaLabel: "स्थान और दिशा",
+        ariaTravelMode: "यात्रा का तरीका",
+        drive: "ड्राइव",
+        walk: "पैदल",
+        transit: "पब्लिक ट्रांसपोर्ट",
+        getDirections: "रास्ता देखें",
+        openMap: "मैप खोलें",
+        addressMissing: "अभी कोई पता घोषित नहीं",
+      },
+      // #619: `declaredHeading` and `areaLabel` are GONE from this namespace. The
       // singular specialty now reads through the hero subtitle and the whole
-      // selection through the declared band, and `area` IS the declared locality -
-      // so the band owns both. A string with no reader is a string nobody can
-      // reword, and one more of them is one more place for the two locales to
-      // drift apart.
-      declaredHeading: "प्रोवाइडर द्वारा घोषित",
+      // selection through the declared groups below, and `area` IS the declared
+      // locality - so they own both. A string with no reader is a string nobody
+      // can reword, and one more of them is one more place for the two locales
+      // to drift apart. `declaredHeading` went with the #968 fold: the disclaimer
+      // is now the one-line note on the details card, and `declaredNote` is the
+      // sentence that carries it.
       declaredNote:
         "यह प्रोवाइडर के अपने विवरण हैं। CareSetu ने इनकी जाँच नहीं की है - केवल ऊपर दिए गए प्रमाण सत्यापित हैं।",
       declaredPracticeHeading: "क्लिनिक",

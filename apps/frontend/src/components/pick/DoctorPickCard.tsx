@@ -1,20 +1,26 @@
 "use client";
 
-// PHASE-8.1 T11 (#449): one doctor card on the patient pick-a-doctor step.
-// Shares DirectoryCard's verified-truthfulness rules (ADR-0011 "tick gone =
-// card gone" - the verified pill renders only when the backend-derived flag
-// is true, and the card still defensively drops a false-tick row). Beyond the
+// PHASE-8.1 T11 (#966): one doctor card on the patient pick-a-doctor step,
+// restyled to the Phase-6 card visual language (left-panel anatomy from
+// DirectoryCard: avatar, name, credentials, practice, specialty +
+// experience, rating, facts, verified tick, distance, fee) while keeping the
+// pick-specific Book CTA and fee/verified footer. Shares DirectoryCard's
+// verified-truthfulness rules (ADR-0011 "tick gone = card gone"). Beyond the
 // shared browse surface, the pick card carries the consultation fee (or the
 // fee-not-set marker, US-10 - a missing fee never blocks the pick), the
 // credentials-verified summary, a deep link to the verified profile, and the
 // "Book with this doctor" CTA that opens the pick consent sheet.
 
 import Link from "next/link";
-import { BadgeCheck } from "lucide-react";
+import { BadgeCheck, Video } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { providerProfileHref } from "@/lib/directory/links";
 import type { DirectoryEntry } from "@/lib/directory/search";
+import { usePartnerPhotoSource } from "@/lib/directory/usePartnerPhotoSource";
+import { getMockCardData, getMockRating } from "@/lib/directory/mockDisplay";
+import { STRINGS } from "@/lib/i18n/dictionaries";
+import { useLang } from "@/lib/i18n/LangContext";
 import { formatInrPaise } from "@/lib/money";
 
 interface DoctorPickCardProps {
@@ -36,6 +42,23 @@ interface DoctorPickCardProps {
   onBook: (entry: DirectoryEntry) => void;
 }
 
+function initials(name: string): string {
+  return (
+    name
+      .trim()
+      .split(/\s+/)
+      .filter((word) => word.length > 0 && !/^(dr\.?|prof\.?)$/i.test(word))
+      .slice(0, 2)
+      .map((part) => part[0] ?? "")
+      .join("")
+      .toUpperCase() || name.charAt(0).toUpperCase()
+  );
+}
+
+const FACT_ICON: Record<string, React.ElementType> = {
+  video: Video,
+};
+
 export function DoctorPickCard({
   entry,
   typeLabel,
@@ -49,9 +72,36 @@ export function DoctorPickCard({
   viewProfileLabel,
   onBook,
 }: DoctorPickCardProps) {
+  const { lang } = useLang();
+  const t = STRINGS[lang].directory;
+  const name = entry.practice_name ?? "CareSetu provider";
+  const photo = usePartnerPhotoSource(
+    entry.partner_id,
+    entry.photo_ref ?? null,
+  );
+  const mock = getMockCardData(entry.partner_id, entry.partner_type);
+  const rating = getMockRating(entry.partner_id);
+
   if (!entry.verified) return null;
 
-  const meta = [entry.specialty && specialtyLabel, typeLabel, entry.area]
+  const practiceLine =
+    entry.partner_type === "doctor"
+      ? entry.clinic_name ?? entry.area ?? ""
+      : entry.area ?? "";
+
+  const experienceLabel =
+    entry.experience_years != null
+      ? `${
+          t.experienceYears?.(entry.experience_years) ??
+          `${entry.experience_years} years experience`
+        }`
+      : null;
+
+  const specialtyLine = [
+    entry.specialty && specialtyLabel,
+    typeLabel,
+    experienceLabel,
+  ]
     .filter(Boolean)
     .join(" \u00b7 ");
 
@@ -63,31 +113,129 @@ export function DoctorPickCard({
   return (
     <div
       data-testid="pick-doctor-card"
-      className="flex flex-col gap-3 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop"
+      className="flex flex-col gap-3 rounded-lg border border-hairline bg-surface p-4 shadow-card transition-shadow hover:shadow-pop min-w-0"
     >
       <div className="flex w-full items-start justify-between gap-3">
         <span
           data-testid="pick-verified"
-          className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-xs font-medium text-success-text"
+          className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-xs font-semibold text-success-text"
         >
           <BadgeCheck aria-hidden="true" className="h-3 w-3" />
           {verifiedLabel}
         </span>
-        <span className="whitespace-nowrap text-sm text-txt-sub">
+        <span className="whitespace-nowrap text-[0.8125rem] text-txt-muted">
           {distanceLabel}
         </span>
       </div>
 
-      <Link
-        href={providerProfileHref(entry.partner_id)}
-        data-testid="pick-doctor-name"
-        className="text-txt hover:underline"
-      >
-        <strong>{entry.practice_name ?? "CareSetu provider"}</strong>
-      </Link>
-      <span className="text-sm text-txt-muted">{meta}</span>
+      <div className="grid grid-cols-[72px_1fr] gap-2 items-start min-w-0 mb-2">
+        <div
+          className="relative shrink-0 w-[72px] h-[72px]"
+          data-testid="pick-avatar-wrap"
+        >
+          {photo.src ? (
+            <img
+              src={photo.src}
+              alt={name}
+              className="w-full h-full rounded-full border-2 border-accent-border object-cover"
+            />
+          ) : (
+            <span
+              aria-hidden="true"
+              className="flex h-full w-full items-center justify-center rounded-full border-2 border-accent-border bg-accent-soft text-2xl font-semibold text-accent-strong"
+            >
+              {initials(name)}
+            </span>
+          )}
+          {mock.videoBadge && (
+            <span
+              data-testid="pick-video-badge"
+              aria-label="Video visits available"
+              className="absolute bottom-0.5 right-0.5 h-6 w-6 rounded-full bg-accent text-on-accent flex items-center justify-center border-2 border-surface text-xs"
+            >
+              <Video className="h-3 w-3" aria-hidden="true" />
+            </span>
+          )}
+        </div>
+        <div className="flex flex-col gap-1 min-w-0">
+          {mock.highlightRibbon && (
+            <span
+              data-testid="pick-ribbon"
+              className="inline-block text-[0.6875rem] font-semibold text-warm bg-warm-soft border border-[#fed7aa] rounded-full px-2 py-0.5 whitespace-nowrap"
+            >
+              {mock.highlightRibbon}
+            </span>
+          )}
+          <div className="flex items-baseline gap-2 flex-wrap min-w-0">
+            <Link
+              href={providerProfileHref(entry.partner_id)}
+              data-testid="pick-doctor-name"
+              className="text-txt hover:underline"
+            >
+              <strong className="text-lg font-semibold leading-[1.3]">
+                {name}
+              </strong>
+            </Link>
+            {mock.credentials && (
+              <span className="text-txt-muted text-[0.8125rem]">
+                {mock.credentials}
+              </span>
+            )}
+          </div>
+          {practiceLine && (
+            <span
+              data-testid="pick-practice"
+              className="text-txt-sub text-sm font-medium truncate"
+            >
+              {practiceLine}
+            </span>
+          )}
+        </div>
+      </div>
 
-      <dl className="grid grid-cols-2 gap-2 text-sm">
+      {specialtyLine && (
+        <span data-testid="pick-specialty" className="text-txt-muted text-sm">
+          {specialtyLine}
+        </span>
+      )}
+      <div className="flex items-center gap-1.5">
+        <span
+          className="text-warm text-sm leading-none tracking-[1px]"
+          aria-hidden="true"
+        >
+          {Array.from({ length: Math.floor(rating.stars) })
+            .map(() => "★")
+            .join("")}
+          {rating.stars % 1 >= 0.5 ? "☆" : ""}
+        </span>
+        <span className="text-txt-muted text-sm">
+          {`${rating.stars.toFixed(1)} (${t.ratingReviews(
+            rating.reviewCount,
+          )})`}
+        </span>
+      </div>
+      <div data-testid="pick-facts" className="flex flex-wrap gap-3 mt-0.5">
+        {mock.facts.map((fact, index) => {
+          const Icon = FACT_ICON[fact.icon];
+          return (
+            <span
+              key={index}
+              data-testid="pick-fact"
+              className="inline-flex items-center gap-1 text-txt-sub text-[0.8125rem]"
+            >
+              {Icon && (
+                <Icon
+                  className="h-3.5 w-3.5 shrink-0 text-txt-muted"
+                  aria-hidden="true"
+                />
+              )}
+              {fact.label}
+            </span>
+          );
+        })}
+      </div>
+
+      <dl className="grid grid-cols-2 gap-2 text-sm mt-2">
         <div>
           <dt className="text-xs font-semibold uppercase tracking-wide text-txt-muted">
             {feeLabel}

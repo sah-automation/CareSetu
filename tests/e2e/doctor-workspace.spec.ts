@@ -376,8 +376,10 @@ async function activeDoctorLogin(
     });
 
   const code = await requireMockOtp(request, `+91${number}`);
+  // fill() fires a real input event so React's onChange updates otpDraft.
+  // OtpInput calls onComplete at six digits, which submits the staff step;
+  // clicking Verify code here would race that in-flight submit and detach.
   await page.getByTestId("partner-otp").fill(code);
-  await page.getByTestId("staff-submit").click();
   await page.waitForURL("**/doctor", { timeout: 60_000 });
   await expect(page.getByTestId("review-queue")).toBeVisible({
     timeout: 60_000,
@@ -675,15 +677,8 @@ test("the doctor declares their address and the public profile shows what they d
 
     // The address, part by part. The PIN that landed is the resolvable one: the
     // refused PIN never reached a column, so what the public page shows proves the
-    // refusal wrote nothing. These ids are `profile-declared-address-` plus the
-    // band's own FIELD name, and the field name is the address part's own name -
-    // hence the doubled word in the line. Spelled out rather than composed, so the
-    // doubling reads as deliberate instead of getting "fixed" into a locator that
-    // matches nothing.
-    const declaredAddress = declaredBand.getByTestId(
-      "profile-declared-address",
-    );
-    await expect(declaredAddress).toBeVisible({ timeout: 30_000 });
+    // refusal wrote nothing. The address rows are direct children of the declared
+    // band now, each carrying its own `profile-declared-address-<field>` id.
     for (const [testId, value] of [
       ["profile-declared-address-address-line", ADDRESS_LINE],
       ["profile-declared-address-landmark", LANDMARK],
@@ -691,7 +686,7 @@ test("the doctor declares their address and the public profile shows what they d
       ["profile-declared-address-city", CITY],
       ["profile-declared-address-pin-code", RESOLVABLE_PIN],
     ] as const) {
-      await expect(declaredAddress.getByTestId(testId)).toHaveText(value, {
+      await expect(declaredBand.getByTestId(testId)).toHaveText(value, {
         timeout: 30_000,
       });
     }

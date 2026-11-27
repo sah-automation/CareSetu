@@ -70,10 +70,7 @@ export function FindCareBrowser() {
         </section>
       )}
 
-      <DirectoryBrowser
-        baseRoute={FIND_ROUTE}
-        cardGridClassName="grid gap-4 sm:grid-cols-2"
-      />
+      <DirectoryBrowser baseRoute={FIND_ROUTE} cardGridClassName="grid gap-5" />
     </>
   );
 }

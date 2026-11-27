@@ -20,6 +20,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from bus.dispatcher import (
     DispatcherConfig,
@@ -78,7 +79,12 @@ def test_envelope_from_row_keeps_schema_version_default() -> None:
 
 
 def test_run_poll_loop_returns_immediately_when_stop_event_is_set() -> None:
-    engine = create_async_engine("postgresql+asyncpg://caresetu:caresetu@localhost:5432/caresetu")
+    # Use an invalid host that fails fast (DNS resolution) rather than
+    # hanging on connection timeout. The stop_event is set before the poll
+    # loop starts, so no actual connection should be attempted.
+    engine = create_async_engine(
+        "postgresql+asyncpg://no-such-host.invalid/no-db", poolclass=NullPool
+    )
     stop_event = asyncio.Event()
     stop_event.set()
 

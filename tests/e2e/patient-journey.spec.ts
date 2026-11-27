@@ -64,9 +64,11 @@ async function verifyOtp(
   number: string,
 ): Promise<void> {
   const code = await requireMockOtp(request, `+91${number}`);
-  await page.getByLabel("Verification code").fill(code);
-  await page.getByRole("button", { name: "Verify & continue" }).click();
-  await page.waitForURL("**/patient", { timeout: 15_000 });
+  // OtpInput fires onComplete as soon as the sixth digit lands, so filling
+  // the code already submits the step and navigates. There is no verify button
+  // left to click here.
+  await page.getByTestId("patient-otp").fill(code);
+  await page.waitForURL("**/patient", { timeout: 30_000 });
 }
 
 async function getAuthInfo(

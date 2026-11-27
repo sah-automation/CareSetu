@@ -51,7 +51,7 @@
 // criteria, and each is asserted once or twice, so they need no atom - but
 // they do need a `data-testid` written onto them by hand.
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import type { AuthStrings, Lang } from "@/lib/i18n/dictionaries";
 import { IconRefresh } from "@/components/auth/icons";
@@ -119,19 +119,29 @@ export function PhoneInput({
   value,
   onChange,
   placeholder,
+  autoFocus,
 }: {
   value: string;
   onChange: (raw: string) => void;
   placeholder: string;
+  autoFocus?: boolean;
 }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (autoFocus) {
+      inputRef.current?.focus();
+    }
+  }, [autoFocus]);
   return (
     <div className={styles.phoneWrap}>
       <span className={styles.phonePrefix}>+91</span>
       <input
+        ref={inputRef}
         className={styles.phoneInput}
         type="tel"
         inputMode="numeric"
         autoComplete="tel"
+        autoFocus={autoFocus}
         placeholder={placeholder}
         value={value.replace(/^\+91/, "")}
         onChange={(e) => onChange(e.target.value)}
@@ -194,6 +204,7 @@ export function OtpInput({
   label,
   invalid,
   describedBy,
+  onComplete,
 }: {
   value: string;
   onChange: (digits: string) => void;
@@ -218,9 +229,20 @@ export function OtpInput({
    */
   invalid?: boolean;
   describedBy?: string;
+  /**
+   * Fires when the entered value reaches 6 digits, so callers can auto-submit
+   * the surrounding form without an extra button press.
+   */
+  onComplete?: () => void;
 }) {
+  const OTP_LENGTH = 6;
   const inputRef = useRef<HTMLInputElement>(null);
-  const boxes = Array.from({ length: 6 }, (_, i) => value[i] ?? "");
+  const boxes = Array.from({ length: OTP_LENGTH }, (_, i) => value[i] ?? "");
+  useEffect(() => {
+    if (autoFocus) {
+      inputRef.current?.focus();
+    }
+  }, [autoFocus]);
   return (
     // #576: the wrapper used to be a `role="group"` div with an `aria-label`
     // set to the literal "OTP", a second hardcoded English name over the one
@@ -237,9 +259,17 @@ export function OtpInput({
         autoComplete="one-time-code"
         autoFocus={autoFocus}
         value={value}
-        maxLength={6}
+        maxLength={OTP_LENGTH}
         disabled={disabled}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => {
+          const digits = e.target.value
+            .replace(/[^0-9]/g, "")
+            .slice(0, OTP_LENGTH);
+          onChange(digits);
+          if (digits.length === OTP_LENGTH) {
+            onComplete?.();
+          }
+        }}
         aria-label={label}
         aria-invalid={invalid ? true : undefined}
         aria-describedby={describedBy}

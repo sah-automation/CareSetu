@@ -18,7 +18,6 @@ import { StaffLoginForm } from "@/components/auth/staff/StaffLoginForm";
 import type { StaffLoginRole } from "@/components/auth/staff/staffLoginState";
 import { useAuth } from "@/lib/auth/AuthContext";
 import {
-  CHOOSE_ROLE_ROUTE,
   STAFF_LOGIN_SURFACE,
   fetchPartnerRouteState,
   isStaffRole,
@@ -143,20 +142,6 @@ function StaffLoginView() {
             {t.registerChemist}
           </a>
         </div>
-      </div>
-
-      <div className="mt-6 space-y-2 text-center text-xs text-txt-muted">
-        <p>{t.noRolePickerNote}</p>
-        <p>
-          {t.interimNote}{" "}
-          <a
-            href={CHOOSE_ROLE_ROUTE}
-            className="underline"
-            data-testid="choose-role-link"
-          >
-            {t.chooseRoleLink}
-          </a>
-        </p>
       </div>
     </main>
   );

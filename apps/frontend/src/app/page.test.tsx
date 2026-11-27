@@ -217,6 +217,10 @@ describe("EN/Hindi toggle parity across sections (REQ-006)", () => {
         "\u0906\u092E \u091C\u093C\u0930\u0942\u0930\u0924\u0947\u0902",
       ),
     ).toBeInTheDocument(); // chips title
+    expect(screen.getByText(/सबसे.*खोजी.*विशेषताएँ/)).toBeInTheDocument(); // chips headline
+    expect(
+      screen.getByText(/आपके आसपास.*सत्यापित.*प्रोवाइडर/),
+    ).toBeInTheDocument(); // hero eyebrow
     expect(
       screen.getByText(
         "\u0936\u094D\u0930\u0947\u0923\u0940 \u0938\u0947 \u0916\u094B\u091C\u0947\u0902",
@@ -244,5 +248,7 @@ describe("EN/Hindi toggle parity across sections (REQ-006)", () => {
     expect(
       screen.getByText("Find trusted doctors, labs and chemists near you"),
     ).toBeInTheDocument();
+    expect(screen.getByText("Top-searched specialties")).toBeInTheDocument();
+    expect(screen.getByText("Verified providers near you")).toBeInTheDocument();
   });
 });
