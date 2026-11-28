@@ -92,12 +92,6 @@ jobs:
           project_id: '${{ vars.GCP_PROJECT_ID }}'
       - name: assert SUPABASE_DATABASE_URL is set
         run: test -n "$DATABASE_URL"
-      - name: Clear old Cloud Run config (secret refs -> env vars)
-        run: |
-          gcloud run services update caresetu-backend \
-            --region=asia-south1 \
-            --clear-env-vars \
-            --clear-secrets
       - name: Build and deploy backend to Cloud Run
         run: |
           gcloud run deploy caresetu-backend \
@@ -108,24 +102,27 @@ jobs:
             --min-instances=0 \
             --memory 512Mi \
             --cpu 1 \
-            --set-env-vars "PYTHON_VERSION=3.13,APP_ENVIRONMENT=production,DATABASE_URL=${DATABASE_URL},CORS_ALLOWED_ORIGINS=https://caresetu-frontend.vercel.app,DISPATCHER_IN_PROCESS_ENABLED=true,DISPATCHER_MODE=inprocess,UVICORN_WORKERS=1,AI_ASYNC_ENABLED=false,AI_QUEUE_WORKER_ENABLED=false,DEMO_MODE=true,SMS_PROVIDER=mock,GATEWAY_JWT_VERIFY_ENABLED=true,GATEWAY_RATE_LIMIT_ENABLED=true,GATEWAY_ACCESS_TOKEN_TTL_SECONDS=7200,LOG_FORMAT=json,SENTRY_TRACES_SAMPLE_RATE=1.0,OTEL_ENABLED=false,OTEL_TRACES_SAMPLER_RATIO=1.0,METRICS_ENABLED=true,OBSERVABILITY_ENABLED=true,ERROR_CAPTURE_ENABLED=true,HTTP_COUNTER_ENABLED=true,EVALUATION_ENABLED=false,ANNOTATION_QUEUE_ENABLED=false,OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT=80,OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE=0.5,OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD=0.2,OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD=500,OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS=900,OBSERVABILITY_COST_OUTLIER_MULTIPLE=3,OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS=3,OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT=1,INTAKE_MEDIA_BACKEND=supabase,PROFILE_MEDIA_BACKEND=supabase,AI_PROVIDER=openai_compatible,AI_ALLOW_DEMO_PROVIDER=true,AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS=30.0,AI_CIRCUIT_BREAKER_THRESHOLD=5,AI_MAX_RETRIES=3,AI_TIMEOUT_SECONDS=30.0,ERROR_CAPTURE_MAX_RECORDS=1000,ERROR_DRAIN_INTERVAL_SECONDS=30,HTTP_COUNTER_MAX_SERIES=5000,SUPABASE_BUCKET=none,LANGFUSE_HOST=https://us.cloud.langfuse.com,AI_WEBHOOK_TIMEOUT_SECONDS=10.0,AI_WEBHOOK_MAX_ATTEMPTS=3,AI_FALLBACK_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai,AI_FALLBACK_MODEL=gemini-3.6-flash,AI_FALLBACK_PROVIDER=openai_compatible,PROMETHEUS_REMOTE_WRITE_ENDPOINT=https://prometheus-prod-67-prod-us-west-0-local-nlb.internal.grafana.net/api/prom/push,AI_BASE_URL=https://api.groq.com/openai/v1,AI_MODEL=openai/gpt-oss-120b,GRAFANA_URL=https://merryisland2239.grafana.net,OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-west-0.grafana.net/otlp,SUPABASE_URL=https://lsvkeejwjedfjqfwmqcn.supabase.co" \
+            --set-env-vars "PYTHON_VERSION=3.13,APP_ENVIRONMENT=production,OTEL_SERVICE_VERSION=${GITHUB_SHA},DATABASE_URL=${DATABASE_URL},CORS_ALLOWED_ORIGINS=https://caresetu-frontend.vercel.app,DISPATCHER_IN_PROCESS_ENABLED=true,DISPATCHER_MODE=inprocess,UVICORN_WORKERS=1,AI_ASYNC_ENABLED=false,AI_QUEUE_WORKER_ENABLED=false,DEMO_MODE=true,SMS_PROVIDER=mock,GATEWAY_JWT_VERIFY_ENABLED=true,GATEWAY_RATE_LIMIT_ENABLED=true,GATEWAY_ACCESS_TOKEN_TTL_SECONDS=7200,LOG_FORMAT=json,SENTRY_TRACES_SAMPLE_RATE=1.0,OTEL_ENABLED=false,OTEL_TRACES_SAMPLER_RATIO=1.0,METRICS_ENABLED=true,OBSERVABILITY_ENABLED=true,ERROR_CAPTURE_ENABLED=true,HTTP_COUNTER_ENABLED=true,EVALUATION_ENABLED=false,ANNOTATION_QUEUE_ENABLED=false,OBSERVABILITY_BUDGET_ALERT_THRESHOLD_PCT=80,OBSERVABILITY_BREAKER_OPEN_SUCCESS_RATE=0.5,OBSERVABILITY_PROVIDER_HEALTH_DROP_THRESHOLD=0.2,OBSERVABILITY_OUTBOX_BACKLOG_THRESHOLD=500,OBSERVABILITY_QUEUE_AGE_THRESHOLD_SECONDS=900,OBSERVABILITY_COST_OUTLIER_MULTIPLE=3,OBSERVABILITY_COST_OUTLIER_MIN_BASELINE_DAYS=3,OBSERVABILITY_PROVIDER_RATE_LIMIT_ALERT_COUNT=1,INTAKE_MEDIA_BACKEND=supabase,PROFILE_MEDIA_BACKEND=supabase,AI_PROVIDER=openai_compatible,AI_ALLOW_DEMO_PROVIDER=true,AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS=30.0,AI_CIRCUIT_BREAKER_THRESHOLD=5,AI_MAX_RETRIES=3,AI_TIMEOUT_SECONDS=30.0,ERROR_CAPTURE_MAX_RECORDS=1000,ERROR_DRAIN_INTERVAL_SECONDS=30,HTTP_COUNTER_MAX_SERIES=5000,SUPABASE_BUCKET=none,LANGFUSE_HOST=https://us.cloud.langfuse.com,AI_WEBHOOK_TIMEOUT_SECONDS=10.0,AI_WEBHOOK_MAX_ATTEMPTS=3,AI_FALLBACK_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai,AI_FALLBACK_MODEL=gemini-3.6-flash,AI_FALLBACK_PROVIDER=openai_compatible,PROMETHEUS_REMOTE_WRITE_ENDPOINT=https://prometheus-prod-67-prod-us-west-0-local-nlb.internal.grafana.net/api/prom/push,AI_BASE_URL=https://api.groq.com/openai/v1,AI_MODEL=openai/gpt-oss-120b,GRAFANA_URL=https://merryisland2239.grafana.net,OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-west-0.grafana.net/otlp,SUPABASE_URL=https://lsvkeejwjedfjqfwmqcn.supabase.co" \
             --set-secrets "APP_SECRETS_JSON=APP_SECRETS_JSON:latest"
-      - name: Pin critical Cloud Run env after source deploy
-        run: |
-          gcloud run services update "$CLOUD_RUN_SERVICE" \
-            --region "$GCP_REGION" \
-            --update-env-vars "DATABASE_URL=${DATABASE_URL},CORS_ALLOWED_ORIGINS=https://caresetu-frontend.vercel.app"
       - name: Assert Cloud Run env bindings
         run: |
-          env_names=$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
+          service_json="$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
             --region "$GCP_REGION" \
-            --format='value(spec.template.spec.containers[0].env[].name)')
+            --format=json)"
+          revision="$(printf '%s' "$service_json" | jq -r '.status.traffic[] | select(.percent == 100) | .revisionName' | head -n1)"
+          test -n "$revision"
+          revision_json="$(gcloud run revisions describe "$revision" \
+            --region "$GCP_REGION" \
+            --format=json)"
+          env_names="$(printf '%s' "$revision_json" | jq -r '.spec.containers[0].env[]?.name')"
           for name in DATABASE_URL CORS_ALLOWED_ORIGINS APP_SECRETS_JSON; do
             if ! printf '%s\n' "$env_names" | grep -qx "$name"; then
-              echo "Cloud Run service is missing env binding: $name" >&2
+              echo "Cloud Run revision is missing env binding: $name" >&2
               exit 1
             fi
           done
+          revision_cors="$(printf '%s' "$revision_json" | jq -r '.spec.containers[0].env[]? | select(.name == "CORS_ALLOWED_ORIGINS") | .value // ""')"
+          test "$revision_cors" = "https://caresetu-frontend.vercel.app"
 
   live-verify:
     name: live verify (reusable)
