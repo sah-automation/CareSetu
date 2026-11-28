@@ -46,3 +46,17 @@ jobs:
           print("settings.database_url is_localhost=", "@localhost:" in settings.database_url)
           print("settings.cors_allowed_origins=", settings.cors_allowed_origins)
           PY
+      - name: Describe serving revision
+        run: |
+          set -euo pipefail
+          revision="$(jq -r '.status.traffic[] | select(.percent == 100) | .revisionName' service.json | head -n1)"
+          echo "serving_revision=$revision"
+          gcloud run revisions describe "$revision" \
+            --region asia-south1 \
+            --format=json > revision.json
+          jq '{revision: .metadata.name, image: .spec.containers[0].image, env_names: [.spec.containers[0].env[]?.name]}' revision.json
+          db_url="$(jq -r '.spec.containers[0].env[]? | select(.name == "DATABASE_URL") | .value // ""' revision.json)"
+          echo "revision DATABASE_URL present=$(test -n "$db_url" && echo yes || echo no)"
+          echo "revision DATABASE_URL scheme=$(printf '%s' "$db_url" | cut -d: -f1)"
+          echo "revision DATABASE_URL is_localhost=$(printf '%s' "$db_url" | grep -q '@localhost:' && echo yes || echo no)"
+          echo "revision CORS_ALLOWED_ORIGINS=$(jq -r '.spec.containers[0].env[]? | select(.name == "CORS_ALLOWED_ORIGINS") | .value // "<missing>"' revision.json)"
