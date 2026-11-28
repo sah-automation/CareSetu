@@ -92,6 +92,8 @@ jobs:
           project_id: '${{ vars.GCP_PROJECT_ID }}'
       - name: assert SUPABASE_DATABASE_URL is set
         run: test -n "$DATABASE_URL"
+      - name: Stamp container image with release SHA
+        run: echo "$GITHUB_SHA" > apps/backend/BUILD_SHA
       - name: Build and deploy backend to Cloud Run
         run: |
           gcloud run deploy caresetu-backend \
