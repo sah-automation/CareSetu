@@ -10,6 +10,7 @@ jobs:
   describe:
     runs-on: ubuntu-latest
     steps:
+      - uses: 'actions/checkout@v4'
       - id: 'auth'
         uses: 'google-github-actions/auth@v2'
         with:
@@ -31,3 +32,17 @@ jobs:
           echo "CORS_ALLOWED_ORIGINS=$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "CORS_ALLOWED_ORIGINS") | .value // "<missing>"' service.json)"
           gcloud secrets versions access latest --secret=APP_SECRETS_JSON > secret.json
           jq '{key_count: (keys | length), has_database_url: (has("database_url")), database_url_is_localhost: ((.database_url // "") | contains("localhost")), cors_keys: [keys[] | select(test("cors"; "i"))]}' secret.json
+      - name: Resolve settings from live env
+        run: |
+          set -euo pipefail
+          export DATABASE_URL="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "DATABASE_URL") | .value // ""' service.json)"
+          export CORS_ALLOWED_ORIGINS="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "CORS_ALLOWED_ORIGINS") | .value // ""' service.json)"
+          export APP_SECRETS_JSON="$(cat secret.json)"
+          PYTHONPATH=apps/backend python - <<'PY'
+          from app.config import get_settings
+
+          settings = get_settings()
+          print("settings.database_url scheme=", settings.database_url.split(":", 1)[0])
+          print("settings.database_url is_localhost=", "@localhost:" in settings.database_url)
+          print("settings.cors_allowed_origins=", settings.cors_allowed_origins)
+          PY
