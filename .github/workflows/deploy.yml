@@ -109,6 +109,11 @@ jobs:
           gcloud run services update "$CLOUD_RUN_SERVICE" \
             --region "$GCP_REGION" \
             --update-env-vars "DEPLOY_STAMP=${GITHUB_SHA}"
+      - name: Route traffic to latest Cloud Run revision
+        run: |
+          gcloud run services update-traffic "$CLOUD_RUN_SERVICE" \
+            --region "$GCP_REGION" \
+            --to-latest
       - name: Assert Cloud Run env bindings
         run: |
           service_json="$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
