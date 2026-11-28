@@ -19,7 +19,15 @@ jobs:
           project_id: '${{ vars.GCP_PROJECT_ID }}'
       - name: Describe env bindings
         run: |
+          set -euo pipefail
           gcloud run services describe caresetu-backend \
             --region asia-south1 \
             --format=json > service.json
           jq '.spec.template.spec.containers[0].env[] | {name, hasValueFrom: (has("valueFrom")), hasValue: (has("value"))}' service.json
+          db_url="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "DATABASE_URL") | .value // ""' service.json)"
+          echo "DATABASE_URL present=$(test -n "$db_url" && echo yes || echo no)"
+          echo "DATABASE_URL scheme=$(printf '%s' "$db_url" | cut -d: -f1)"
+          echo "DATABASE_URL is_localhost=$(printf '%s' "$db_url" | grep -q '@localhost:' && echo yes || echo no)"
+          echo "CORS_ALLOWED_ORIGINS=$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "CORS_ALLOWED_ORIGINS") | .value // "<missing>"' service.json)"
+          gcloud secrets versions access latest --secret=APP_SECRETS_JSON > secret.json
+          jq '{key_count: (keys | length), has_database_url: (has("database_url")), database_url_is_localhost: ((.database_url // "") | contains("localhost")), cors_keys: [keys[] | select(test("cors"; "i"))]}' secret.json
